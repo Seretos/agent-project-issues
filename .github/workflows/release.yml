@@ -1,0 +1,177 @@
+name: release
+
+# Manual release flow:
+#   1. Trigger via Actions tab -> "Run workflow" -> enter version (e.g. 0.0.1)
+#      or via CLI: gh workflow run release.yml -f version=0.0.1
+#   2. Workflow stamps version into pyproject.toml + plugin.json (in CI only),
+#      builds the .exe, pushes an orphan release branch with install-ready
+#      files, creates the v{version} tag on that commit, and publishes a
+#      GitHub Release.
+#   3. The tag push triggers dispatch.yml on the release branch, which then
+#      notifies the agent-marketplace.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (semver, no leading v) e.g. 0.0.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate version is semver
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])."
+            exit 1
+          fi
+
+      - name: Fail if tag already exists
+        shell: bash
+        run: |
+          if gh api repos/${{ github.repository }}/git/refs/tags/v${{ inputs.version }} >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists. Delete it first or pick a new version."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Stamp version into pyproject.toml + plugin.json
+        shell: pwsh
+        run: |
+          $v = "${{ inputs.version }}"
+
+          $pyproject = Get-Content "pyproject.toml" -Raw
+          $pyproject = [regex]::Replace(
+            $pyproject,
+            '(?m)^(version\s*=\s*")[^"]*(")',
+            "`${1}$v`${2}"
+          )
+          Set-Content -Path "pyproject.toml" -Value $pyproject -NoNewline -Encoding UTF8
+
+          $manifest = Get-Content ".claude-plugin/plugin.json" -Raw
+          $manifest = [regex]::Replace(
+            $manifest,
+            '("version"\s*:\s*")[^"]*(")',
+            "`${1}$v`${2}"
+          )
+          Set-Content -Path ".claude-plugin/plugin.json" -Value $manifest -NoNewline -Encoding UTF8
+
+          Write-Host "Stamped version $v"
+
+      - name: Build .exe and stage package
+        shell: pwsh
+        run: ./scripts/build.ps1 -Clean -Package
+
+      - name: Push orphan release branch and capture commit
+        id: rel
+        shell: bash
+        run: |
+          STAGE="build/stage/project-issues-plugin"
+          ZIP="dist/project-issues-plugin-${{ inputs.version }}.zip"
+          if [ ! -d "$STAGE" ]; then
+            echo "::error::staging dir not produced by build.ps1 -Package"; exit 1
+          fi
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::release zip $ZIP not produced by build.ps1 -Package"
+            ls -la dist/ || true
+            exit 1
+          fi
+
+          # Stash staging tree AND the release zip outside the worktree, since
+          # "git checkout --orphan" + clean will wipe dist/ before we attach
+          # the zip to the GitHub Release.
+          TMP=$(mktemp -d)
+          cp -a "$STAGE"/. "$TMP/"
+          ASSET_DIR=$(mktemp -d)
+          cp "$ZIP" "$ASSET_DIR/"
+          echo "asset=$ASSET_DIR/$(basename "$ZIP")" >> "$GITHUB_OUTPUT"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout --orphan release
+          git rm -rf . > /dev/null 2>&1 || true
+          git clean -fdx > /dev/null 2>&1 || true
+
+          leftover=$(find . -mindepth 1 -maxdepth 1 -not -name '.git' || true)
+          if [ -n "$leftover" ]; then
+            echo "::error::working tree not empty after clean:"; echo "$leftover"; exit 1
+          fi
+
+          cp -a "$TMP"/. .
+
+          echo "=== release branch contents ==="
+          find . -mindepth 1 -not -path './.git*' | sort
+
+          git add -A
+          git commit -m "release: v${{ inputs.version }}"
+          git push origin release --force
+
+          SHA=$(git rev-parse HEAD)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      # Tag und Release in einem Schritt — gh release create setzt den Tag
+      # automatisch auf den angegebenen Target-Commit (sha) und publisht den
+      # Release. Das Tag-Push triggert dispatch.yml im selben Tag-Commit.
+      - name: Create tag and GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ steps.rel.outputs.sha }}" \
+            --title "v${{ inputs.version }}" \
+            --generate-notes \
+            ${{ contains(inputs.version, '-') && '--prerelease' || '' }} \
+            "${{ steps.rel.outputs.asset }}"
+
+      # The tag we just created via gh/GITHUB_TOKEN does NOT fire push:tags
+      # in dispatch.yml — Actions blocks GITHUB_TOKEN-originated events to
+      # prevent recursive workflow loops. So call the marketplace directly
+      # from here.
+      - name: Dispatch to agent-marketplace
+        shell: bash
+        env:
+          GH_PAT:  ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          DESC=$(jq -r '.description' .claude-plugin/plugin.json)
+          NAME=$(jq -r '.name'        .claude-plugin/plugin.json)
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Seretos/agent-marketplace/dispatches \
+            -d @- <<EOF
+          {
+            "event_type": "plugin-release",
+            "client_payload": {
+              "name":        "${NAME}",
+              "description": "${DESC}",
+              "repo":        "${{ github.repository }}",
+              "category":    "mcp",
+              "version":     "${VERSION}"
+            }
+          }
+          EOF

@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to dispatch (e.g. v0.0.1)"
+        description: "Release tag to dispatch (e.g. agent-project-issues--v0.0.1)"
         required: true
         type: string
 
@@ -23,7 +23,8 @@ jobs:
         shell: bash
         run: |
           TAG="${{ inputs.tag }}"
-          VERSION="${TAG#v}"
+          # New tag format: <plugin-name>--v<version>
+          VERSION="${TAG##*--v}"
           echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -58,6 +59,7 @@ jobs:
           NAME:    ${{ steps.meta.outputs.name }}
           DESC:    ${{ steps.meta.outputs.description }}
           VERSION: ${{ steps.tag.outputs.version }}
+          TAG:     ${{ steps.tag.outputs.tag }}
         shell: bash
         run: |
           curl -fsSL -X POST \
@@ -72,7 +74,8 @@ jobs:
               "description": "${DESC}",
               "repo":        "${{ github.repository }}",
               "category":    "mcp",
-              "version":     "${VERSION}"
+              "version":     "${VERSION}",
+              "ref":         "${TAG}"
             }
           }
           EOF

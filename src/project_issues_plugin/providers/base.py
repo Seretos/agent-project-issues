@@ -85,3 +85,46 @@ class TicketFilters:
     updated_before: str | None = None
     sort_by: SortBy = "created"
     sort_order: SortOrder = "desc"
+
+
+PRStatus = Literal["open", "closed", "merged"]
+PRListStatus = Literal["open", "closed", "any"]
+
+
+@dataclass
+class PullRequest:
+    """A pull-request snapshot mirroring `Ticket` but with PR-specific fields.
+
+    `id` is the PR number as a string (mirrors `Ticket.id` style).
+    `mergeable` is `None` when GitHub has not yet computed mergeability.
+    """
+
+    id: str
+    number: int
+    title: str
+    body: str
+    status: PRStatus
+    draft: bool
+    author: str
+    assignees: list[str]
+    reviewers: list[str]              # users who actually submitted a review
+    requested_reviewers: list[str]
+    labels: list[str]
+    head: dict                        # {"ref", "sha", "repo_full_name"}
+    base: dict                        # {"ref", "sha"}
+    merged: bool
+    mergeable: bool | None
+    url: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class PRFilters:
+    status: PRListStatus = "open"
+    labels: list[str] = field(default_factory=list)
+    assignee: str | None = None
+    head: str | None = None           # branch name (`feat/x`) or `owner:branch`
+    base: str | None = None
+    search: str | None = None
+    limit: int = 30

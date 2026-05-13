@@ -13,9 +13,12 @@ src/project_issues_plugin/      # Python source (src-layout)
     base.py                       # provider-agnostic Ticket/Comment dataclasses
     github.py                     # REST v3 implementation
   tools/
+    _providers.py                 # shared _PROVIDERS / _resolve / _safe / permission gates
     projects.py                   # list_projects / find_projects
     tickets.py                    # list/get/create/update_ticket, add_comment
     comments.py                   # list/get/update_comment
+    bulk.py                       # list_tickets_across_projects
+    pulls.py                      # list/get/create/update_pr, add_pr_comment, merge_pr
 
 tests/                          # pytest, runs on every push (test.yml)
 scripts/build.ps1               # PyInstaller wrapper + smoke test + optional packaging
@@ -96,9 +99,9 @@ The provider applies markers automatically; the agent must not pass them in argu
 ## Conventions
 
 - Tests live in `tests/` and use pytest. They cover deterministic logic (markers, config parsing). HTTP paths are tested manually against real providers.
-- GitLab is stubbed — `_PROVIDERS` in `tools/tickets.py` only registers GitHub. Auto-discovery emits gitlab projects but write paths fail with `NotImplementedError`.
-- Permission gating lives in `tools/tickets.py` (`_require_create`, `_require_modify`, `_require_token`). New write operations MUST go through these helpers.
-- `tools/comments.py` currently duplicates the `_PROVIDERS` / `_resolve` / `_safe` / `_require_modify` scaffolding from `tools/tickets.py`. A future refactor will lift the shared bits into `tools/_providers.py`; until then keep both copies in sync when touching either.
+- GitLab is stubbed — `_PROVIDERS` in `tools/_providers.py` only registers GitHub. Auto-discovery emits gitlab projects but write paths fail with `NotImplementedError`.
+- Permissions are split into nested namespaces (`permissions.issues` / `permissions.pulls`). The flat form (`{create, modify}` and the extended `{create, modify, pr_create, pr_modify}`) is auto-migrated on load with a single `DeprecationWarning`. `permissions.pulls.merge` is new — defaults to false and has no flat equivalent.
+- Permission gating lives in `tools/_providers.py` (`_require_token`, `_require_issues_create`, `_require_issues_modify`, `_require_pulls_create`, `_require_pulls_modify`, `_require_pulls_merge`). New write operations MUST go through these helpers.
 - The `dispatch.yml` workflow is a manual recovery tool only.
 
 ## What lives where (for cross-repo reasoning)

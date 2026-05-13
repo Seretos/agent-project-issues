@@ -16,6 +16,8 @@ from project_issues_plugin.markers import (
 )
 from project_issues_plugin.providers.base import (
     Comment,
+    PRFilters,
+    PullRequest,
     Relation,
     Status,
     Ticket,
@@ -98,6 +100,67 @@ def _map_comment(raw: dict) -> Comment:
         body=raw.get("body") or "",
         url=raw.get("html_url") or "",
         created_at=raw.get("created_at") or "",
+    )
+
+
+def _map_pr(raw: dict) -> PullRequest:
+    """Translate a GitHub pull-request payload into a `PullRequest`.
+
+    Handles two payload shapes:
+      - `GET /repos/{o}/{r}/pulls/{n}` — full PR object with `head`/`base`,
+        `merged`, `mergeable`, `draft`, `requested_reviewers`, etc.
+      - `GET /search/issues` items where `pull_request` is a small stub
+        and the top-level fields look like an issue. For that shape the
+        body/head/base/draft/merged fields aren't all present; we fall
+        back to safe defaults so the dataclass is always constructable.
+    """
+    state = raw.get("state", "open")
+    merged = bool(raw.get("merged") or raw.get("merged_at"))
+    if state == "open":
+        status: str = "open"
+    elif merged:
+        status = "merged"
+    else:
+        status = "closed"
+
+    # Some payloads (notably `/search/issues` PR results) lack the full
+    # `head` / `base` blocks — coerce to safe empty refs so the dataclass
+    # is always populated with the documented keys.
+    head_raw = raw.get("head") or {}
+    base_raw = raw.get("base") or {}
+    head_repo = (head_raw.get("repo") or {}) if head_raw else {}
+    head = {
+        "ref": head_raw.get("ref", "") if head_raw else "",
+        "sha": head_raw.get("sha", "") if head_raw else "",
+        "repo_full_name": head_repo.get("full_name", "") if head_repo else "",
+    }
+    base = {
+        "ref": base_raw.get("ref", "") if base_raw else "",
+        "sha": base_raw.get("sha", "") if base_raw else "",
+    }
+
+    number = raw.get("number") or 0
+    return PullRequest(
+        id=str(number),
+        number=int(number),
+        title=raw.get("title") or "",
+        body=raw.get("body") or "",
+        status=status,  # type: ignore[arg-type]
+        draft=bool(raw.get("draft", False)),
+        author=(raw.get("user") or {}).get("login", ""),
+        assignees=[a["login"] for a in (raw.get("assignees") or [])],
+        reviewers=[],  # populated by a follow-up /reviews call when needed
+        requested_reviewers=[
+            r["login"] for r in (raw.get("requested_reviewers") or [])
+        ],
+        labels=[lbl["name"] for lbl in (raw.get("labels") or [])],
+        head=head,
+        base=base,
+        merged=merged,
+        mergeable=raw.get("mergeable"),  # may be None when GitHub hasn't computed
+        url=raw.get("html_url") or "",
+        created_at=raw.get("created_at") or "",
+        updated_at=raw.get("updated_at") or "",
     )
 
 
@@ -602,3 +665,295 @@ class GitHubProvider:
             )
             _check(r)
             return _map_comment(r.json())
+
+    # ---------- pull requests ------------------------------------------------
+
+    def list_prs(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        filters: PRFilters,
+    ) -> list[PullRequest]:
+        """List pull requests for a project.
+
+        Routing mirrors `list_tickets`: when `labels`, `assignee`, or
+        `search` are set, switch from the cheap `/pulls` endpoint to
+        `/search/issues` with `is:pr` so the additional filters can be
+        expressed as Search qualifiers. The `head`/`base` filters work on
+        both paths (Search via the `head:`/`base:` qualifiers).
+        """
+        per_page = min(max(1, filters.limit), 100)
+        use_search = bool(
+            filters.labels or filters.assignee or filters.search
+        )
+        with _client(token) as client:
+            if use_search:
+                qual_parts: list[str] = [
+                    "is:pr",
+                    f"repo:{project.owner}/{project.repo}",
+                ]
+                if filters.status in ("open", "closed"):
+                    qual_parts.append(f"state:{filters.status}")
+                if filters.assignee:
+                    qual_parts.append(f"assignee:{filters.assignee}")
+                for lbl in filters.labels:
+                    qual_parts.append(f"label:{_quote_label(lbl)}")
+                if filters.head:
+                    qual_parts.append(f"head:{filters.head}")
+                if filters.base:
+                    qual_parts.append(f"base:{filters.base}")
+                pieces = [filters.search] if filters.search else []
+                pieces.extend(qual_parts)
+                q = " ".join(pieces)
+                r = client.get("/search/issues", params={"q": q, "per_page": per_page})
+                _check(r)
+                items = r.json().get("items", [])
+            else:
+                params: dict[str, Any] = {
+                    "per_page": per_page,
+                    "state": (
+                        filters.status if filters.status in ("open", "closed") else "all"
+                    ),
+                    "sort": "created",
+                    "direction": "desc",
+                }
+                if filters.head:
+                    params["head"] = filters.head
+                if filters.base:
+                    params["base"] = filters.base
+                r = client.get(f"{_repo_path(project)}/pulls", params=params)
+                _check(r)
+                items = r.json()
+        return [_map_pr(it) for it in items]
+
+    def get_pr(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+    ) -> tuple[PullRequest, list[Comment]]:
+        """Fetch a single PR plus its issue-style comments.
+
+        Returns `(pr, comments)`. Code-review threads live on a different
+        endpoint (`/pulls/{n}/comments`) and aren't merged in here — the
+        plan scopes PR comments to the issue-shared `/issues/{n}/comments`
+        endpoint, which is what `add_pr_comment` posts to.
+        """
+        with _client(token) as client:
+            r = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
+            _check(r)
+            pr = _map_pr(r.json())
+            c = client.get(
+                f"{_repo_path(project)}/issues/{pr_id}/comments",
+                params={"per_page": 100},
+            )
+            _check(c)
+            comments = [_map_comment(it) for it in c.json()]
+        return pr, comments
+
+    def create_pr(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+        draft: bool = False,
+        labels: list[str] | None = None,
+        assignees: list[str] | None = None,
+    ) -> PullRequest:
+        """Create a pull request, applying the AI-generated label.
+
+        Labels and assignees are applied in follow-up `POST /issues/{n}/...`
+        calls because the `POST /pulls` endpoint doesn't accept them
+        inline. We deduplicate `labels` while ensuring `ai-generated` is
+        included, mirroring `create_ticket`.
+        """
+        merged_labels = list(dict.fromkeys([*(labels or []), AI_GENERATED_LABEL]))
+        with _client(token) as client:
+            _ensure_label(client, project, AI_GENERATED_LABEL)
+            payload: dict[str, Any] = {
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+                "draft": draft,
+            }
+            r = client.post(f"{_repo_path(project)}/pulls", json=payload)
+            _check(r)
+            pr_raw = r.json()
+            pr_number = pr_raw["number"]
+            # Apply labels via the issues endpoint (PRs share it).
+            lbl_resp = client.post(
+                f"{_repo_path(project)}/issues/{pr_number}/labels",
+                json={"labels": merged_labels},
+            )
+            _check(lbl_resp)
+            # Reflect the new labels back into the PR payload so the
+            # returned dataclass advertises them.
+            pr_raw["labels"] = lbl_resp.json()
+            if assignees:
+                a_resp = client.post(
+                    f"{_repo_path(project)}/issues/{pr_number}/assignees",
+                    json={"assignees": assignees},
+                )
+                _check(a_resp)
+                # The /assignees endpoint returns the issue payload with
+                # the updated assignee list; mirror it.
+                pr_raw["assignees"] = a_resp.json().get("assignees") or []
+            return _map_pr(pr_raw)
+
+    def update_pr(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        status: str | None = None,
+        base: str | None = None,
+        labels_add: list[str] | None = None,
+        labels_remove: list[str] | None = None,
+        assignees_add: list[str] | None = None,
+        assignees_remove: list[str] | None = None,
+    ) -> PullRequest:
+        """Update a PR's title/body/state/base, plus label/assignee deltas.
+
+        `status` accepts `"open"` or `"closed"` only. To merge a PR call
+        `merge_pr` — `status="merged"` is rejected by the tool layer.
+
+        Applies the `ai-modified` label (mirroring `update_ticket`) when
+        the PR wasn't originally created by us.
+        """
+        with _client(token) as client:
+            r0 = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
+            _check(r0)
+            current = r0.json()
+            current_labels = {lbl["name"] for lbl in (current.get("labels") or [])}
+            current_assignees = {a["login"] for a in (current.get("assignees") or [])}
+
+            new_labels = set(current_labels)
+            if labels_add:
+                new_labels.update(labels_add)
+            if labels_remove:
+                new_labels.difference_update(labels_remove)
+            if AI_GENERATED_LABEL not in current_labels:
+                if AI_MODIFIED_LABEL not in new_labels:
+                    _ensure_label(client, project, AI_MODIFIED_LABEL)
+                new_labels.add(AI_MODIFIED_LABEL)
+
+            new_assignees = set(current_assignees)
+            if assignees_add:
+                new_assignees.update(assignees_add)
+            if assignees_remove:
+                new_assignees.difference_update(assignees_remove)
+
+            payload: dict[str, Any] = {}
+            if title is not None:
+                payload["title"] = title
+            if body is not None:
+                payload["body"] = body
+            if status is not None:
+                # The tool layer already restricts `status` to open/closed;
+                # accept those here and ignore anything else (the layer
+                # raised before us when the value was "merged").
+                if status in ("open", "closed"):
+                    payload["state"] = status
+            if base is not None:
+                payload["base"] = base
+
+            # PATCH /pulls only takes pull-request scoped fields; labels
+            # and assignees are managed via the issues endpoint.
+            if payload:
+                pr_resp = client.patch(
+                    f"{_repo_path(project)}/pulls/{pr_id}", json=payload
+                )
+                _check(pr_resp)
+                current = pr_resp.json()
+
+            if new_labels != current_labels:
+                lbl_resp = client.put(
+                    f"{_repo_path(project)}/issues/{pr_id}/labels",
+                    json={"labels": sorted(new_labels)},
+                )
+                _check(lbl_resp)
+                current["labels"] = lbl_resp.json()
+
+            if new_assignees != current_assignees:
+                # `assignees_add`/`remove` map to two separate endpoints.
+                to_add = new_assignees - current_assignees
+                to_remove = current_assignees - new_assignees
+                if to_add:
+                    a_resp = client.post(
+                        f"{_repo_path(project)}/issues/{pr_id}/assignees",
+                        json={"assignees": sorted(to_add)},
+                    )
+                    _check(a_resp)
+                if to_remove:
+                    a_resp = client.request(
+                        "DELETE",
+                        f"{_repo_path(project)}/issues/{pr_id}/assignees",
+                        json={"assignees": sorted(to_remove)},
+                    )
+                    _check(a_resp)
+                # Re-fetch so the returned PR reflects the final state.
+                r_final = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
+                _check(r_final)
+                current = r_final.json()
+
+            return _map_pr(current)
+
+    def add_pr_comment(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        body: str,
+    ) -> Comment:
+        """Add a discussion comment to a PR (NOT a code-review comment).
+
+        Uses the shared `/issues/{n}/comments` endpoint; the AI-marker
+        prefix is applied via `ensure_comment_prefix`.
+        """
+        prefixed = ensure_comment_prefix(body)
+        with _client(token) as client:
+            r = client.post(
+                f"{_repo_path(project)}/issues/{pr_id}/comments",
+                json={"body": prefixed},
+            )
+            _check(r)
+            return _map_comment(r.json())
+
+    def merge_pr(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        merge_method: str = "merge",
+        commit_title: str | None = None,
+        commit_message: str | None = None,
+    ) -> PullRequest:
+        """Merge a PR. `merge_method` is one of "merge", "squash", "rebase".
+
+        Translates the GitHub merge-not-allowed 405 into a `GitHubError`
+        via `_check`. After the merge succeeds, re-fetches the PR so the
+        returned dataclass advertises the merged state.
+        """
+        if merge_method not in ("merge", "squash", "rebase"):
+            raise GitHubError(400, f"invalid merge_method '{merge_method}'")
+        payload: dict[str, Any] = {"merge_method": merge_method}
+        if commit_title is not None:
+            payload["commit_title"] = commit_title
+        if commit_message is not None:
+            payload["commit_message"] = commit_message
+        with _client(token) as client:
+            r = client.put(
+                f"{_repo_path(project)}/pulls/{pr_id}/merge", json=payload
+            )
+            _check(r)
+            # Re-fetch so the response carries the merged state/timestamp.
+            r2 = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
+            _check(r2)
+            return _map_pr(r2.json())

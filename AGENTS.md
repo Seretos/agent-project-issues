@@ -15,6 +15,7 @@ src/project_issues_plugin/      # Python source (src-layout)
   tools/
     projects.py                   # list_projects / find_projects
     tickets.py                    # list/get/create/update_ticket, add_comment
+    comments.py                   # list/get/update_comment
 
 tests/                          # pytest, runs on every push (test.yml)
 scripts/build.ps1               # PyInstaller wrapper + smoke test + optional packaging
@@ -97,6 +98,7 @@ The provider applies markers automatically; the agent must not pass them in argu
 - Tests live in `tests/` and use pytest. They cover deterministic logic (markers, config parsing). HTTP paths are tested manually against real providers.
 - GitLab is stubbed — `_PROVIDERS` in `tools/tickets.py` only registers GitHub. Auto-discovery emits gitlab projects but write paths fail with `NotImplementedError`.
 - Permission gating lives in `tools/tickets.py` (`_require_create`, `_require_modify`, `_require_token`). New write operations MUST go through these helpers.
+- `tools/comments.py` currently duplicates the `_PROVIDERS` / `_resolve` / `_safe` / `_require_modify` scaffolding from `tools/tickets.py`. A future refactor will lift the shared bits into `tools/_providers.py`; until then keep both copies in sync when touching either.
 - The `dispatch.yml` workflow is a manual recovery tool only.
 
 ## What lives where (for cross-repo reasoning)

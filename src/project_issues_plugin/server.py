@@ -26,8 +26,13 @@ def main() -> None:
         sys.version.split()[0],
     )
 
-    from .tools import projects as project_tools, tickets as ticket_tools
+    from .tools import (
+        projects as project_tools,
+        tickets as ticket_tools,
+        comments as comment_tools,
+    )
     project_tools.register(mcp)
     ticket_tools.register(mcp)
+    comment_tools.register(mcp)
 
     mcp.run()

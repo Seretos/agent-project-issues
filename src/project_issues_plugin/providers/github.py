@@ -544,3 +544,61 @@ class GitHubProvider:
             )
             _check(r)
             return _map_comment(r.json())
+
+    def list_comments(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        limit: int = 30,
+    ) -> list[Comment]:
+        """List comments on a ticket (most recent up to `limit`, capped at 100)."""
+        per_page = min(max(1, limit), 100)
+        with _client(token) as client:
+            r = client.get(
+                f"{_repo_path(project)}/issues/{ticket_id}/comments",
+                params={"per_page": per_page},
+            )
+            _check(r)
+            return [_map_comment(it) for it in r.json()]
+
+    def get_comment(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        comment_id: str,
+    ) -> Comment:
+        """Fetch a single comment by its repo-wide comment id."""
+        with _client(token) as client:
+            r = client.get(
+                f"{_repo_path(project)}/issues/comments/{comment_id}",
+            )
+            _check(r)
+            return _map_comment(r.json())
+
+    def update_comment(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        comment_id: str,
+        body: str,
+    ) -> Comment:
+        """Update a comment's body. Always re-applies the AI-marker prefix.
+
+        Behavior chosen here (matches the plan's "conservative" option):
+        any update we issue runs the new body through `ensure_comment_prefix`,
+        so any AI edit is unambiguously labelled. If the existing comment
+        body didn't carry an `#ai-generated` marker, the prefix is added —
+        this mirrors `update_ticket`, which adds the `ai-modified` label when
+        the ticket wasn't originally AI-created. (A future variant could emit
+        a distinct `#ai-modified` prefix; we keep the single `#ai-generated`
+        marker for now to avoid introducing a new convention mid-plan.)
+        """
+        prefixed = ensure_comment_prefix(body)
+        with _client(token) as client:
+            r = client.patch(
+                f"{_repo_path(project)}/issues/comments/{comment_id}",
+                json={"body": prefixed},
+            )
+            _check(r)
+            return _map_comment(r.json())

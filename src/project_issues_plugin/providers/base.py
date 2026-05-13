@@ -31,6 +31,41 @@ class Comment:
     created_at: str
 
 
+RelationKind = Literal[
+    "parent",
+    "child",
+    "closes",
+    "closed_by",
+    "duplicate_of",
+    "duplicated_by",
+    "mentions",
+    "mentioned_by",
+    # Reserved for GitLab; not currently emitted by GitHub.
+    "relates_to",
+    "blocks",
+    "blocked_by",
+]
+
+
+@dataclass
+class Relation:
+    """A typed link between this ticket and another ticket / PR.
+
+    `ticket_id` is `"#N"` for references within the same repository and
+    `"owner/repo#N"` for cross-repo references. `state` is `"open"`,
+    `"closed"`, `"merged"`, or `""` when the provider didn't report one.
+    `is_pull_request` is true when the other side is a PR/MR. `title`
+    is best-effort and may be empty if the provider didn't return it.
+    """
+
+    kind: str
+    ticket_id: str
+    title: str
+    url: str
+    state: str
+    is_pull_request: bool
+
+
 @dataclass
 class TicketFilters:
     status: ListStatus = "open"

@@ -115,17 +115,40 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
-    def get_ticket(project_id: str, ticket_id: str) -> dict:
-        """Get a ticket's full details, including all comments."""
+    def get_ticket(
+        project_id: str,
+        ticket_id: str,
+        include_relations: bool = True,
+    ) -> dict:
+        """Get a ticket's full details, including all comments and relations.
+
+        When `include_relations` is True (default), the response also
+        includes a `relations` list describing typed links to other
+        tickets / PRs. Relation kinds: `parent`, `child`, `closes`,
+        `closed_by`, `duplicate_of`, `duplicated_by`, `mentions`,
+        `mentioned_by` (GitHub) plus `relates_to`, `blocks`,
+        `blocked_by` (GitLab, reserved). Each relation carries
+        `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo),
+        best-effort `title`, `url`, `state`
+        (`"open"`/`"closed"`/`"merged"`/`""`), and `is_pull_request`.
+        The boolean `relations_truncated` is true when the underlying
+        timeline had more pages than we fetched.
+        Set `include_relations=False` to save two API calls per request
+        when relation context is not needed.
+        """
         def go() -> dict:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            ticket, comments = provider.get_ticket(project, token, ticket_id)
+            ticket, comments, relations, truncated = provider.get_ticket(
+                project, token, ticket_id, include_relations=include_relations,
+            )
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
                 "comments": [asdict(c) for c in comments],
+                "relations": [asdict(rel) for rel in relations],
+                "relations_truncated": truncated,
             }
         return _safe(go)
 

@@ -16,6 +16,7 @@ from project_issues_plugin.markers import (
 )
 from project_issues_plugin.providers.base import (
     Comment,
+    Relation,
     Status,
     Ticket,
     TicketFilters,
@@ -100,6 +101,186 @@ def _map_comment(raw: dict) -> Comment:
     )
 
 
+def _issue_state(raw: dict) -> str:
+    """Translate a GitHub issue/PR payload to one of "open"/"closed"/"merged"/""."""
+    state = raw.get("state")
+    if state == "open":
+        return "open"
+    if state == "closed":
+        # PRs report `merged` separately; if the source was a merged PR,
+        # `merged_at` is non-null. Some endpoints also include `pull_request.merged_at`.
+        pr_info = raw.get("pull_request") or {}
+        if raw.get("merged_at") or pr_info.get("merged_at"):
+            return "merged"
+        return "closed"
+    return ""
+
+
+def _ref_for(issue_raw: dict, project: ProjectConfig) -> tuple[str, bool]:
+    """Build a `ticket_id` string and detect whether the referenced item is a PR.
+
+    Returns ("#N", is_pr) for same-repo refs and ("owner/repo#N", is_pr)
+    for cross-repo refs. Falls back to URL parsing when `repository` is
+    absent from the payload.
+    """
+    number = issue_raw.get("number")
+    is_pr = bool(issue_raw.get("pull_request"))
+    repo = issue_raw.get("repository") or {}
+    full_name = repo.get("full_name")
+    if not full_name:
+        # Older payloads omit `repository`; derive from the html/api url.
+        url = issue_raw.get("html_url") or issue_raw.get("url") or ""
+        # html_url: https://github.com/owner/repo/(issues|pull)/N
+        # api url:  https://api.github.com/repos/owner/repo/issues/N
+        parts = url.replace("https://api.github.com/repos/", "").replace(
+            "https://github.com/", ""
+        ).split("/")
+        if len(parts) >= 2:
+            full_name = f"{parts[0]}/{parts[1]}"
+    same_repo = full_name == f"{project.owner}/{project.repo}"
+    if same_repo or not full_name:
+        return f"#{number}", is_pr
+    return f"{full_name}#{number}", is_pr
+
+
+def _map_relation_from_sub_issue(raw: dict, project: ProjectConfig, kind: str) -> Relation:
+    """Map a sub-issue (or the issue's own `parent` field) into a Relation."""
+    ticket_id, is_pr = _ref_for(raw, project)
+    return Relation(
+        kind=kind,
+        ticket_id=ticket_id,
+        title=raw.get("title") or "",
+        url=raw.get("html_url") or "",
+        state=_issue_state(raw),
+        is_pull_request=is_pr,
+    )
+
+
+def _map_relation_from_timeline(
+    event: dict, project: ProjectConfig, *, self_id: str
+) -> Relation | None:
+    """Map a GitHub timeline event to a Relation, or None if not relevant.
+
+    Handles three timeline event types:
+      - cross-referenced (`mentions` / `mentioned_by`)
+      - connected (`closes` / `closed_by`)
+      - marked_as_duplicate (`duplicate_of` / `duplicated_by`)
+    """
+    etype = event.get("event")
+    if etype == "cross-referenced":
+        source = (event.get("source") or {}).get("issue")
+        if not source:
+            return None
+        # The cross-reference direction: GitHub records the event on the
+        # side that was mentioned; `source.issue` is the OTHER side that
+        # did the mentioning. So from the current ticket's POV we were
+        # `mentioned_by` source.
+        return _map_relation_from_sub_issue(source, project, "mentioned_by")
+    if etype == "connected" or etype == "disconnected":
+        # `connected`: another issue/PR linked itself as closing this one.
+        # The `source.issue` is the closer. Direction: we are `closed_by` it.
+        source = (event.get("source") or {}).get("issue")
+        if not source:
+            return None
+        if etype == "disconnected":
+            # A previously-connected ref was removed; skip it.
+            return None
+        return _map_relation_from_sub_issue(source, project, "closed_by")
+    if etype == "marked_as_duplicate":
+        # Recorded on both sides. `source.issue` is the OTHER side; the
+        # event itself doesn't disclose which side is canonical, so we
+        # report `duplicate_of` from this ticket's POV when the source
+        # is the canonical, and `duplicated_by` when the source is the dup.
+        # The GitHub payload exposes `source.type` == "issue" plus
+        # `event.actor` etc, but not the direction explicitly. Convention:
+        # the side that was MARKED as duplicate gets `duplicate_of` →
+        # source.issue. The canonical side gets `duplicated_by` → source.
+        # The `event` payload's `source.issue.state` helps but isn't
+        # reliable; we use the convention that the timeline of the
+        # "duplicate" issue contains a marked_as_duplicate event whose
+        # `dupe.issue` is THIS issue. GitHub returns either a `dupe` or
+        # `canonical` field on the event itself.
+        dupe = event.get("dupe") or {}
+        canonical = event.get("canonical") or {}
+        # Pull whichever side is NOT self.
+        dupe_id = str(dupe.get("number", "")) if dupe else ""
+        canonical_id = str(canonical.get("number", "")) if canonical else ""
+        if canonical and canonical_id != self_id:
+            return _map_relation_from_sub_issue(canonical, project, "duplicate_of")
+        if dupe and dupe_id != self_id:
+            return _map_relation_from_sub_issue(dupe, project, "duplicated_by")
+        # Fall back to source.issue if `dupe`/`canonical` are absent.
+        source = (event.get("source") or {}).get("issue")
+        if source:
+            return _map_relation_from_sub_issue(source, project, "duplicate_of")
+        return None
+    return None
+
+
+def _has_next_link(link_header: str | None) -> bool:
+    """Detect whether an HTTP `Link` header advertises a `rel="next"` page."""
+    if not link_header:
+        return False
+    # The header is comma-separated; each entry looks like:
+    #   <https://api.github.com/...?page=2>; rel="next"
+    for part in link_header.split(","):
+        if 'rel="next"' in part.replace("'", '"'):
+            return True
+    return False
+
+
+def _fetch_relations(
+    client: httpx.Client,
+    project: ProjectConfig,
+    ticket_id: str,
+    issue_payload: dict,
+) -> tuple[list[Relation], bool]:
+    """Collect all relation links for a ticket. Returns (relations, truncated).
+
+    `truncated` is True when the timeline response advertised a `rel="next"`
+    page that we didn't follow (caller can re-query with pagination if
+    they care about completeness).
+    """
+    relations: list[Relation] = []
+    truncated = False
+
+    # parent (from primary issue payload, if the sub-issue API is enabled)
+    parent = issue_payload.get("parent")
+    if parent:
+        relations.append(
+            _map_relation_from_sub_issue(parent, project, "parent")
+        )
+
+    # children via /sub_issues; 404/410 means feature not available on this host
+    sub_r = client.get(
+        f"{_repo_path(project)}/issues/{ticket_id}/sub_issues",
+        params={"per_page": 100},
+    )
+    if sub_r.status_code in (404, 410):
+        pass
+    else:
+        _check(sub_r)
+        for sub in sub_r.json() or []:
+            relations.append(
+                _map_relation_from_sub_issue(sub, project, "child")
+            )
+
+    # timeline for cross-referenced / connected / marked_as_duplicate
+    tl_r = client.get(
+        f"{_repo_path(project)}/issues/{ticket_id}/timeline",
+        params={"per_page": 100},
+        headers={"Accept": "application/vnd.github+json"},
+    )
+    _check(tl_r)
+    truncated = _has_next_link(tl_r.headers.get("Link"))
+    for event in tl_r.json() or []:
+        mapped = _map_relation_from_timeline(event, project, self_id=str(ticket_id))
+        if mapped is not None:
+            relations.append(mapped)
+
+    return relations, truncated
+
+
 def _ensure_label(client: httpx.Client, project: ProjectConfig, name: str) -> None:
     """Create the label if it doesn't exist. Idempotent — label-create failures
     are not fatal; we log and continue (the issue will be tagged with whatever
@@ -164,18 +345,33 @@ class GitHubProvider:
         project: ProjectConfig,
         token: str | None,
         ticket_id: str,
-    ) -> tuple[Ticket, list[Comment]]:
+        *,
+        include_relations: bool = True,
+    ) -> tuple[Ticket, list[Comment], list[Relation], bool]:
+        """Fetch a single ticket with its comments and (optionally) relations.
+
+        Returns `(ticket, comments, relations, relations_truncated)`.
+        When `include_relations` is False, returns `([], False)` for the
+        relation fields and skips the extra API calls.
+        """
         with _client(token) as client:
             r = client.get(f"{_repo_path(project)}/issues/{ticket_id}")
             _check(r)
-            ticket = _map_issue(r.json())
+            issue_raw = r.json()
+            ticket = _map_issue(issue_raw)
             c = client.get(
                 f"{_repo_path(project)}/issues/{ticket_id}/comments",
                 params={"per_page": 100},
             )
             _check(c)
             comments = [_map_comment(it) for it in c.json()]
-        return ticket, comments
+            if include_relations:
+                relations, truncated = _fetch_relations(
+                    client, project, ticket_id, issue_raw
+                )
+            else:
+                relations, truncated = [], False
+        return ticket, comments, relations, truncated
 
     def create_ticket(
         self,

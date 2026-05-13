@@ -67,3 +67,4 @@ py -3 -m pip install -e ".[build]"
 ## Notes
 - GitLab support is stubbed today (`tools/tickets.py` only resolves `github`). Extending it means implementing a `GitLabProvider`.
 - AI-marker labels (`ai-generated`, `ai-modified`, `ai-closed-not-planned`) are created lazily on first write to a repo.
+- `get_ticket` returns typed `relations` (parent / child / closes / closed_by / duplicate_of / duplicated_by / mentions / mentioned_by) alongside the ticket and comments. Cross-repo refs are formatted as `owner/repo#N`. Pass `include_relations=false` to skip the two extra API calls when relation context isn't needed; `relations_truncated=true` signals that the timeline had more pages than were fetched.

@@ -16,6 +16,9 @@ from project_issues_plugin.markers import (
 )
 from project_issues_plugin.providers.base import (
     Comment,
+    FailingJob,
+    PipelineFailure,
+    PipelineRun,
     PRFilters,
     PullRequest,
     Relation,
@@ -957,3 +960,462 @@ class GitHubProvider:
             r2 = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
             _check(r2)
             return _map_pr(r2.json())
+
+    # ---------- pipelines / CI runs -----------------------------------------
+
+    def list_runs_for_branch(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        branch: str,
+        status: str = "all",
+        limit: int = 10,
+    ) -> list[PipelineRun]:
+        """List Actions workflow runs filtered by branch."""
+        with _client(token) as client:
+            runs = _list_runs_for_branch(client, project, branch, status, limit)
+            return [_map_run(r) for r in runs]
+
+    def list_runs_for_commit(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        sha: str,
+        status: str = "all",
+        limit: int = 10,
+    ) -> list[PipelineRun]:
+        """List runs whose `head_sha` matches `sha`."""
+        with _client(token) as client:
+            runs = _list_runs_for_commit(client, project, sha, status, limit)
+            return [_map_run(r) for r in runs]
+
+    def list_runs_for_tag(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        tag: str,
+        status: str = "all",
+        limit: int = 10,
+    ) -> tuple[list[PipelineRun], list[str]]:
+        """Resolve `tag` -> commit SHA -> runs filtered by head_sha.
+
+        Returns `(runs, resolved_refs)` where `resolved_refs` lists the
+        single SHA we resolved to (handy for telling the caller which
+        commit was actually queried).
+        """
+        with _client(token) as client:
+            sha = _resolve_tag_sha(client, project, tag)
+            if not sha:
+                return [], []
+            runs = _list_runs_for_commit(client, project, sha, status, limit)
+            return [_map_run(r) for r in runs], [sha]
+
+    def list_runs_for_ticket(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        status: str = "all",
+        limit: int = 10,
+    ) -> tuple[list[PipelineRun], list[str]]:
+        """Resolve a ticket -> linked PR head_shas -> runs.
+
+        Returns `(runs, resolved_refs)`. `resolved_refs` is the de-duped
+        list of head_shas we queried. When the ticket has no linked PR
+        or branch reference, both lists are empty (the tool layer turns
+        this into a `hint`).
+        """
+        with _client(token) as client:
+            shas = _resolved_refs_for_ticket(client, project, ticket_id)
+            if not shas:
+                return [], []
+            # Aggregate by run id so multiple SHAs that share a run don't
+            # produce duplicates.
+            by_id: dict[str, dict] = {}
+            for sha in shas:
+                for r in _list_runs_for_commit(
+                    client, project, sha, status, limit
+                ):
+                    rid = str(r.get("id", ""))
+                    if rid and rid not in by_id:
+                        by_id[rid] = r
+            # Sort by created_at desc and cap to `limit`.
+            raws = sorted(
+                by_id.values(),
+                key=lambda r: r.get("created_at", ""),
+                reverse=True,
+            )[:limit]
+            return [_map_run(r) for r in raws], shas
+
+    def get_run(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        run_id: str,
+        include_failure_excerpt: bool = True,
+    ) -> PipelineRun:
+        """Fetch a single workflow run, optionally with failure context.
+
+        When `include_failure_excerpt` is True AND the run concluded as
+        failed, populates `run.failure` with per-failing-job annotations
+        and a small log excerpt. In-progress runs (`conclusion=None`)
+        never trigger the failure-context fetch.
+        """
+        with _client(token) as client:
+            r = client.get(
+                f"{_repo_path(project)}/actions/runs/{run_id}"
+            )
+            _check(r)
+            raw = r.json()
+            run = _map_run(raw)
+            if (
+                include_failure_excerpt
+                and run.conclusion == "failure"
+                and run.status == "completed"
+            ):
+                run.failure = _get_failure_excerpt(client, project, token, run_id)
+            return run
+
+
+# ---------- pipeline helpers (module-level so providers can reuse) ----------
+
+
+_RUN_STATUS_FILTERS = {"queued", "in_progress", "completed"}
+
+
+def _map_run(raw: dict) -> PipelineRun:
+    """Translate a GitHub `workflow_run` payload into a `PipelineRun`."""
+    return PipelineRun(
+        id=str(raw.get("id", "")),
+        name=raw.get("name") or raw.get("display_title") or "",
+        branch=raw.get("head_branch") or "",
+        head_sha=raw.get("head_sha") or "",
+        event=raw.get("event") or "",
+        status=raw.get("status") or "",
+        conclusion=raw.get("conclusion"),
+        url=raw.get("html_url") or "",
+        created_at=raw.get("created_at") or "",
+        updated_at=raw.get("updated_at") or "",
+        run_attempt=int(raw.get("run_attempt") or 1),
+    )
+
+
+def _runs_params(status: str, limit: int) -> dict[str, Any]:
+    per_page = min(max(1, limit), 100)
+    params: dict[str, Any] = {"per_page": per_page}
+    if status and status != "all" and status in _RUN_STATUS_FILTERS:
+        params["status"] = status
+    return params
+
+
+def _list_runs_for_branch(
+    client: httpx.Client,
+    project: ProjectConfig,
+    branch: str,
+    status: str,
+    limit: int,
+) -> list[dict]:
+    params = _runs_params(status, limit)
+    params["branch"] = branch
+    r = client.get(f"{_repo_path(project)}/actions/runs", params=params)
+    _check(r)
+    return (r.json() or {}).get("workflow_runs", [])
+
+
+def _list_runs_for_commit(
+    client: httpx.Client,
+    project: ProjectConfig,
+    sha: str,
+    status: str,
+    limit: int,
+) -> list[dict]:
+    params = _runs_params(status, limit)
+    params["head_sha"] = sha
+    r = client.get(f"{_repo_path(project)}/actions/runs", params=params)
+    _check(r)
+    return (r.json() or {}).get("workflow_runs", [])
+
+
+def _resolve_tag_sha(
+    client: httpx.Client,
+    project: ProjectConfig,
+    tag: str,
+) -> str | None:
+    """Resolve a tag name to a commit SHA.
+
+    Annotated tags point at a `tag` object whose `object.sha` is the
+    commit; lightweight tags point directly at the commit. Both shapes
+    use `object.sha` on the ref response — GitHub doesn't dereference
+    annotated tags through this endpoint, so for annotated tags we
+    follow the second hop via `/git/tags/{sha}`.
+    """
+    r = client.get(f"{_repo_path(project)}/git/refs/tags/{tag}")
+    if r.status_code in (404, 422):
+        return None
+    _check(r)
+    obj = (r.json() or {}).get("object") or {}
+    sha = obj.get("sha")
+    if not sha:
+        return None
+    if obj.get("type") == "tag":
+        # Annotated tag — follow the second hop.
+        r2 = client.get(f"{_repo_path(project)}/git/tags/{sha}")
+        if r2.status_code in (404, 422):
+            return sha
+        _check(r2)
+        inner = (r2.json() or {}).get("object") or {}
+        return inner.get("sha") or sha
+    return sha
+
+
+_BRANCH_HINT_RE = None  # set lazily below
+
+
+def _resolved_refs_for_ticket(
+    client: httpx.Client,
+    project: ProjectConfig,
+    ticket_id: str,
+) -> list[str]:
+    """Collect unique head_shas from PRs linked to a ticket.
+
+    Sources (deduped by SHA, in discovery order):
+      1. Timeline `cross-referenced` events whose source is a PR — we
+         fetch the PR to read its `head.sha`.
+      2. `search/issues` for PRs in this repo whose body mentions the
+         ticket number — same: fetch each PR's head.sha.
+      3. Best-effort `branch:foo` regex in the ticket body — resolve
+         the branch ref to a SHA.
+
+    The timeline `source.issue` object only includes a marker
+    (`pull_request`) that signals "this is a PR", NOT the head_sha —
+    the SHA always requires the PR fetch.
+    """
+    global _BRANCH_HINT_RE
+    if _BRANCH_HINT_RE is None:
+        import re
+        _BRANCH_HINT_RE = re.compile(
+            r"(?:^|\s)branch:\s*([A-Za-z0-9._\-/]+)",
+            re.IGNORECASE,
+        )
+
+    seen: set[str] = set()
+    out: list[str] = []
+
+    # Fetch the ticket once to read its body (for the `branch:foo` hint)
+    # and to bail early on a 404.
+    issue_r = client.get(f"{_repo_path(project)}/issues/{ticket_id}")
+    if issue_r.status_code == 404:
+        return []
+    _check(issue_r)
+    issue_body = (issue_r.json() or {}).get("body") or ""
+
+    # Linked PR numbers we should fetch for their head.sha.
+    pr_numbers: list[int] = []
+
+    # (1) Timeline cross-references that point at PRs.
+    tl = client.get(
+        f"{_repo_path(project)}/issues/{ticket_id}/timeline",
+        params={"per_page": 100},
+        headers={"Accept": "application/vnd.github+json"},
+    )
+    _check(tl)
+    for event in tl.json() or []:
+        if event.get("event") not in ("cross-referenced", "connected"):
+            continue
+        source = (event.get("source") or {}).get("issue") or {}
+        if not source.get("pull_request"):
+            continue
+        # Same-repo only — cross-repo PRs would need a per-repo fetch,
+        # which falls outside the scope of this plan.
+        full = ((source.get("repository") or {}).get("full_name")) or ""
+        url = source.get("html_url") or source.get("url") or ""
+        same_repo = (
+            full == f"{project.owner}/{project.repo}"
+            or f"/{project.owner}/{project.repo}/" in url
+            or f"/repos/{project.owner}/{project.repo}/" in url
+        )
+        if not same_repo:
+            continue
+        n = source.get("number")
+        if isinstance(n, int):
+            pr_numbers.append(n)
+
+    # (2) `search/issues` for PRs in this repo that mention the ticket.
+    try:
+        ticket_n = int(ticket_id)
+    except (TypeError, ValueError):
+        ticket_n = None
+    if ticket_n is not None:
+        q = f"is:pr repo:{project.owner}/{project.repo} {ticket_n} in:body"
+        sr = client.get("/search/issues", params={"q": q, "per_page": 30})
+        # Search may rate-limit (403) — degrade silently.
+        if sr.is_success:
+            for it in (sr.json() or {}).get("items", []) or []:
+                n = it.get("number")
+                if isinstance(n, int) and n != ticket_n:
+                    pr_numbers.append(n)
+
+    # Dedup PR numbers, then fetch each to read head.sha.
+    seen_pr: set[int] = set()
+    for n in pr_numbers:
+        if n in seen_pr:
+            continue
+        seen_pr.add(n)
+        pr_r = client.get(f"{_repo_path(project)}/pulls/{n}")
+        if pr_r.status_code == 404:
+            continue
+        if not pr_r.is_success:
+            # Skip individual fetch failures rather than aborting.
+            continue
+        head = (pr_r.json() or {}).get("head") or {}
+        sha = head.get("sha")
+        if sha and sha not in seen:
+            seen.add(sha)
+            out.append(sha)
+
+    # (3) `branch:foo` hint in the ticket body.
+    m = _BRANCH_HINT_RE.search(issue_body) if issue_body else None
+    if m:
+        branch = m.group(1)
+        ref_r = client.get(
+            f"{_repo_path(project)}/git/refs/heads/{branch}"
+        )
+        if ref_r.is_success:
+            obj = (ref_r.json() or {}).get("object") or {}
+            sha = obj.get("sha")
+            if sha and sha not in seen:
+                seen.add(sha)
+                out.append(sha)
+
+    return out
+
+
+def _extract_log_excerpt(text: str, *, max_lines: int = 30) -> str:
+    """Pick the most useful slice of a job log.
+
+    Heuristic: search for the first line matching `Error|FAILED|##[error]`
+    (case-insensitive) and return that line plus up to `max_lines`
+    lines of context after it. If no such line is found, return the
+    final `max_lines` lines as a fallback.
+    """
+    import re
+
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    pattern = re.compile(r"(error|failed|##\[error\])", re.IGNORECASE)
+    for idx, line in enumerate(lines):
+        if pattern.search(line):
+            start = max(0, idx - 2)
+            end = min(len(lines), idx + max_lines)
+            return "\n".join(lines[start:end])
+    return "\n".join(lines[-max_lines:])
+
+
+def _fetch_job_log(token: str | None, log_url: str) -> str | None:
+    """Fetch a job log via the 302-redirect signed-URL flow.
+
+    GitHub responds with a 302 to a short-lived signed URL on a
+    different host (typically blob.core.windows.net for hosted runners).
+    httpx removes the Authorization header on cross-host redirects,
+    which is the correct behavior — the signed URL carries its own auth.
+    Returns `None` on 403/404 so the caller can mark logs as unavailable.
+
+    Uses `follow_redirects=True` ONLY for this call (the default `_client`
+    leaves it False, which is correct for the JSON API calls).
+    """
+    headers = {
+        "Accept": ACCEPT,
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with httpx.Client(
+        base_url=API_BASE,
+        headers=headers,
+        timeout=30.0,
+        follow_redirects=True,
+    ) as c:
+        r = c.get(log_url)
+        if r.status_code in (403, 404):
+            return None
+        if not r.is_success:
+            return None
+        # Cap the read to ~256 KB so a runaway log doesn't blow memory.
+        content = r.content[: 256 * 1024]
+        try:
+            return content.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+
+def _get_failure_excerpt(
+    client: httpx.Client,
+    project: ProjectConfig,
+    token: str | None,
+    run_id: str,
+) -> PipelineFailure:
+    """Build a `PipelineFailure` for a failed run.
+
+    Walks the run's jobs, picks the failed ones, then for each:
+      - reads check-run annotations (when `check_run_url` is present)
+      - reads the job log via the 302 redirect flow and extracts an excerpt
+
+    A 403/404 on either side leaves `annotations=[]` or
+    `log_excerpt=None`; an overall `note` is set when at least one job
+    had unavailable logs.
+    """
+    jobs_r = client.get(
+        f"{_repo_path(project)}/actions/runs/{run_id}/jobs",
+        params={"filter": "latest"},
+    )
+    _check(jobs_r)
+    jobs = (jobs_r.json() or {}).get("jobs", []) or []
+    failing: list[FailingJob] = []
+    logs_missing = False
+    for job in jobs:
+        if (job.get("conclusion") or "") != "failure":
+            continue
+        # Pick the first failed step to surface as `failed_step`.
+        failed_step = ""
+        for step in job.get("steps") or []:
+            if (step.get("conclusion") or "") == "failure":
+                failed_step = step.get("name") or ""
+                break
+
+        # Annotations live on the check-run associated with the job.
+        annotations: list[dict] = []
+        check_url = job.get("check_run_url") or ""
+        if check_url:
+            # `check_run_url` is absolute; httpx accepts that when we pass it
+            # directly (base_url is ignored for absolute URLs).
+            ann_r = client.get(f"{check_url}/annotations")
+            if ann_r.is_success:
+                annotations = ann_r.json() or []
+            elif ann_r.status_code not in (403, 404):
+                _check(ann_r)
+
+        # Log excerpt via the 302 redirect.
+        log_excerpt: str | None = None
+        job_id = job.get("id")
+        if job_id is not None:
+            log_text = _fetch_job_log(
+                token, f"{_repo_path(project)}/actions/jobs/{job_id}/logs"
+            )
+            if log_text is None:
+                logs_missing = True
+            else:
+                log_excerpt = _extract_log_excerpt(log_text)
+
+        failing.append(
+            FailingJob(
+                name=job.get("name") or "",
+                url=job.get("html_url") or "",
+                failed_step=failed_step,
+                annotations=annotations,
+                log_excerpt=log_excerpt,
+            )
+        )
+    note = "logs unavailable" if logs_missing else None
+    return PipelineFailure(failing_jobs=failing, note=note)

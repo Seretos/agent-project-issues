@@ -128,3 +128,56 @@ class PRFilters:
     base: str | None = None
     search: str | None = None
     limit: int = 30
+
+
+# ---------- pipelines / CI runs ---------------------------------------------
+
+
+@dataclass
+class FailingJob:
+    """A single failing job within a pipeline run.
+
+    `failed_step` is the name of the step that flipped the job red, when
+    GitHub reports it. `annotations` is the list of GitHub Check-Run
+    annotations attached to the job (typically the `failure` /
+    `warning` items emitted by build tooling). `log_excerpt` is a small
+    text excerpt around the failure (or `None` when logs were
+    unavailable, e.g. 403/404 on the log endpoint).
+    """
+
+    name: str
+    url: str
+    failed_step: str
+    annotations: list[dict]
+    log_excerpt: str | None
+
+
+@dataclass
+class PipelineFailure:
+    """Aggregated failure context for a single completed-failed run."""
+
+    failing_jobs: list[FailingJob]
+    note: str | None = None  # e.g. "logs unavailable"
+
+
+@dataclass
+class PipelineRun:
+    """A CI/CD pipeline run (GitHub Actions workflow_run / GitLab pipeline).
+
+    `conclusion` is `None` for in-progress runs. `failure` is only
+    populated by `get_pipeline_run` when the caller asks for the
+    failure excerpt AND the run actually concluded as failed.
+    """
+
+    id: str
+    name: str
+    branch: str
+    head_sha: str
+    event: str
+    status: str
+    conclusion: str | None
+    url: str
+    created_at: str
+    updated_at: str
+    run_attempt: int
+    failure: PipelineFailure | None = None

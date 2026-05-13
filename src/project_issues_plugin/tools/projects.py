@@ -23,8 +23,15 @@ def _project_to_dict(p: ProjectConfig) -> dict:
         "source": p.source,
         "permissions": {
             "read": True,
-            "create": p.permissions.create,
-            "modify": p.permissions.modify,
+            "issues": {
+                "create": p.permissions.issues.create,
+                "modify": p.permissions.issues.modify,
+            },
+            "pulls": {
+                "create": p.permissions.pulls.create,
+                "modify": p.permissions.pulls.modify,
+                "merge": p.permissions.pulls.merge,
+            },
         },
         "token_env": p.token_env,
         "token_available": resolve_token(p) is not None,
@@ -84,9 +91,17 @@ def register(mcp: FastMCP) -> None:
         """List projects available to this server.
 
         Each entry has an `id`, `provider`, `path`, `web_url`, and
-        `permissions` (read is always true; create/modify may be false).
-        A project with `source="git-remote"` was inferred from the local
-        git repository and is read-only.
+        `permissions`. A project with `source="git-remote"` was inferred
+        from the local git repository and is read-only.
+
+        Inspect `permissions.issues` and `permissions.pulls` separately.
+        Read is always implicit (token-gated):
+
+            "permissions": {
+              "read":   true,
+              "issues": {"create": ..., "modify": ...},
+              "pulls":  {"create": ..., "modify": ..., "merge": ...}
+            }
 
         Inspect `state` before reporting to the user:
           - "ok":           use `projects` as-is.
@@ -98,8 +113,8 @@ def register(mcp: FastMCP) -> None:
                             to check it (details are in the server log,
                             not in this response).
 
-        Permissions are authoritative from the `permissions` field — if
-        `create` or `modify` is false, the operation is not allowed.
+        Permissions are authoritative — if a namespace flag is false,
+        the corresponding operation is not allowed.
         """
         result = load_projects()
         return {

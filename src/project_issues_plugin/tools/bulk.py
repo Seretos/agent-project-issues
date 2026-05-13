@@ -5,10 +5,10 @@ project when the underlying repo is private. Errors on one project never
 abort the call — each failure is surfaced both in the per-project entry
 of `results` and in a top-level `errors` list.
 
-NOTE: `_PROVIDERS`, `_resolve`, `_provider_for`, and `_safe` are
-intentionally duplicated from `tools/tickets.py` for now. Plan 2 (later)
-will lift this to a shared `tools/_providers.py` module; until then keep
-these in sync with the ticket-module copies.
+Shared scaffolding (`_PROVIDERS`, `_provider_for`, `_safe`) lives in
+`tools/_providers.py`. Bulk has its own `_resolve_local` because it
+resolves against an already-loaded project list, not the global
+`load_projects()` result.
 """
 from __future__ import annotations
 
@@ -19,29 +19,15 @@ from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.config import ProjectConfig, load_projects, resolve_token
 from project_issues_plugin.providers.base import TicketFilters
-from project_issues_plugin.providers.github import GitHubError, GitHubProvider
+from project_issues_plugin.providers.github import GitHubError
+from project_issues_plugin.tools._providers import _provider_for
 
 
-# Intentional duplication — see module docstring.
-_PROVIDERS = {
-    "github": GitHubProvider(),
-}
-
-
-def _resolve(project_id: str, projects: list[ProjectConfig]) -> ProjectConfig:
+def _resolve_local(project_id: str, projects: list[ProjectConfig]) -> ProjectConfig:
     for p in projects:
         if p.id == project_id:
             return p
     raise LookupError("unknown project")
-
-
-def _provider_for(project: ProjectConfig):
-    impl = _PROVIDERS.get(project.provider)
-    if impl is None:
-        raise NotImplementedError(
-            f"provider '{project.provider}' is not implemented yet"
-        )
-    return impl
 
 
 def register(mcp: FastMCP) -> None:
@@ -100,7 +86,7 @@ def register(mcp: FastMCP) -> None:
 
         for pid in target_ids:
             try:
-                project = _resolve(pid, all_projects)
+                project = _resolve_local(pid, all_projects)
                 provider = _provider_for(project)
                 token = resolve_token(project)
                 tickets = provider.list_tickets(project, token, filters)

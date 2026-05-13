@@ -12,70 +12,16 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from project_issues_plugin.config import ProjectConfig, load_projects, resolve_token
+from project_issues_plugin.config import resolve_token
 from project_issues_plugin.providers.base import TicketFilters
-from project_issues_plugin.providers.github import GitHubError, GitHubProvider
-
-
-_PROVIDERS = {
-    "github": GitHubProvider(),
-}
-
-
-def _resolve(project_id: str) -> ProjectConfig:
-    result = load_projects()
-    for p in result.projects:
-        if p.id == project_id:
-            return p
-    raise LookupError(
-        f"unknown project '{project_id}'. Use list_projects to see what is available."
-    )
-
-
-def _provider_for(project: ProjectConfig):
-    impl = _PROVIDERS.get(project.provider)
-    if impl is None:
-        raise NotImplementedError(
-            f"provider '{project.provider}' is not implemented yet"
-        )
-    return impl
-
-
-def _require_token(project: ProjectConfig) -> str:
-    token = resolve_token(project)
-    if not token:
-        raise PermissionError(
-            f"project '{project.id}' has no API token available "
-            f"(env var '{project.token_env}' is unset). Writes are not possible."
-        )
-    return token
-
-
-def _require_create(project: ProjectConfig) -> None:
-    if not project.permissions.create:
-        raise PermissionError(
-            f"project '{project.id}' does not permit creating tickets. "
-            "Tell the user the project is configured without create permission."
-        )
-
-
-def _require_modify(project: ProjectConfig) -> None:
-    if not project.permissions.modify:
-        raise PermissionError(
-            f"project '{project.id}' does not permit modifying tickets or "
-            "adding comments. Tell the user the project is configured without "
-            "modify permission."
-        )
-
-
-def _safe(call):
-    """Execute `call()` and translate known errors to a dict with `error`."""
-    try:
-        return call()
-    except (LookupError, PermissionError, NotImplementedError) as exc:
-        return {"error": str(exc)}
-    except GitHubError as exc:
-        return {"error": str(exc)}
+from project_issues_plugin.tools._providers import (
+    _provider_for,
+    _require_issues_create,
+    _require_issues_modify,
+    _require_token,
+    _resolve,
+    _safe,
+)
 
 
 def register(mcp: FastMCP) -> None:
@@ -202,12 +148,12 @@ def register(mcp: FastMCP) -> None:
         actions stay one-shot.
 
         The label `ai-generated` is added automatically by the server.
-        Do not pass it yourself. Requires the project's `create`
+        Do not pass it yourself. Requires the project's `issues.create`
         permission.
         """
         def go() -> dict:
             project = _resolve(project_id)
-            _require_create(project)
+            _require_issues_create(project)
             token = _require_token(project)
             provider = _provider_for(project)
             ticket = provider.create_ticket(
@@ -240,11 +186,11 @@ def register(mcp: FastMCP) -> None:
         is added automatically when the ticket wasn't previously
         `ai-generated`. Do not pass the marker labels yourself.
 
-        Requires the project's `modify` permission.
+        Requires the project's `issues.modify` permission.
         """
         def go() -> dict:
             project = _resolve(project_id)
-            _require_modify(project)
+            _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
             ticket = provider.update_ticket(
@@ -262,11 +208,11 @@ def register(mcp: FastMCP) -> None:
 
         The body is automatically prefixed with `#ai-generated\\n\\n`.
         Do not add that prefix yourself. Requires the project's
-        `modify` permission.
+        `issues.modify` permission.
         """
         def go() -> dict:
             project = _resolve(project_id)
-            _require_modify(project)
+            _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
             comment = provider.add_comment(project, token, ticket_id, body)

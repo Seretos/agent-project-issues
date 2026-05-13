@@ -21,7 +21,22 @@ TOML schema:
     owner       = "acme"
     repo        = "backend"
     token_env   = "GITHUB_TOKEN_ACME"
+
+    [projects.permissions.issues]
+    create = true
+    modify = true
+
+    [projects.permissions.pulls]
+    create = true
+    modify = false
+    merge  = false
+
+The previously-shipped flat form is still accepted and auto-migrated on
+load (with a single `DeprecationWarning`):
+
     permissions = { create = true, modify = true }
+    # extended flat form (also accepted):
+    permissions = { create = true, modify = true, pr_create = true, pr_modify = false }
 """
 from __future__ import annotations
 
@@ -29,6 +44,7 @@ import logging
 import os
 import re
 import tomllib
+import warnings
 from configparser import ConfigParser
 from pathlib import Path
 from typing import Literal
@@ -41,9 +57,60 @@ Provider = Literal["github", "gitlab"]
 Source = Literal["config", "git-remote"]
 
 
-class Permissions(BaseModel):
+class IssuesPermissions(BaseModel):
     create: bool = False
     modify: bool = False
+
+
+class PullsPermissions(BaseModel):
+    create: bool = False
+    modify: bool = False
+    merge: bool = False
+
+
+class Permissions(BaseModel):
+    issues: IssuesPermissions = Field(default_factory=IssuesPermissions)
+    pulls: PullsPermissions = Field(default_factory=PullsPermissions)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_flat(cls, data):
+        """Migrate the legacy flat form to the nested form.
+
+        Triggered when the input dict contains any of the old flat keys
+        (`create` / `modify` / `pr_create` / `pr_modify`) AND neither
+        `issues` nor `pulls`. Emits a single `DeprecationWarning` per
+        load so users are nudged to update their TOML.
+
+        - `create`     -> `issues.create`
+        - `modify`     -> `issues.modify`
+        - `pr_create`  -> `pulls.create`
+        - `pr_modify`  -> `pulls.modify`
+
+        `pulls.merge` has no flat equivalent and defaults to False —
+        existing configs cannot merge PRs without an explicit opt-in.
+        """
+        if not isinstance(data, dict):
+            return data
+        issue_flat = {"create", "modify"} & data.keys()
+        pr_flat = {"pr_create", "pr_modify"} & data.keys()
+        if (issue_flat or pr_flat) and "issues" not in data and "pulls" not in data:
+            migrated: dict = {}
+            if issue_flat:
+                migrated["issues"] = {k: data.pop(k) for k in list(issue_flat)}
+            if pr_flat:
+                migrated["pulls"] = {
+                    k.removeprefix("pr_"): data.pop(k) for k in list(pr_flat)
+                }
+            data.update(migrated)
+            warnings.warn(
+                "Flat 'permissions' form is deprecated; use nested "
+                "'permissions.issues' / 'permissions.pulls' instead "
+                "(e.g. `[projects.permissions.issues] create = true`).",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        return data
 
 
 class ProjectConfig(BaseModel):

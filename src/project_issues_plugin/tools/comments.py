@@ -3,18 +3,15 @@
 Mirrors the shape of `tools/tickets.py`:
   - read-only ops (`list_comments`, `get_comment`) only require a token
     when the repo is private; no permission flag is needed.
-  - write ops (`update_comment`) are gated by the project's `modify`
-    permission, the same flag that gates `update_ticket` and
-    `add_comment`.
+  - write ops (`update_comment`) are gated by the project's
+    `issues.modify` permission, the same flag that gates `update_ticket`
+    and `add_comment`.
 
 The AI-marker prefix on `update_comment` is applied transparently by the
 provider — the agent must NOT pass `#ai-generated` itself.
 
-NOTE: `_PROVIDERS`, `_resolve`, `_provider_for`, `_require_token`,
-`_require_modify`, and `_safe` are intentionally duplicated from
-`tools/tickets.py` for now. Plan 2 (later) will lift this to a shared
-`tools/_providers.py` module; until then keep these in sync with the
-ticket-module copies.
+The shared `_PROVIDERS`/`_resolve`/`_safe`/permission helpers live in
+`tools/_providers.py`.
 """
 from __future__ import annotations
 
@@ -22,62 +19,17 @@ from dataclasses import asdict
 
 from mcp.server.fastmcp import FastMCP
 
-from project_issues_plugin.config import ProjectConfig, load_projects, resolve_token
-from project_issues_plugin.providers.github import GitHubError, GitHubProvider
-
-
-# Intentional duplication — see module docstring.
-_PROVIDERS = {
-    "github": GitHubProvider(),
-}
-
-
-def _resolve(project_id: str) -> ProjectConfig:
-    result = load_projects()
-    for p in result.projects:
-        if p.id == project_id:
-            return p
-    raise LookupError(
-        f"unknown project '{project_id}'. Use list_projects to see what is available."
-    )
-
-
-def _provider_for(project: ProjectConfig):
-    impl = _PROVIDERS.get(project.provider)
-    if impl is None:
-        raise NotImplementedError(
-            f"provider '{project.provider}' is not implemented yet"
-        )
-    return impl
-
-
-def _require_token(project: ProjectConfig) -> str:
-    token = resolve_token(project)
-    if not token:
-        raise PermissionError(
-            f"project '{project.id}' has no API token available "
-            f"(env var '{project.token_env}' is unset). Writes are not possible."
-        )
-    return token
-
-
-def _require_modify(project: ProjectConfig) -> None:
-    if not project.permissions.modify:
-        raise PermissionError(
-            f"project '{project.id}' does not permit modifying tickets or "
-            "adding comments. Tell the user the project is configured without "
-            "modify permission."
-        )
-
-
-def _safe(call):
-    """Execute `call()` and translate known errors to a dict with `error`."""
-    try:
-        return call()
-    except (LookupError, PermissionError, NotImplementedError) as exc:
-        return {"error": str(exc)}
-    except GitHubError as exc:
-        return {"error": str(exc)}
+# `load_projects` is re-exported here purely so tests that monkey-patch
+# `tools.comments.load_projects` keep working. The runtime call path goes
+# through `tools/_providers.py::_resolve` which reads via the config module.
+from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
+from project_issues_plugin.tools._providers import (
+    _provider_for,
+    _require_issues_modify,
+    _require_token,
+    _resolve,
+    _safe,
+)
 
 
 def register(mcp: FastMCP) -> None:
@@ -140,11 +92,11 @@ def register(mcp: FastMCP) -> None:
         `#ai-generated\\n\\n` if it doesn't already carry the marker —
         do not add that prefix yourself.
 
-        Requires the project's `modify` permission.
+        Requires the project's `issues.modify` permission.
         """
         def go() -> dict:
             project = _resolve(project_id)
-            _require_modify(project)
+            _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
             comment = provider.update_comment(project, token, comment_id, body)

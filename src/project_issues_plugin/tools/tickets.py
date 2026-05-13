@@ -87,12 +87,38 @@ def register(mcp: FastMCP) -> None:
         assignee: str | None = None,
         search: str | None = None,
         limit: int = 30,
+        not_labels: list[str] | None = None,
+        author: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        updated_after: str | None = None,
+        updated_before: str | None = None,
+        sort_by: Literal["created", "updated", "comments"] = "created",
+        sort_order: Literal["asc", "desc"] = "desc",
     ) -> dict:
         """List tickets in a project. Default: open tickets, limit 30.
 
-        `status` filters by state ("open", "closed", or "any"). `labels`,
-        `assignee`, and free-text `search` further narrow the result.
-        `limit` is capped at the provider's max page size.
+        Filter args:
+          - `status`: "open" (default), "closed", or "any".
+          - `labels`: only tickets carrying ALL of these labels.
+          - `not_labels`: exclude tickets carrying ANY of these labels
+            (e.g. `["test"]` filters out test issues).
+          - `assignee`: only tickets assigned to this user.
+          - `author`: only tickets opened by this user.
+          - `search`: free-text query (substring + GitHub search syntax).
+          - `created_after` / `created_before`: ISO date (`YYYY-MM-DD`
+            or full ISO-8601 timestamp); inclusive bounds on `created_at`.
+          - `updated_after` / `updated_before`: same, for `updated_at`.
+          - `sort_by`: `"created"` (default), `"updated"`, or `"comments"`.
+          - `sort_order`: `"desc"` (default) or `"asc"`.
+          - `limit`: capped at the provider's max page size (100).
+
+        Routing caveat: when any of `not_labels`, `author`,
+        `created_*`, `updated_*`, or `search` is set, the provider
+        switches from the cheap `/repos/.../issues` endpoint to GitHub's
+        Search API (`/search/issues`), which has its own rate-limit
+        bucket (30 requests/minute). The default-fast path stays on the
+        cheap endpoint.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -106,6 +132,14 @@ def register(mcp: FastMCP) -> None:
                     assignee=assignee,
                     search=search,
                     limit=limit,
+                    not_labels=not_labels or [],
+                    author=author,
+                    created_after=created_after,
+                    created_before=created_before,
+                    updated_after=updated_after,
+                    updated_before=updated_before,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
                 ),
             )
             return {

@@ -301,6 +301,80 @@ def _ensure_label(client: httpx.Client, project: ProjectConfig, name: str) -> No
     )
 
 
+def _quote_label(name: str) -> str:
+    """Wrap a label name in double quotes for the Search qualifier if it
+    contains whitespace; otherwise return as-is. The Search API treats
+    `label:"foo bar"` as one qualifier with a space-bearing value.
+    """
+    if any(ch.isspace() for ch in name):
+        return f'"{name}"'
+    return name
+
+
+def _requires_search(filters: TicketFilters) -> bool:
+    """Return True iff any filter forces us off the cheap `/issues` path
+    and onto `/search/issues`.
+
+    `search` (free-text) ALSO requires the search endpoint, but the
+    legacy code-path already handled that. This helper specifically
+    captures the NEW filters added in Plan 7.
+    """
+    if filters.not_labels:
+        return True
+    if filters.author:
+        return True
+    if filters.created_after or filters.created_before:
+        return True
+    if filters.updated_after or filters.updated_before:
+        return True
+    return False
+
+
+def _list_via_search(
+    client: httpx.Client,
+    project: ProjectConfig,
+    filters: TicketFilters,
+) -> list[dict]:
+    """Hit `GET /search/issues` and return the raw `items` list.
+
+    Builds a `q=` string that mirrors the legacy `/issues` semantics plus
+    the new Plan-7 filters (`not_labels`, `author`, date ranges). Sort is
+    expressed as a `sort:<key>-<order>` qualifier appended to `q` (NOT a
+    separate `sort=` param — that's the legacy endpoint's convention).
+    """
+    per_page = min(max(1, filters.limit), 100)
+    qual_parts: list[str] = [
+        "is:issue",
+        f"repo:{project.owner}/{project.repo}",
+    ]
+    # state qualifier: search supports `open`/`closed` only — omit for "any".
+    if filters.status in ("open", "closed"):
+        qual_parts.append(f"state:{filters.status}")
+    if filters.assignee:
+        qual_parts.append(f"assignee:{filters.assignee}")
+    if filters.author:
+        qual_parts.append(f"author:{filters.author}")
+    for lbl in filters.labels:
+        qual_parts.append(f"label:{_quote_label(lbl)}")
+    for lbl in filters.not_labels:
+        qual_parts.append(f"-label:{_quote_label(lbl)}")
+    if filters.created_after:
+        qual_parts.append(f"created:>={filters.created_after}")
+    if filters.created_before:
+        qual_parts.append(f"created:<={filters.created_before}")
+    if filters.updated_after:
+        qual_parts.append(f"updated:>={filters.updated_after}")
+    if filters.updated_before:
+        qual_parts.append(f"updated:<={filters.updated_before}")
+    qual_parts.append(f"sort:{filters.sort_by}-{filters.sort_order}")
+    pieces = [filters.search] if filters.search else []
+    pieces.extend(qual_parts)
+    q = " ".join(pieces)
+    r = client.get("/search/issues", params={"q": q, "per_page": per_page})
+    _check(r)
+    return r.json().get("items", [])
+
+
 class GitHubProvider:
     def list_tickets(
         self,
@@ -309,26 +383,18 @@ class GitHubProvider:
         filters: TicketFilters,
     ) -> list[Ticket]:
         per_page = min(max(1, filters.limit), 100)
+        # Normalize `not_labels=[]` (truthy-but-empty containers) to "not set".
+        if not filters.not_labels:
+            filters.not_labels = []
         with _client(token) as client:
-            if filters.search:
-                qual_parts = [
-                    f"repo:{project.owner}/{project.repo}",
-                    "is:issue",
-                ]
-                if filters.status in ("open", "closed"):
-                    qual_parts.append(f"is:{filters.status}")
-                if filters.assignee:
-                    qual_parts.append(f"assignee:{filters.assignee}")
-                for lbl in filters.labels:
-                    qual_parts.append(f'label:"{lbl}"')
-                q = f"{filters.search} {' '.join(qual_parts)}"
-                r = client.get("/search/issues", params={"q": q, "per_page": per_page})
-                _check(r)
-                items = r.json().get("items", [])
+            if filters.search or _requires_search(filters):
+                items = _list_via_search(client, project, filters)
             else:
                 params: dict[str, Any] = {
                     "per_page": per_page,
                     "state": filters.status if filters.status in ("open", "closed") else "all",
+                    "sort": filters.sort_by,
+                    "direction": filters.sort_order,
                 }
                 if filters.labels:
                     params["labels"] = ",".join(filters.labels)

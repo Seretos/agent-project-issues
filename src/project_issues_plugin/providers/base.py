@@ -66,6 +66,10 @@ class Relation:
     is_pull_request: bool
 
 
+SortBy = Literal["created", "updated", "comments"]
+SortOrder = Literal["asc", "desc"]
+
+
 @dataclass
 class TicketFilters:
     status: ListStatus = "open"
@@ -73,3 +77,11 @@ class TicketFilters:
     assignee: str | None = None
     search: str | None = None
     limit: int = 30
+    not_labels: list[str] = field(default_factory=list)
+    author: str | None = None
+    created_after: str | None = None
+    created_before: str | None = None
+    updated_after: str | None = None
+    updated_before: str | None = None
+    sort_by: SortBy = "created"
+    sort_order: SortOrder = "desc"

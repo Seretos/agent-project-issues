@@ -175,7 +175,55 @@ if ($Package) {
         Copy-Item -Recurse -Force "skills" $stage
     }
     Copy-Item -Force "README.md", "LICENSE" $stage -ErrorAction SilentlyContinue
-    Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
+
+    # Build the zip via Python's zipfile so we can stamp Unix mode bits into
+    # the central directory. Compress-Archive (and the .NET ZipFile API it
+    # wraps) emits create_system=0 (FAT) with no external_attr, so unzip on
+    # Linux falls back to umask defaults (0644) -- which strips the exec bit
+    # off bin/project-issues.exe and breaks installation on Linux/WSL2.
+    #
+    # The script is staged to a temp file rather than passed via `python -c`
+    # because PowerShell's native-command argument parser strips quote
+    # characters from the script body, corrupting string literals.
+    $pyZipScript = @'
+import os, sys, time, zipfile
+
+stage = sys.argv[1]
+zip_path = sys.argv[2]
+exe_rel = "bin/project-issues.exe"
+
+# 0x8000 == stat.S_IFREG; the high 16 bits of external_attr hold the Unix
+# mode when create_system == 3 (Unix). unzip honors this on Linux/macOS.
+EXE_ATTR = (0o755 << 16) | 0x8000
+REG_ATTR = (0o644 << 16) | 0x8000
+
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for dirpath, dirnames, filenames in os.walk(stage):
+        dirnames.sort()
+        for name in sorted(filenames):
+            abs_path = os.path.join(dirpath, name)
+            rel = os.path.relpath(abs_path, stage).replace(os.sep, "/")
+            st = os.stat(abs_path)
+            mtime = time.localtime(st.st_mtime)[:6]
+            zi = zipfile.ZipInfo(filename=rel, date_time=mtime)
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.create_system = 3  # Unix
+            zi.external_attr = EXE_ATTR if rel == exe_rel else REG_ATTR
+            with open(abs_path, "rb") as fh:
+                zf.writestr(zi, fh.read())
+
+print(f"wrote {zip_path} ({os.path.getsize(zip_path)} bytes)")
+'@
+    $pyScriptFile = [System.IO.Path]::GetTempFileName() + ".py"
+    [System.IO.File]::WriteAllText($pyScriptFile, $pyZipScript, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        Invoke-Py $pyScriptFile $stage $zipPath
+        if ($LASTEXITCODE -ne 0) {
+            Fail "Python zip-build step failed."
+        }
+    } finally {
+        Remove-Item -ErrorAction SilentlyContinue $pyScriptFile
+    }
     $zipSize = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
     Write-Host "    dist/$zipName (${zipSize} MB)"
 }

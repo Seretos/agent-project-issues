@@ -30,9 +30,11 @@ def main() -> None:
         projects as project_tools,
         tickets as ticket_tools,
         comments as comment_tools,
+        bulk as bulk_tools,
     )
     project_tools.register(mcp)
     ticket_tools.register(mcp)
     comment_tools.register(mcp)
+    bulk_tools.register(mcp)
 
     mcp.run()

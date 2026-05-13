@@ -126,6 +126,11 @@ jobs:
           echo "=== release branch contents ==="
           find . -mindepth 1 -not -path './.git*' | sort
 
+          # Stamp the Windows-built binary with the POSIX exec bit so a Linux
+          # clone of the orphan release branch yields -rwxr-xr-x rather than
+          # 0644 (which causes EACCES when an MCP host tries to spawn it).
+          git add bin/project-issues.exe
+          git update-index --chmod=+x bin/project-issues.exe
           git add -A
           git commit -m "release: v${{ inputs.version }}"
           git push origin release --force

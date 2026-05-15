@@ -26,10 +26,11 @@ def _project(*, modify: bool = True) -> ProjectConfig:
     return ProjectConfig(
         id="acme",
         provider="github",
-        owner="acme",
-        repo="backend",
+        path="acme/backend",
         token_env="GITHUB_TOKEN_ACME",
-        permissions={"create": True, "modify": modify},
+        permissions={
+            "issues": {"create": True, "modify": modify},
+        },
     )
 
 

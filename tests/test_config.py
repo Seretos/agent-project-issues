@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import textwrap
-import warnings
 from pathlib import Path
 
 import pytest
 
 from project_issues_plugin.config import (
+    ConfigDocument,
     LoadResult,
     Permissions,
+    ProjectConfig,
     _parse_remote_url,
     load_projects,
 )
@@ -35,18 +36,21 @@ def test_parse_remote_url_unknown():
     assert _parse_remote_url("ftp://example.com/foo") is None
 
 
-def test_load_toml_returns_projects(tmp_path: Path):
-    cfg = tmp_path / ".claude/project-issues.toml"
-    _write(cfg, """
-        [[projects]]
-        id = "acme"
-        provider = "github"
-        owner = "acme"
-        repo = "backend"
+# ---------- YAML loader: happy path -----------------------------------------
 
-        [projects.permissions.issues]
-        create = true
-        modify = false
+
+def test_load_yaml_returns_projects(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 1
+        projects:
+          - id: acme
+            provider: github
+            path: acme/backend
+            permissions:
+              issues:
+                create: true
+                modify: false
     """)
     result = load_projects(cwd=tmp_path)
     assert isinstance(result, LoadResult)
@@ -55,6 +59,12 @@ def test_load_toml_returns_projects(tmp_path: Path):
     p = result.projects[0]
     assert p.id == "acme"
     assert p.provider == "github"
+    assert p.path == "acme/backend"
+    # Backward-compat derived properties still work for internal code.
+    assert p.owner == "acme"
+    assert p.repo == "backend"
+    assert p.display_path == "acme/backend"
+    assert p.web_url == "https://github.com/acme/backend"
     assert p.permissions.issues.create is True
     assert p.permissions.issues.modify is False
     # pulls namespace defaults to all-false
@@ -63,14 +73,100 @@ def test_load_toml_returns_projects(tmp_path: Path):
     assert p.permissions.pulls.merge is False
 
 
-def test_load_toml_rejects_reserved_id(tmp_path: Path):
-    cfg = tmp_path / ".claude/project-issues.toml"
+def test_load_yaml_yaml_extension_also_works(tmp_path: Path):
+    """The loader accepts `.yaml` in addition to `.yml`."""
+    cfg = tmp_path / ".claude/project-issues.yaml"
     _write(cfg, """
-        [[projects]]
-        id = "_auto"
-        provider = "github"
-        owner = "acme"
-        repo = "backend"
+        version: 1
+        projects:
+          - id: a
+            provider: github
+            path: a/b
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "ok"
+    assert result.projects[0].id == "a"
+
+
+def test_load_yaml_omitted_version_defaults_to_one(tmp_path: Path):
+    """`version` is optional and defaults to 1 (per plan-comment D2=B)."""
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        projects:
+          - id: nv
+            provider: github
+            path: a/b
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "ok"
+
+
+def test_load_yaml_rejects_unknown_top_level_key(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 1
+        oops_extra: 42
+        projects:
+          - id: x
+            provider: github
+            path: a/b
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "config_error"
+    assert "oops_extra" in (result.error or "")
+
+
+def test_load_yaml_rejects_unknown_project_key(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 1
+        projects:
+          - id: x
+            provider: github
+            path: a/b
+            owner: legacy    # legacy v0 field — must be rejected
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "config_error"
+    assert "owner" in (result.error or "")
+
+
+def test_load_yaml_rejects_future_schema_version(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 99
+        projects:
+          - id: x
+            provider: github
+            path: a/b
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "config_error"
+    assert "version" in (result.error or "").lower()
+
+
+def test_load_yaml_rejects_github_path_without_slash(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 1
+        projects:
+          - id: bad
+            provider: github
+            path: justname
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "config_error"
+    assert "owner/repo" in (result.error or "")
+
+
+def test_load_yaml_rejects_reserved_id(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 1
+        projects:
+          - id: _auto
+            provider: github
+            path: a/b
     """)
     result = load_projects(cwd=tmp_path)
     assert result.state == "config_error"
@@ -84,24 +180,41 @@ def test_load_no_config_returns_no_config(tmp_path: Path):
 
 
 def test_load_config_empty(tmp_path: Path):
-    cfg = tmp_path / ".claude/project-issues.toml"
+    cfg = tmp_path / ".claude/project-issues.yml"
     _write(cfg, "# empty file\n")
     result = load_projects(cwd=tmp_path)
     assert result.state == "config_empty"
     assert result.projects == []
 
 
-# ---------- Permissions model: nested form + flat-form auto-migration -------
+def test_load_yaml_gitlab_path_is_passthrough(tmp_path: Path):
+    cfg = tmp_path / ".claude/project-issues.yml"
+    _write(cfg, """
+        version: 1
+        projects:
+          - id: gl
+            provider: gitlab
+            path: group/sub/project
+    """)
+    result = load_projects(cwd=tmp_path)
+    assert result.state == "ok"
+    p = result.projects[0]
+    assert p.path == "group/sub/project"
+    assert p.project_path == "group/sub/project"
+    assert p.owner is None
+    assert p.repo is None
+    assert p.web_url == "https://gitlab.com/group/sub/project"
+
+
+# ---------- Permissions model: strict-only (no flat migration) --------------
 
 
 def test_permissions_nested_form_loads_correctly():
-    """The new nested form is the canonical shape and emits no warning."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # any warning here would be a regression
-        perms = Permissions.model_validate({
-            "issues": {"create": True, "modify": True},
-            "pulls": {"create": True, "modify": False, "merge": False},
-        })
+    """The nested form is the canonical (and only) shape."""
+    perms = Permissions.model_validate({
+        "issues": {"create": True, "modify": True},
+        "pulls": {"create": True, "modify": False, "merge": False},
+    })
     assert perms.issues.create is True
     assert perms.issues.modify is True
     assert perms.pulls.create is True
@@ -109,41 +222,15 @@ def test_permissions_nested_form_loads_correctly():
     assert perms.pulls.merge is False
 
 
-def test_permissions_flat_form_migrates_and_warns():
-    """Flat `{create, modify}` migrates to `issues.*` and warns once."""
-    with pytest.warns(DeprecationWarning, match="Flat 'permissions' form"):
-        perms = Permissions.model_validate({"create": True, "modify": True})
-    assert perms.issues.create is True
-    assert perms.issues.modify is True
-    # pulls namespace is all-False — no flat equivalent for merge.
-    assert perms.pulls.create is False
-    assert perms.pulls.modify is False
-    assert perms.pulls.merge is False
-
-
-def test_permissions_flat_with_pr_keys_migrates():
-    """Flat with `pr_create` / `pr_modify` migrates to `pulls.*`."""
-    with pytest.warns(DeprecationWarning):
-        perms = Permissions.model_validate({
-            "create": True,
-            "modify": True,
-            "pr_create": True,
-            "pr_modify": False,
-        })
-    assert perms.issues.create is True
-    assert perms.issues.modify is True
-    assert perms.pulls.create is True
-    assert perms.pulls.modify is False
-    # Merge is NEW — no flat equivalent — defaults to False even when the
-    # other pulls flags are set.
-    assert perms.pulls.merge is False
+def test_permissions_legacy_flat_form_is_rejected():
+    """Flat `{create, modify}` is no longer accepted in v1 (D3=A)."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        Permissions.model_validate({"create": True, "modify": True})
 
 
 def test_permissions_empty_defaults_all_false():
-    """An empty `permissions` dict defaults every flag to False and is silent."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        perms = Permissions.model_validate({})
+    perms = Permissions.model_validate({})
     assert perms.issues.create is False
     assert perms.issues.modify is False
     assert perms.pulls.create is False
@@ -151,42 +238,35 @@ def test_permissions_empty_defaults_all_false():
     assert perms.pulls.merge is False
 
 
-def test_load_toml_flat_form_migrates(tmp_path: Path):
-    """A TOML file using the legacy flat shape still loads + emits a warning."""
-    cfg = tmp_path / ".claude/project-issues.toml"
-    _write(cfg, """
-        [[projects]]
-        id = "legacy"
-        provider = "github"
-        owner = "acme"
-        repo = "backend"
-        permissions = { create = true, modify = true }
-    """)
-    with pytest.warns(DeprecationWarning, match="Flat 'permissions' form"):
-        result = load_projects(cwd=tmp_path)
-    assert result.state == "ok"
-    p = result.projects[0]
-    assert p.permissions.issues.create is True
-    assert p.permissions.issues.modify is True
-    assert p.permissions.pulls.create is False
-    assert p.permissions.pulls.merge is False
+# ---------- ConfigDocument model directly -----------------------------------
 
 
-def test_load_toml_flat_with_pr_keys_migrates(tmp_path: Path):
-    """A TOML file with the extended flat shape (`pr_create`/`pr_modify`) migrates."""
-    cfg = tmp_path / ".claude/project-issues.toml"
+def test_config_document_strict():
+    """ConfigDocument forbids unknown top-level keys."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ConfigDocument.model_validate({"version": 1, "unknown": True})
+
+
+# ---------- list_projects response shape (no schema-internal leakage) -------
+
+
+def test_list_projects_response_keeps_path_key(tmp_path: Path):
+    """Smoke-test: the externally-visible list_projects response shape
+    (which is `path`, NOT `owner`/`repo`) must be unchanged by the
+    schema migration — ticket #8 acceptance criterion."""
+    cfg = tmp_path / ".claude/project-issues.yml"
     _write(cfg, """
-        [[projects]]
-        id = "legacy-ext"
-        provider = "github"
-        owner = "acme"
-        repo = "backend"
-        permissions = { create = true, modify = true, pr_create = true, pr_modify = false }
+        version: 1
+        projects:
+          - id: a
+            provider: github
+            path: acme/backend
     """)
-    with pytest.warns(DeprecationWarning):
-        result = load_projects(cwd=tmp_path)
-    p = result.projects[0]
-    assert p.permissions.issues.create is True
-    assert p.permissions.pulls.create is True
-    assert p.permissions.pulls.modify is False
-    assert p.permissions.pulls.merge is False  # no flat equivalent
+    from project_issues_plugin.tools.projects import _project_to_dict
+    result = load_projects(cwd=tmp_path)
+    d = _project_to_dict(result.projects[0])
+    assert d["path"] == "acme/backend"
+    assert d["provider"] == "github"
+    assert "owner" not in d
+    assert "repo" not in d

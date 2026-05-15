@@ -30,8 +30,7 @@ def _project(
     return ProjectConfig(
         id="acme",
         provider="github",
-        owner="acme",
-        repo="backend",
+        path="acme/backend",
         token_env="GITHUB_TOKEN_ACME",
         permissions={
             "issues": {"create": True, "modify": True},

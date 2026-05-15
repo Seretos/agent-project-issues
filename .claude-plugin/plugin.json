@@ -5,7 +5,7 @@
   "author": { "name": "Arne von Appen" },
   "mcpServers": {
     "project-issues": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/project-issues.exe",
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/project-issues",
       "args": [],
       "env": {
         "PROJECT_ISSUES_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"

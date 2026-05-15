@@ -1290,25 +1290,117 @@ def _resolved_refs_for_ticket(
     return out
 
 
-def _extract_log_excerpt(text: str, *, max_lines: int = 30) -> str:
+def _extract_log_excerpt(
+    text: str,
+    *,
+    max_lines: int = 30,
+    failed_step: str | None = None,
+    annotations: list[dict] | None = None,
+) -> str:
     """Pick the most useful slice of a job log.
 
-    Heuristic: search for the first line matching `Error|FAILED|##[error]`
-    (case-insensitive) and return that line plus up to `max_lines`
-    lines of context after it. If no such line is found, return the
-    final `max_lines` lines as a fallback.
+    Anchor strategy (in order):
+
+    1. **Step-header anchor** — GitHub Actions logs contain
+       ``##[group]Run <step-name>`` / ``##[endgroup]`` markers. When
+       ``failed_step`` matches a group whose body fits this run, the
+       excerpt is clamped to that group (``##[group]`` .. ``##[endgroup]``,
+       inclusive). If the clamped block is shorter than ``max_lines``,
+       trailing context from after ``##[endgroup]`` is appended up to
+       ``max_lines``.
+    2. **Annotation-line anchor** (fallback) — when at least one
+       ``failure``-level annotation carries a ``start_line``, the
+       excerpt is built around that line in the same way as the legacy
+       substring scan. This helps composite-action / docker-in-runner
+       jobs whose logs don't emit ``##[group]Run <name>`` markers.
+    3. **Substring scan** (last resort) — first occurrence of
+       ``error|failed|##[error]`` (case-insensitive) within the
+       sub-sequence **after** the first ``##[group]`` marker (or, if
+       none, the whole text). Restricting to the post-first-group
+       region prevents template ``echo "::error::..."`` lines inside
+       earlier setup steps from hijacking the anchor.
+    4. **Tail** — last ``max_lines`` lines.
+
+    The behaviour change vs. the previous implementation fixes
+    `agent-project-issues#6` where an unexecuted template ``echo
+    "::error::..."`` in a setup step's bash ``if`` block was matched
+    by the naive substring scan and the excerpt was centred far away
+    from the real failing step.
     """
     import re
 
     lines = text.splitlines()
     if not lines:
         return ""
-    pattern = re.compile(r"(error|failed|##\[error\])", re.IGNORECASE)
+
+    # --- 1) Step-header anchor ------------------------------------------------
+    group_pattern = re.compile(r"^.*##\[group\]Run\s+(?P<name>.+?)\s*$")
+    endgroup_pattern = re.compile(r"^.*##\[endgroup\]\s*$")
+    # Build a list of (start_idx, name, end_idx) for every group block.
+    groups: list[tuple[int, str, int]] = []
+    open_idx: int | None = None
+    open_name: str | None = None
     for idx, line in enumerate(lines):
-        if pattern.search(line):
+        m = group_pattern.match(line)
+        if m:
+            # If a previous group never closed, record it ending here.
+            if open_idx is not None and open_name is not None:
+                groups.append((open_idx, open_name, idx - 1))
+            open_idx = idx
+            open_name = (m.group("name") or "").strip()
+            continue
+        if open_idx is not None and endgroup_pattern.match(line):
+            groups.append((open_idx, open_name or "", idx))
+            open_idx = None
+            open_name = None
+    # Unterminated trailing group: extend to end of log.
+    if open_idx is not None and open_name is not None:
+        groups.append((open_idx, open_name, len(lines) - 1))
+
+    def _clamp(start: int, end: int) -> str:
+        start = max(0, start)
+        end = min(len(lines) - 1, end)
+        block_len = end - start + 1
+        if block_len < max_lines:
+            # Pad with trailing context outside the group.
+            end = min(len(lines) - 1, start + max_lines - 1)
+        return "\n".join(lines[start : end + 1])
+
+    if failed_step:
+        target = failed_step.strip().casefold()
+        for start_idx, name, end_idx in groups:
+            if name.casefold() == target:
+                return _clamp(start_idx, end_idx)
+
+    # --- 2) Annotation-line anchor -------------------------------------------
+    for ann in annotations or []:
+        if (ann.get("annotation_level") or "").lower() != "failure":
+            continue
+        line_no = ann.get("start_line") or ann.get("end_line")
+        if not isinstance(line_no, int) or line_no <= 0:
+            continue
+        # GitHub annotation line numbers refer to a source file, not the
+        # raw log — but when annotations carry an explicit position we
+        # use it as a *log-relative* anchor only when the value lies
+        # within the log range. Otherwise fall through.
+        if 1 <= line_no <= len(lines):
+            idx = line_no - 1
             start = max(0, idx - 2)
             end = min(len(lines), idx + max_lines)
             return "\n".join(lines[start:end])
+
+    # --- 3) Substring scan, but only AFTER the first group header -----------
+    pattern = re.compile(r"(error|failed|##\[error\])", re.IGNORECASE)
+    scan_offset = 0
+    if groups:
+        scan_offset = groups[0][0] + 1
+    for idx in range(scan_offset, len(lines)):
+        if pattern.search(lines[idx]):
+            start = max(scan_offset, idx - 2)
+            end = min(len(lines), idx + max_lines)
+            return "\n".join(lines[start:end])
+
+    # --- 4) Tail fallback ----------------------------------------------------
     return "\n".join(lines[-max_lines:])
 
 
@@ -1406,7 +1498,11 @@ def _get_failure_excerpt(
             if log_text is None:
                 logs_missing = True
             else:
-                log_excerpt = _extract_log_excerpt(log_text)
+                log_excerpt = _extract_log_excerpt(
+                    log_text,
+                    failed_step=failed_step or None,
+                    annotations=annotations,
+                )
 
         failing.append(
             FailingJob(

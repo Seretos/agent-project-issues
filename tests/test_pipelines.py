@@ -424,6 +424,126 @@ def test_get_pipeline_run_failed_populates_failure(
     assert run["failure"]["note"] is None
 
 
+def test_get_pipeline_run_excerpt_anchors_on_failing_step_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repro for `agent-project-issues#6`: a template `::error::` echo
+    inside an unexecuted bash `if` in an early step must NOT hijack
+    the excerpt. The excerpt must be clamped to the `##[group]Run
+    <failed_step>` ... `##[endgroup]` block of the actually-failing
+    step (`Dispatch to agent-marketplace`).
+    """
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/actions/runs/25764620196":
+            return _json(_run_payload(
+                25764620196, status="completed", conclusion="failure"
+            ))
+        if path == "/repos/acme/backend/actions/runs/25764620196/jobs":
+            return _json({
+                "jobs": [
+                    {
+                        "id": 999001,
+                        "name": "release",
+                        "html_url": "https://x/job/999001",
+                        "conclusion": "failure",
+                        "check_run_url": (
+                            "https://api.github.com/repos/acme/backend/check-runs/77"
+                        ),
+                        "steps": [
+                            {"name": "Validate version", "conclusion": "success"},
+                            {"name": "Tag precondition", "conclusion": "success"},
+                            {"name": "Set up job", "conclusion": "success"},
+                            {"name": "Dispatch to agent-marketplace", "conclusion": "failure"},
+                        ],
+                    }
+                ]
+            })
+        if path == "/repos/acme/backend/check-runs/77/annotations":
+            return _json([
+                {
+                    "annotation_level": "failure",
+                    "message": "Process completed with exit code 22.",
+                    "start_line": 31,
+                    "end_line": 31,
+                }
+            ])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    # Hand-rolled log fragment that mirrors the structure of the
+    # production run: an early step holds a template `::error::` line
+    # inside an `if` branch (never executed), but the substring still
+    # appears in the raw log. The last group is the actual failing
+    # `Dispatch to agent-marketplace` step.
+    fake_log_text = "\n".join([
+        "2025-05-13T22:00:00.0Z ##[group]Run echo Validate version",
+        "2025-05-13T22:00:00.1Z Validate version",
+        "2025-05-13T22:00:00.2Z if [ -z \"$V\" ]; then echo \"::error::Version '$V' is not valid semver (template)\"; fi",
+        "2025-05-13T22:00:00.3Z Version OK",
+        "2025-05-13T22:00:00.4Z ##[endgroup]",
+        "2025-05-13T22:00:01.0Z ##[group]Run actions/checkout@v4",
+        "2025-05-13T22:00:01.1Z Syncing repository: acme/backend",
+        "2025-05-13T22:00:01.2Z Determining the checkout info",
+        "2025-05-13T22:00:01.3Z Checking out the ref",
+        "2025-05-13T22:00:01.4Z ##[endgroup]",
+        "2025-05-13T22:00:02.0Z ##[group]Run Dispatch to agent-marketplace",
+        "2025-05-13T22:00:02.1Z curl -X POST https://api.github.com/repos/acme/marketplace/dispatches",
+        "2025-05-13T22:00:02.2Z HTTP/2 401",
+        "2025-05-13T22:00:02.3Z curl: (22) The requested URL returned error: 401",
+        "2025-05-13T22:00:02.4Z ##[error]Process completed with exit code 22.",
+        "2025-05-13T22:00:02.5Z ##[endgroup]",
+        "2025-05-13T22:00:02.6Z Cleaning up runner",
+    ])
+
+    monkeypatch.setattr(
+        github_provider, "_fetch_job_log", lambda token, url: fake_log_text
+    )
+
+    result = tools["get_pipeline_run"](
+        project_id="acme", run_id="25764620196"
+    )
+    assert "error" not in result, result
+    job = result["run"]["failure"]["failing_jobs"][0]
+    excerpt = job["log_excerpt"]
+    assert excerpt is not None
+    # Must include the real failing-step content...
+    assert "Dispatch to agent-marketplace" in excerpt
+    assert "exit code 22" in excerpt
+    # ...and must NOT include the template echo from the version step
+    # nor the checkout-step body, which is what the old substring scan
+    # used to anchor on.
+    assert "is not valid semver" not in excerpt
+    assert "Syncing repository" not in excerpt
+
+
+def test_extract_log_excerpt_substring_fallback_skips_setup_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When step-header matching cannot resolve (no matching group
+    name) and there are no annotation lines, the substring scan must
+    only run *after* the first group header — so template `::error::`
+    lines emitted as plain stdout *before* the first group can never
+    win.
+    """
+    log_text = "\n".join([
+        "Setting up runner",
+        "echo \"::error::Version 'x' is not valid semver\"",  # before any group
+        "##[group]Run real step",
+        "real-step starting",
+        "##[error]boom",
+        "##[endgroup]",
+    ])
+    out = github_provider._extract_log_excerpt(
+        log_text, failed_step="step-not-in-log", annotations=[]
+    )
+    assert "is not valid semver" not in out
+    assert "boom" in out
+
+
 def test_get_pipeline_run_log_403_marks_logs_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

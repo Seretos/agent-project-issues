@@ -1,0 +1,39 @@
+# Example project-issues plugin configuration (v1).
+#
+# Place this file at `.claude/project-issues.yml` in your project root
+# (or any parent directory — the loader walks up from CWD).
+#
+# Token values live in a sibling `.env` file by convention.
+
+version: 1
+
+# Optional — path is resolved relative to this file. When omitted, the
+# loader checks `<config-dir>/../.env` and then `<config-dir>/.env`.
+# env_file: .env
+
+projects:
+  - id: acme-backend
+    description: Acme main backend
+    provider: github
+    # provider-native repo path:
+    #   github: "owner/repo"
+    #   gitlab: full namespace, e.g. "group/sub/project"
+    path: acme/backend
+    token_env: GITHUB_TOKEN_ACME
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: true
+        modify: false
+        merge: false
+
+  - id: read-only-gitlab-example
+    provider: gitlab
+    path: group/sub/project
+    # base_url is optional; defaults to https://gitlab.com.
+    # base_url: https://gitlab.example.com
+    token_env: GITLAB_TOKEN_EXAMPLE
+    # All permissions default to false — the project is read-only when
+    # the `permissions:` block is omitted entirely.

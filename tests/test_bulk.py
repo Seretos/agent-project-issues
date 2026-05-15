@@ -32,10 +32,11 @@ def _project(
     return ProjectConfig(
         id=project_id,
         provider="github",
-        owner=owner,
-        repo=repo or project_id,
+        path=f"{owner}/{repo or project_id}",
         token_env=token_env or f"GITHUB_TOKEN_{project_id.upper()}",
-        permissions={"create": True, "modify": modify},
+        permissions={
+            "issues": {"create": True, "modify": modify},
+        },
     )
 
 

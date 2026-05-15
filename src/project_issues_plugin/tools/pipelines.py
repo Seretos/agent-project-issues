@@ -159,8 +159,12 @@ def register(mcp: FastMCP) -> None:
               "url": str,
               "failed_step": str,
               "annotations": [ ... ],   # GitHub check-run annotations
-              "log_excerpt": str | None  # ~30 lines around first error,
-                                         # or None if logs unavailable
+              "log_excerpt": str | None  # ~30 lines clamped to the
+                                         # failing step's ##[group] /
+                                         # ##[endgroup] block (with
+                                         # annotation-line + substring
+                                         # fallbacks), or None if logs
+                                         # unavailable
             },
             ...
           ],

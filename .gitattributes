@@ -1,0 +1,8 @@
+# The POSIX wrapper MUST stay LF-terminated; CRLF would break the
+# shebang on Linux clones and silently send the script through the
+# wrong interpreter.
+release/wrappers/project-issues text eol=lf
+
+# The Windows wrapper is a batch file -- batch interpreters tolerate
+# either line ending, but CRLF is conventional on Windows.
+release/wrappers/project-issues.cmd text eol=crlf

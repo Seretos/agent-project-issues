@@ -1,0 +1,24 @@
+#!/bin/sh
+# POSIX entry-point wrapper for the project-issues MCP server.
+#
+# Lives next to the OS-specific binary directories produced by the
+# release pipeline:
+#
+#     bin/
+#       project-issues          # this file (POSIX wrapper)
+#       project-issues.cmd      # Windows-batch wrapper
+#       linux-x86_64/
+#         project-issues        # Linux PyInstaller binary
+#       windows-x86_64/
+#         project-issues.exe    # Windows PyInstaller binary
+#
+# The MCP host's `plugin.json` `command` points at `bin/project-issues`
+# without an extension. POSIX hosts find this shebang script; Windows
+# hosts find `project-issues.cmd` via PATHEXT. This gives us a single,
+# extensionless command entry that works on every host.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+case "$(uname -s)" in
+  Linux*)   exec "$DIR/linux-x86_64/project-issues" "$@" ;;
+  Darwin*)  echo "macOS build not provided" >&2; exit 1 ;;
+  *) echo "unsupported uname: $(uname -s)" >&2; exit 1 ;;
+esac

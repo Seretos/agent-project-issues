@@ -7,7 +7,7 @@ MCP server that lets AI coding agents read and write GitHub/GitLab issues with p
 ```
 src/project_issues_plugin/      # Python source (src-layout)
   server.py                       # FastMCP entry point, wires the tools
-  config.py                       # TOML loader + git-remote autodiscovery + LoadResult
+  config.py                       # YAML loader + git-remote autodiscovery + LoadResult
   markers.py                      # AI-attribution constants (labels, comment prefix)
   providers/
     base.py                       # provider-agnostic Ticket/Comment dataclasses
@@ -64,11 +64,11 @@ The workflow:
 | Variable | Effect |
 |---|---|
 | `PROJECT_ISSUES_PLUGIN_ROOT` | Set by Claude Code to the plugin's install dir. Logged on startup. |
-| `PROJECT_ISSUES_PLUGIN_CWD` | Override the search root for `.claude/project-issues.toml` and `.git/config`. Highest priority. |
+| `PROJECT_ISSUES_PLUGIN_CWD` | Override the search root for `.claude/project-issues.yml` and `.git/config`. Highest priority. |
 | `CLAUDE_PROJECT_DIR` | Fallback search root if the plugin var is unset. |
 | `PROJECT_ISSUES_PLUGIN_LOG` | Logging level (`DEBUG`/`INFO`/…). Default `INFO`. Goes to stderr. |
 | `GITHUB_TOKEN` / `GITLAB_TOKEN` | Default tokens for `_auto` projects discovered from the git remote. |
-| `<token_env>` | Per-project token if `token_env` is set in TOML. The token value itself never leaves the process. |
+| `<token_env>` | Per-project token if `token_env` is set in YAML. The token value itself never leaves the process. |
 
 ## AI-marker conventions
 
@@ -100,7 +100,7 @@ The provider applies markers automatically; the agent must not pass them in argu
 
 - Tests live in `tests/` and use pytest. They cover deterministic logic (markers, config parsing). HTTP paths are tested manually against real providers.
 - GitLab is stubbed — `_PROVIDERS` in `tools/_providers.py` only registers GitHub. Auto-discovery emits gitlab projects but write paths fail with `NotImplementedError`.
-- Permissions are split into nested namespaces (`permissions.issues` / `permissions.pulls`). The flat form (`{create, modify}` and the extended `{create, modify, pr_create, pr_modify}`) is auto-migrated on load with a single `DeprecationWarning`. `permissions.pulls.merge` is new — defaults to false and has no flat equivalent.
+- Permissions are split into nested namespaces (`permissions.issues` / `permissions.pulls`). The legacy flat form (`{create, modify}` / `{create, modify, pr_create, pr_modify}`) and the old TOML format were removed in YAML schema v1 — see `README.md` for the migration cheat-sheet. `permissions.pulls.merge` defaults to false.
 - Permission gating lives in `tools/_providers.py` (`_require_token`, `_require_issues_create`, `_require_issues_modify`, `_require_pulls_create`, `_require_pulls_modify`, `_require_pulls_merge`). New write operations MUST go through these helpers.
 - The `dispatch.yml` workflow is a manual recovery tool only.
 

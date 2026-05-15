@@ -27,10 +27,79 @@ In any repo with a `github.com` `origin` remote, the plugin auto-discovers a sin
 
 ## Write access (per-project)
 
-Drop a `.claude/project-issues.toml` next to your repo:
+Drop a `.claude/project-issues.yml` next to your repo (a `.yaml` extension also works):
+
+```yaml
+version: 1
+env_file: .env   # optional, resolved relative to this file
+
+projects:
+  - id: acme-backend
+    description: Acme main backend
+    provider: github
+    path: acme/backend            # owner/repo for github, full namespace for gitlab
+    token_env: GITHUB_TOKEN_ACME
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: true
+        modify: false
+        merge: false
+```
+
+A complete example lives at [`config.example.yml`](./config.example.yml) in the repo root.
+
+Each `projects[]` entry can reuse the global `GITHUB_TOKEN` or scope to a per-project token (`token_env: GITHUB_TOKEN_ACME`) — the env var name is just a pointer; the token value itself is read from the process environment.
+
+Read access is always implicit (token-gated). Each write namespace has its own flags:
+
+- `permissions.issues.create` / `permissions.issues.modify` — gate `create_ticket` / `update_ticket` / `add_comment` / `update_comment`.
+- `permissions.pulls.create` / `permissions.pulls.modify` / `permissions.pulls.merge` — gate `create_pr` / `update_pr`+`add_pr_comment` / `merge_pr` respectively. `pulls.merge` defaults to false even when the other PR flags are true — opt in deliberately.
+
+### Schema reference (v1)
+
+Strict — unknown top-level / project / permissions keys are rejected with a clear error.
+
+**Top-level:**
+
+| Field      | Type   | Required | Default | Description |
+|------------|--------|----------|---------|-------------|
+| `version`  | int    | optional | `1`     | Schema version. Only `1` is accepted today. |
+| `env_file` | string | optional | auto    | Path to a `.env` file relative to the config file. When omitted, the loader checks `<config-dir>/../.env` and then `<config-dir>/.env`. |
+| `projects` | list   | required | `[]`    | List of project entries (see below). An empty list yields `state: "config_empty"`. |
+
+**Per project (`projects[]`):**
+
+| Field         | Type   | Required | Default       | Description |
+|---------------|--------|----------|---------------|-------------|
+| `id`          | string | required | —             | Stable, opaque identifier the agent uses to refer to the project. Reserved value `_auto` is rejected — it's only emitted by git-remote auto-discovery. |
+| `description` | string | optional | `""`          | Human-readable description, shown by `list_projects`. |
+| `provider`    | enum   | required | —             | `"github"` or `"gitlab"`. |
+| `path`        | string | required | —             | Provider-native repo path. GitHub: `"owner/repo"`. GitLab: full namespace, e.g. `"group/sub/project"`. |
+| `base_url`    | string | optional | provider host | Self-hosted GitLab base URL (e.g. `https://gitlab.example.com`). Ignored for GitHub. |
+| `token_env`   | string | optional | provider default | Name of the env var holding the API token for this project (e.g. `"GITHUB_TOKEN_ACME"`). When omitted the loader falls back to `GITHUB_TOKEN` / `GITLAB_TOKEN`. |
+| `permissions` | object | optional | all-false     | Permission flags (see below). Defaults make the project read-only. |
+
+**`permissions`:**
+
+| Field                  | Type  | Default | Gated tool(s) |
+|------------------------|-------|---------|---------------|
+| `issues.create`        | bool  | `false` | `create_ticket` |
+| `issues.modify`        | bool  | `false` | `update_ticket`, `add_comment`, `update_comment` |
+| `pulls.create`         | bool  | `false` | `create_pr` |
+| `pulls.modify`         | bool  | `false` | `update_pr`, `add_pr_comment` |
+| `pulls.merge`          | bool  | `false` | `merge_pr` (opt in deliberately) |
+
+### Migrating from the previous `.toml` config
+
+Before v1 the config lived in `.claude/project-issues.toml` and used a flat `permissions = { ... }` table plus split `owner` / `repo` fields. The format changed in a single breaking step — no auto-converter, no fallback. Migration is a literal field-by-field copy.
+
+**Before — `.claude/project-issues.toml`:**
 
 ```toml
-env_file = ".env"   # optional
+env_file = ".env"
 
 [[projects]]
 id          = "acme-backend"
@@ -50,24 +119,36 @@ modify = false
 merge  = false
 ```
 
-Each `[[projects]]` table can reuse the global `GITHUB_TOKEN` or scope to a per-project token (`token_env = "GITHUB_TOKEN_ACME"`) — the env var name is just a pointer; the token value itself is read from the process environment.
+**After — `.claude/project-issues.yml`:**
 
-Read access is always implicit (token-gated). Each write namespace has its own flags:
+```yaml
+version: 1
+env_file: .env
 
-- `permissions.issues.create` / `permissions.issues.modify` — gate `create_ticket` / `update_ticket` / `add_comment` / `update_comment`.
-- `permissions.pulls.create` / `permissions.pulls.modify` / `permissions.pulls.merge` — gate `create_pr` / `update_pr`+`add_pr_comment` / `merge_pr` respectively. `pulls.merge` defaults to false even when the other PR flags are true — opt in deliberately.
-
-#### Legacy flat form (deprecated)
-
-The previously-shipped flat shape is still accepted; it auto-migrates on load and emits a single `DeprecationWarning` to the server log:
-
-```toml
-permissions = { create = true, modify = true }
-# extended flat form (also accepted):
-permissions = { create = true, modify = true, pr_create = true, pr_modify = false }
+projects:
+  - id: acme-backend
+    description: Acme main backend
+    provider: github
+    path: acme/backend
+    token_env: GITHUB_TOKEN_ACME
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: true
+        modify: false
+        merge: false
 ```
 
-There is no flat equivalent for `pulls.merge` — existing configs cannot merge PRs without an explicit nested opt-in.
+Key consolidation points:
+
+- **`owner` + `repo` → `path`.** GitHub uses `"owner/repo"`; the old separate fields are no longer accepted (the strict schema rejects them).
+- **`version: 1` is the new top-level field.** It defaults to `1` when omitted, but adding it explicitly future-proofs against later schema breaks.
+- **`permissions` is a YAML mapping**, not a TOML inline-table. The legacy flat shape `permissions = { create = true, modify = true, pr_create = true, pr_modify = false }` is no longer accepted — split it into the nested `issues` / `pulls` sub-mappings shown above. There was never a flat equivalent for `pulls.merge`.
+- **File extension `.yml` / `.yaml`** — the `.toml` filename is no longer recognised. Rename the file along with the migration.
+
+Find-replace is enough for typical configs; the only structural change is the permissions / path collapse described above.
 
 ## Alternative installs
 

@@ -1,14 +1,32 @@
 name: release
 
-# Manual release flow:
-#   1. Trigger via Actions tab -> "Run workflow" -> enter version (e.g. 0.0.1)
-#      or via CLI: gh workflow run release.yml -f version=0.0.1
-#   2. Workflow stamps version into pyproject.toml + plugin.json (in CI only),
-#      builds the .exe, pushes an orphan release branch with install-ready
-#      files, creates the v{version} tag on that commit, and publishes a
-#      GitHub Release.
-#   3. The tag push triggers dispatch.yml on the release branch, which then
-#      notifies the agent-marketplace.
+# Manual multi-OS release flow (ticket #17). Three-job topology:
+#
+#   stamp (ubuntu-22.04)  -> validates semver, fails on duplicate tag,
+#                            stamps pyproject.toml + plugin.json with
+#                            the requested version, and uploads the
+#                            two manifests as the `stamped-manifests`
+#                            artifact for the build matrix to pick up.
+#   build (matrix)        -> runs scripts/build.ps1 -Clean on each OS
+#                            in the matrix (windows-latest +
+#                            ubuntu-22.04). The build script (cross-
+#                            platform per #12) emits the per-OS binary
+#                            into bin/<os>-x86_64/. Each matrix branch
+#                            uploads its bin/ directory as a separate
+#                            artifact.
+#   release (ubuntu-22.04)-> downloads both bin artifacts + the
+#                            stamped manifests, copies the shell-
+#                            wrapper pair from release/wrappers/ into
+#                            bin/, force-pushes the orphan release
+#                            branch, builds the install ZIP with
+#                            Unix mode bits stamped on the binaries +
+#                            POSIX wrapper, creates the GitHub
+#                            Release, and dispatches to the
+#                            marketplace.
+#
+# The 22.04 pin (not ubuntu-latest) matches the WSL2 glibc target
+# from #10/#11; ubuntu-latest's glibc 2.39 would emit binaries that
+# fail to start on WSL2-Ubuntu-22.04's glibc 2.35.
 on:
   workflow_dispatch:
     inputs:
@@ -21,9 +39,15 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    runs-on: windows-latest
-    timeout-minutes: 15
+  # ---------------------------------------------------------------------------
+  # Job 1 - Validate, fail-if-tag-exists, stamp manifests
+  # ---------------------------------------------------------------------------
+  stamp:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      plugin_name: ${{ steps.meta.outputs.plugin_name }}
+      tag:         ${{ steps.meta.outputs.tag }}
     steps:
       - name: Validate version is semver
         shell: bash
@@ -39,8 +63,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fail if tag already exists
+      - name: Read plugin metadata + check tag
+        id: meta
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
           TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
@@ -48,8 +75,72 @@ jobs:
             echo "::error::Tag ${TAG} already exists. Delete it first or pick a new version."
             exit 1
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "plugin_name=${PLUGIN_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
+
+      - name: Stamp version into pyproject.toml + plugin.json
+        # bash + sed/jq per plan-comment D1 = A (POSIX-native, less
+        # magic than the previous pwsh regex). The two files are
+        # tiny; we re-read after editing to fail loudly if either
+        # substitution missed.
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+
+          # pyproject.toml — replace the top-level `version = "..."`.
+          sed -i -E 's/^(version[[:space:]]*=[[:space:]]*")[^"]*(")/\1'"$V"'\2/' pyproject.toml
+          grep -E "^version[[:space:]]*=[[:space:]]*\"$V\"" pyproject.toml \
+            || { echo "::error::pyproject.toml stamp failed"; exit 1; }
+
+          # plugin.json — patch via jq for JSON safety.
+          tmp=$(mktemp)
+          jq --arg v "$V" '.version = $v' .claude-plugin/plugin.json > "$tmp"
+          mv "$tmp" .claude-plugin/plugin.json
+
+          STAMPED=$(jq -r '.version' .claude-plugin/plugin.json)
+          [ "$STAMPED" = "$V" ] || { echo "::error::plugin.json stamp failed (got $STAMPED)"; exit 1; }
+          echo "Stamped version $V into pyproject.toml + plugin.json"
+
+      - name: Upload stamped manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: stamped-manifests
+          path: |
+            pyproject.toml
+            .claude-plugin/plugin.json
+
+  # ---------------------------------------------------------------------------
+  # Job 2 - Cross-OS binary build
+  # ---------------------------------------------------------------------------
+  build:
+    needs: stamp
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: bin-windows
+            os-triple: windows-x86_64
+            binary: project-issues.exe
+          - os: ubuntu-22.04
+            artifact-name: bin-linux
+            os-triple: linux-x86_64
+            binary: project-issues
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download stamped manifests
+        # Overrides the on-disk pyproject.toml + plugin.json with the
+        # versioned copies from job 1. Without this each matrix
+        # branch would otherwise build with the un-stamped 0.0.0
+        # version.
+        uses: actions/download-artifact@v4
+        with:
+          name: stamped-manifests
+          path: .
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
@@ -58,56 +149,146 @@ jobs:
           cache: "pip"
           cache-dependency-path: pyproject.toml
 
-      - name: Stamp version into pyproject.toml + plugin.json
+      - name: Build binary
+        # build.ps1 is cross-platform (ticket #12); $IsWindows guards
+        # inside the script handle the OS-specific bits. pwsh-Core is
+        # pre-installed on both runners.
         shell: pwsh
+        run: ./scripts/build.ps1 -Clean
+
+      - name: Verify binary present
+        shell: bash
         run: |
-          $v = "${{ inputs.version }}"
+          OUT="bin/${{ matrix.os-triple }}/${{ matrix.binary }}"
+          if [ ! -f "$OUT" ]; then
+            echo "::error::expected $OUT was not produced"
+            ls -la bin/ "bin/${{ matrix.os-triple }}" || true
+            exit 1
+          fi
+          ls -la "$OUT"
 
-          $pyproject = Get-Content "pyproject.toml" -Raw
-          $pyproject = [regex]::Replace(
-            $pyproject,
-            '(?m)^(version\s*=\s*")[^"]*(")',
-            "`${1}$v`${2}"
-          )
-          Set-Content -Path "pyproject.toml" -Value $pyproject -NoNewline -Encoding UTF8
+      - name: Upload built binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: bin/${{ matrix.os-triple }}/${{ matrix.binary }}
+          if-no-files-found: error
 
-          $manifest = Get-Content ".claude-plugin/plugin.json" -Raw
-          $manifest = [regex]::Replace(
-            $manifest,
-            '("version"\s*:\s*")[^"]*(")',
-            "`${1}$v`${2}"
-          )
-          Set-Content -Path ".claude-plugin/plugin.json" -Value $manifest -NoNewline -Encoding UTF8
+  # ---------------------------------------------------------------------------
+  # Job 3 - Assemble orphan release branch, build ZIP, publish
+  # ---------------------------------------------------------------------------
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-          Write-Host "Stamped version $v"
+      - name: Download stamped manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: stamped-manifests
+          path: .
 
-      - name: Build .exe and stage package
-        shell: pwsh
-        run: ./scripts/build.ps1 -Clean -Package
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-windows
+          path: bin/windows-x86_64/
 
-      - name: Push orphan release branch and capture commit
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-linux
+          path: bin/linux-x86_64/
+
+      - name: Stage wrappers into bin/
+        # Per ticket #13: release/wrappers/project-issues (POSIX) +
+        # project-issues.cmd (Windows batch) are versioned in the
+        # source tree; the assembly step copies them next to the
+        # per-OS binary directories so the plugin.json `command`
+        # entry can resolve to bin/project-issues without an
+        # extension.
+        shell: bash
+        run: |
+          mkdir -p bin
+          cp release/wrappers/project-issues     bin/project-issues
+          cp release/wrappers/project-issues.cmd bin/project-issues.cmd
+          chmod +x bin/project-issues
+          chmod +x bin/windows-x86_64/project-issues.exe
+          chmod +x bin/linux-x86_64/project-issues
+          echo "=== bin/ contents ==="
+          ls -laR bin
+
+      - name: Build install ZIP with Unix mode bits
+        # Inline Python zipfile (plan-comment D2 = A — keeps the
+        # logic next to the assembly step instead of refactoring
+        # build.ps1 to run package-only). The three executables
+        # carry 0o755; everything else 0o644. The chmod state on
+        # disk (set above) is what unzip honours on Linux.
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+          STAGE=$(mktemp -d)
+          ZIP_NAME="project-issues-plugin-${V}.zip"
+          ZIP_PATH="${RUNNER_TEMP}/${ZIP_NAME}"
+
+          cp -a .claude-plugin "$STAGE/"
+          cp -a bin             "$STAGE/"
+          [ -f README.md ] && cp README.md "$STAGE/"
+          [ -f LICENSE   ] && cp LICENSE   "$STAGE/"
+
+          python3 - "$STAGE" "$ZIP_PATH" <<'PYEOF'
+          import os, sys, time, zipfile
+
+          stage, zip_path = sys.argv[1], sys.argv[2]
+
+          EXE_ATTR = (0o755 << 16) | 0x8000
+          REG_ATTR = (0o644 << 16) | 0x8000
+
+          def is_executable(rel: str) -> bool:
+              # The shell wrappers + both PyInstaller binaries.
+              if rel == "bin/project-issues":
+                  return True
+              if rel.startswith("bin/"):
+                  leaf = rel.rsplit("/", 1)[-1]
+                  if leaf in ("project-issues", "project-issues.exe"):
+                      return True
+              return False
+
+          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for dirpath, dirnames, filenames in os.walk(stage):
+                  dirnames.sort()
+                  for name in sorted(filenames):
+                      abs_path = os.path.join(dirpath, name)
+                      rel = os.path.relpath(abs_path, stage).replace(os.sep, "/")
+                      st = os.stat(abs_path)
+                      mtime = time.localtime(st.st_mtime)[:6]
+                      zi = zipfile.ZipInfo(filename=rel, date_time=mtime)
+                      zi.compress_type = zipfile.ZIP_DEFLATED
+                      zi.create_system = 3  # Unix
+                      zi.external_attr = EXE_ATTR if is_executable(rel) else REG_ATTR
+                      with open(abs_path, "rb") as fh:
+                          zf.writestr(zi, fh.read())
+
+          print(f"wrote {zip_path} ({os.path.getsize(zip_path)} bytes)")
+          PYEOF
+
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+
+      - name: Force-push orphan release branch
         id: rel
         shell: bash
         run: |
-          STAGE="build/stage/project-issues-plugin"
-          ZIP="dist/project-issues-plugin-${{ inputs.version }}.zip"
-          if [ ! -d "$STAGE" ]; then
-            echo "::error::staging dir not produced by build.ps1 -Package"; exit 1
-          fi
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::release zip $ZIP not produced by build.ps1 -Package"
-            ls -la dist/ || true
-            exit 1
-          fi
-
-          # Stash staging tree AND the release zip outside the worktree, since
-          # "git checkout --orphan" + clean will wipe dist/ before we attach
-          # the zip to the GitHub Release.
-          TMP=$(mktemp -d)
-          cp -a "$STAGE"/. "$TMP/"
-          ASSET_DIR=$(mktemp -d)
-          cp "$ZIP" "$ASSET_DIR/"
-          echo "asset=$ASSET_DIR/$(basename "$ZIP")" >> "$GITHUB_OUTPUT"
+          STAGE_DIR=$(mktemp -d)
+          cp -a .claude-plugin "$STAGE_DIR/"
+          cp -a bin             "$STAGE_DIR/"
+          [ -f README.md ] && cp README.md "$STAGE_DIR/"
+          [ -f LICENSE   ] && cp LICENSE   "$STAGE_DIR/"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -121,16 +302,20 @@ jobs:
             echo "::error::working tree not empty after clean:"; echo "$leftover"; exit 1
           fi
 
-          cp -a "$TMP"/. .
+          cp -a "$STAGE_DIR"/. .
 
-          echo "=== release branch contents ==="
-          find . -mindepth 1 -not -path './.git*' | sort
+          # Stamp the POSIX exec bit on the three executables so a
+          # Linux clone of the orphan branch yields -rwxr-xr-x rather
+          # than 0644 (which causes EACCES when the MCP host tries to
+          # spawn the wrapper or its delegate).
+          git add bin/windows-x86_64/project-issues.exe \
+                  bin/linux-x86_64/project-issues \
+                  bin/project-issues
+          git update-index --chmod=+x bin/windows-x86_64/project-issues.exe
+          git update-index --chmod=+x bin/linux-x86_64/project-issues
+          git update-index --chmod=+x bin/project-issues
+          # .cmd stays 0644 -- Windows ignores POSIX mode bits.
 
-          # Stamp the Windows-built binary with the POSIX exec bit so a Linux
-          # clone of the orphan release branch yields -rwxr-xr-x rather than
-          # 0644 (which causes EACCES when an MCP host tries to spawn it).
-          git add bin/project-issues.exe
-          git update-index --chmod=+x bin/project-issues.exe
           git add -A
           git commit -m "release: v${{ inputs.version }}"
           git push origin release --force
@@ -138,28 +323,23 @@ jobs:
           SHA=$(git rev-parse HEAD)
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
-      # Tag und Release in einem Schritt — gh release create setzt den Tag
-      # automatisch auf den angegebenen Target-Commit (sha) und publisht den
-      # Release. Das Tag-Push triggert dispatch.yml im selben Tag-Commit.
       - name: Create tag and GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
-          gh release create "$TAG" \
+          gh release create "${{ needs.stamp.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --target "${{ steps.rel.outputs.sha }}" \
-            --title "$TAG" \
+            --title "${{ needs.stamp.outputs.tag }}" \
             --generate-notes \
             ${{ contains(inputs.version, '-') && '--prerelease' || '' }} \
-            "${{ steps.rel.outputs.asset }}"
+            "${{ env.ZIP_PATH }}"
 
-      # The tag we just created via gh/GITHUB_TOKEN does NOT fire push:tags
-      # in dispatch.yml — Actions blocks GITHUB_TOKEN-originated events to
-      # prevent recursive workflow loops. So call the marketplace directly
-      # from here.
+      # The tag we just created via gh/GITHUB_TOKEN does NOT fire
+      # push:tags in dispatch.yml -- Actions blocks GITHUB_TOKEN-
+      # originated events to prevent recursive workflow loops. So
+      # call the marketplace directly from here.
       - name: Dispatch to agent-marketplace
         shell: bash
         env:

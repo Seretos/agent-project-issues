@@ -40,10 +40,10 @@ RelationKind = Literal[
     "duplicated_by",
     "mentions",
     "mentioned_by",
-    # Reserved for GitLab; not currently emitted by GitHub.
-    "relates_to",
     "blocks",
     "blocked_by",
+    # Reserved for GitLab; not currently emitted by GitHub.
+    "relates_to",
 ]
 
 

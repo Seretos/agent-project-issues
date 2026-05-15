@@ -106,13 +106,19 @@ def register(mcp: FastMCP) -> None:
         includes a `relations` list describing typed links to other
         tickets / PRs. Relation kinds: `parent`, `child`, `closes`,
         `closed_by`, `duplicate_of`, `duplicated_by`, `mentions`,
-        `mentioned_by` (GitHub) plus `relates_to`, `blocks`,
-        `blocked_by` (GitLab, reserved). Each relation carries
+        `mentioned_by`, `blocks`, `blocked_by` (GitHub) plus
+        `relates_to` (GitLab, reserved). Each relation carries
         `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo),
         best-effort `title`, `url`, `state`
         (`"open"`/`"closed"`/`"merged"`/`""`), and `is_pull_request`.
+        For outgoing relations parsed from the queried ticket's own body
+        (`mentions`, `closes`, `duplicate_of`) we don't fetch the target,
+        so `title` may be empty and `state` may be `""`.
         The boolean `relations_truncated` is true when the underlying
-        timeline had more pages than we fetched.
+        timeline had more pages than we fetched. The comment-scan depth
+        for `mentions` / `closes` is controlled by the
+        `PROJECT_ISSUES_MENTIONS_SCAN_DEPTH` env var (`-1` = all comments,
+        `0` = body only, `N` = first N comments).
         Set `include_relations=False` to save two API calls per request
         when relation context is not needed.
         """

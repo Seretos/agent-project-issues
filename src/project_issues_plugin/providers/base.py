@@ -4,7 +4,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Status = Literal["open", "completed", "not_planned"]
+# Provider-native status as a free string.
+#
+# Historically a 3-value enum (`open`/`completed`/`not_planned`) was used
+# here, but that model could not represent Azure-DevOps workflows
+# (`Resolved`, `Committed`, custom states, etc.). The string now flows
+# through unchanged; agents discover valid values + semantic hints via
+# `list_ticket_statuses`. GitHub uses a `state:state_reason` suffix
+# encoding to preserve the `closed:completed` vs `closed:not_planned`
+# distinction.
+Status = str
 ListStatus = Literal["open", "closed", "any"]
 
 
@@ -117,6 +126,33 @@ class PullRequest:
     url: str
     created_at: str
     updated_at: str
+
+
+@dataclass
+class StatusSpec:
+    """Result of `list_ticket_statuses` — discovery payload for the
+    provider-native status state-space.
+
+    `values` lists every accepted status string (including any GitHub
+    `state:state_reason` suffix encodings). `transitions` maps each
+    value to the values that can legally follow it. `hints` exposes
+    semantic anchors so agents can act without provider-specific
+    knowledge:
+
+    - `default_open` — the value to use when reopening a ticket.
+    - `terminal` — every value that ends the workflow.
+    - `terminal_completed` — the terminal value meaning "done as planned".
+    - `terminal_declined` — the terminal value meaning "won't do" /
+      "not planned".
+
+    For providers that don't distinguish completed-vs-declined (GitLab,
+    most ADO templates) `terminal_completed` and `terminal_declined`
+    may be the same value.
+    """
+
+    values: list[str]
+    transitions: dict[str, list[str]]
+    hints: dict[str, str | list[str]]
 
 
 @dataclass

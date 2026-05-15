@@ -23,6 +23,7 @@ from project_issues_plugin.providers.base import (
     PullRequest,
     Relation,
     Status,
+    StatusSpec,
     Ticket,
     TicketFilters,
 )
@@ -76,12 +77,18 @@ def _repo_path(project: ProjectConfig) -> str:
 def _map_issue(raw: dict) -> Ticket:
     state = raw.get("state", "open")
     state_reason = raw.get("state_reason")
+    # New encoding (see `Status` doc in providers/base.py): `open`,
+    # `closed:completed`, or `closed:not_planned`. The `state_reason`
+    # is preserved verbatim so the round-trip through
+    # `list_ticket_statuses().hints` is lossless.
     if state == "open":
         status: Status = "open"
     elif state_reason == "not_planned":
-        status = "not_planned"
+        status = "closed:not_planned"
     else:
-        status = "completed"
+        # GitHub returns `state_reason="completed"` for "completed" and
+        # null/unknown for legacy issues — both map to `closed:completed`.
+        status = "closed:completed"
     return Ticket(
         id=str(raw["number"]),
         title=raw.get("title") or "",
@@ -574,14 +581,30 @@ class GitHubProvider:
             if body is not None:
                 payload["body"] = body
             if status is not None:
+                # New provider-native string API (see ticket #7).
+                # Accepted GitHub values:
+                #   - "open"
+                #   - "closed"                  (same as "closed:completed")
+                #   - "closed:completed"
+                #   - "closed:not_planned"
+                # The legacy 3-value enum is no longer accepted — agents
+                # must call `list_ticket_statuses` to discover valid
+                # values and use the `hints` to choose a target.
                 if status == "open":
                     payload["state"] = "open"
-                elif status == "completed":
+                elif status in ("closed", "closed:completed"):
                     payload["state"] = "closed"
                     payload["state_reason"] = "completed"
-                elif status == "not_planned":
+                elif status == "closed:not_planned":
                     payload["state"] = "closed"
                     payload["state_reason"] = "not_planned"
+                else:
+                    raise ValueError(
+                        f"unsupported status {status!r} for GitHub — "
+                        f"use list_ticket_statuses to discover valid "
+                        f"values. Accepted: open, closed, "
+                        f"closed:completed, closed:not_planned."
+                    )
             if new_labels != current_labels:
                 payload["labels"] = sorted(new_labels)
             if new_assignees != current_assignees:
@@ -594,6 +617,34 @@ class GitHubProvider:
             r = client.patch(f"{_repo_path(project)}/issues/{ticket_id}", json=payload)
             _check(r)
             return _map_issue(r.json())
+
+    def list_statuses(
+        self,
+        project: ProjectConfig,  # noqa: ARG002 — kept for provider-agnostic signature
+        token: str | None,        # noqa: ARG002 — same
+    ) -> StatusSpec:
+        """Return the GitHub-static status spec.
+
+        GitHub's state-space is fixed (`open` / `closed`) but we expose
+        the `state_reason` distinction through suffix-encoded values so
+        agents can choose between "done as planned" vs "not planned"
+        terminal states. The state-space is identical for every GitHub
+        project, so this is a static return value — no API call.
+        """
+        return StatusSpec(
+            values=["open", "closed:completed", "closed:not_planned"],
+            transitions={
+                "open": ["closed:completed", "closed:not_planned"],
+                "closed:completed": ["open"],
+                "closed:not_planned": ["open"],
+            },
+            hints={
+                "default_open": "open",
+                "terminal": ["closed:completed", "closed:not_planned"],
+                "terminal_completed": "closed:completed",
+                "terminal_declined": "closed:not_planned",
+            },
+        )
 
     def add_comment(
         self,

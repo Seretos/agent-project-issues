@@ -7,8 +7,9 @@ them and MUST NOT add them manually.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import asdict
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -22,6 +23,18 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _safe,
 )
+
+# TTL cache for `list_ticket_statuses`. Status workflows are static for
+# GitHub/GitLab and only change on ADO when a project admin edits the
+# process template — refreshing every hour is the documented trade-off
+# (plan-comment for ticket #7, D3 = Option B).
+_STATUS_CACHE_TTL_SECONDS = 60 * 60
+_status_cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
+
+
+def _status_cache_clear() -> None:
+    """Test-only hook — clears the module-level status cache."""
+    _status_cache.clear()
 
 
 def register(mcp: FastMCP) -> None:
@@ -168,7 +181,7 @@ def register(mcp: FastMCP) -> None:
         ticket_id: str,
         title: str | None = None,
         body: str | None = None,
-        status: Literal["open", "completed", "not_planned"] | None = None,
+        status: str | None = None,
         labels_add: list[str] | None = None,
         labels_remove: list[str] | None = None,
         assignees_add: list[str] | None = None,
@@ -176,10 +189,21 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Update an existing ticket. Only specified fields change.
 
-        `status` semantics:
-          - "open":        reopen the ticket
-          - "completed":   close as 'done as planned'
-          - "not_planned": close as 'not planned' / declined / out-of-scope
+        `status` is the **provider-native** status string. For GitHub
+        the accepted values are `open`, `closed`, `closed:completed`,
+        and `closed:not_planned` (where the `state:state_reason`
+        suffix carries GitHub's "done as planned" vs "not planned"
+        distinction). For ADO/Jira the value flows through verbatim
+        (e.g. `Resolved`, `Removed`, `Done`).
+
+        Agents that don't know the provider's state-space should call
+        `list_ticket_statuses(project_id)` first and read
+        `hints.terminal_completed` / `hints.terminal_declined` /
+        `hints.default_open`. The legacy 3-value enum
+        (`open`/`completed`/`not_planned`) is **no longer accepted** —
+        unknown values raise an error so an agent can re-discover the
+        state-space via `list_ticket_statuses` instead of silently
+        succeeding with the wrong outcome.
 
         Label and assignee changes are add/remove operations relative to
         the current set; pass arrays of names. The label `ai-modified`
@@ -200,6 +224,57 @@ def register(mcp: FastMCP) -> None:
                 assignees_add=assignees_add, assignees_remove=assignees_remove,
             )
             return {"project_id": project.id, "ticket": asdict(ticket)}
+        return _safe(go)
+
+    @mcp.tool()
+    def list_ticket_statuses(project_id: str) -> dict:
+        """Discover the provider-native status state-space.
+
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "provider": "github" | "gitlab" | ...,
+          "values":      [str, ...],          # all valid `status` strings
+          "transitions": {str: [str, ...]},   # legal next values per status
+          "hints": {
+            "default_open":       str,
+            "terminal":           [str, ...],
+            "terminal_completed": str,
+            "terminal_declined":  str,
+          }
+        }
+        ```
+
+        Use this to discover what `update_ticket.status` accepts for a
+        given project, especially when the provider has a customisable
+        workflow (Azure DevOps, Jira). For GitHub the state-space is
+        static so the response is identical for every GitHub project.
+
+        Results are cached server-side for ~1h per `(project_id, token)`
+        pair (workflow definitions change rarely). Read-only: no
+        permission flag required.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            cache_key = (project.id, token)
+            now = time.time()
+            cached = _status_cache.get(cache_key)
+            if cached is not None and (now - cached[0]) < _STATUS_CACHE_TTL_SECONDS:
+                return cached[1]
+            spec = provider.list_statuses(project, token)
+            payload = {
+                "project_id": project.id,
+                "provider": project.provider,
+                "values": list(spec.values),
+                "transitions": {k: list(v) for k, v in spec.transitions.items()},
+                "hints": dict(spec.hints),
+            }
+            _status_cache[cache_key] = (now, payload)
+            return payload
         return _safe(go)
 
     @mcp.tool()

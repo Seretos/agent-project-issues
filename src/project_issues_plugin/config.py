@@ -53,6 +53,7 @@ import io
 import logging
 import os
 import re
+import sys
 import warnings
 from configparser import ConfigParser
 from pathlib import Path
@@ -399,6 +400,11 @@ class LoadResult(BaseModel):
       - "config_empty":  config exists but has no `projects:` entries.
       - "no_config":     no config and no usable git remote.
       - "config_error":  config exists but failed to parse/validate.
+
+    `searched_paths` is the ordered list of candidate paths the
+    resolver inspected (including the winning one when present). This
+    is the single source-of-truth that the diagnostic `runtime.*`
+    fields surfaced by `list_projects` (ticket #15) flow through.
     """
     projects: list[ProjectConfig]
     state: Literal["ok", "config_empty", "no_config", "config_error"]
@@ -406,21 +412,156 @@ class LoadResult(BaseModel):
     git_config: str | None = None
     search_root: str
     error: str | None = None
+    searched_paths: list[str] = Field(default_factory=list)
 
 
-# Config-file candidate names, in priority order. The YAML extension is
-# preferred — `.yml` first because that's the Worktree-Plugin convention.
-_CONFIG_CANDIDATES = (
-    ".claude/project-issues.yml",
-    ".claude/project-issues.yaml",
-)
+# Per-OS default search candidates. The resolver iterates these AFTER
+# the explicit / plugin-root / CWD-walk candidates. The first existing
+# file wins — see `_resolve_config_path` for the full priority order.
+#
+# `WSL2 is treated as Linux` (plan-comment D3 = Option A): /root/.claude
+# and ~/.claude already fall out of the Linux candidate set, so #11 is
+# fixed without any WSL-specific magic.
+_CONFIG_FILENAME = "project-issues.yml"
+_CONFIG_FILENAME_ALT = "project-issues.yaml"
+
+
+def _is_windows() -> bool:
+    """OS detection (plan-comment D1 = Option A — `sys.platform`)."""
+    return sys.platform.startswith("win")
+
+
+def _os_default_candidates() -> list[Path]:
+    """Per-OS default config locations, in priority order.
+
+    Linux (and WSL2):
+      1. `${XDG_CONFIG_HOME:-~/.config}/project-issues.yml`
+      2. `~/.claude/project-issues.yml`
+
+    Windows:
+      1. `%APPDATA%\\project-issues\\project-issues.yml`
+      2. `%USERPROFILE%\\.claude\\project-issues.yml`
+    """
+    candidates: list[Path] = []
+    if _is_windows():
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "project-issues" / _CONFIG_FILENAME)
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            candidates.append(Path(userprofile) / ".claude" / _CONFIG_FILENAME)
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        xdg_dir = Path(xdg) if xdg else Path.home() / ".config"
+        candidates.append(xdg_dir / _CONFIG_FILENAME)
+        candidates.append(Path.home() / ".claude" / _CONFIG_FILENAME)
+    return candidates
+
+
+def _walk_up_candidates(start: Path) -> list[Path]:
+    """Every `.claude/project-issues.{yml,yaml}` between `start` and the
+    filesystem root, deepest-first.
+
+    The deepest-first order is the deterministic resolution rule
+    documented for ticket #19: when a user starts Claude Code from
+    `<repo>/` and a sibling `<repo>/<sub>/.claude/project-issues.yml`
+    also exists, only the CWD-near config (or one above it) is ever a
+    candidate — the sub-folder's config is never inspected, because
+    `_walk_up` walks **upward** from the CWD, not downward.
+    """
+    out: list[Path] = []
+    cur = start.resolve()
+    while True:
+        for name in (_CONFIG_FILENAME, _CONFIG_FILENAME_ALT):
+            out.append(cur / ".claude" / name)
+        if cur.parent == cur:
+            return out
+        cur = cur.parent
+
+
+def _resolve_config_path(
+    cwd: Path,
+) -> tuple[Path | None, list[Path]]:
+    """Resolve the active config-file path + the full searched list.
+
+    Priority (first existing file wins):
+
+      1. ``$PROJECT_ISSUES_CONFIG`` — explicit override, highest priority.
+         If the value points to a non-existent file the resolver raises
+         ``ConfigError`` rather than silently falling through (D2 = A);
+         this makes typos loud instead of mysterious.
+      2. ``$PROJECT_ISSUES_PLUGIN_ROOT/project-issues.yml`` (or
+         ``.yaml``) — for self-contained plugin checkouts that ship
+         their own config next to the binary.
+      3. ``$CWD/.claude/project-issues.yml`` and every ancestor
+         directory, deepest-first.
+      4. Per-OS defaults — see `_os_default_candidates`.
+
+    Returns a `(winner_or_None, all_paths_inspected)` tuple. The
+    `all_paths_inspected` list always reflects the order the resolver
+    actually walked, so callers can surface it in diagnostics.
+    """
+    searched: list[Path] = []
+
+    # 1) Explicit override.
+    override = os.environ.get("PROJECT_ISSUES_CONFIG")
+    if override:
+        override_path = Path(override).resolve()
+        searched.append(override_path)
+        if not override_path.exists():
+            raise ConfigError(
+                f"PROJECT_ISSUES_CONFIG points to non-existent path: "
+                f"{override_path}"
+            )
+        return override_path, searched
+
+    # 2) Plugin-root config.
+    plugin_root = os.environ.get("PROJECT_ISSUES_PLUGIN_ROOT")
+    if plugin_root:
+        root_dir = Path(plugin_root)
+        for name in (_CONFIG_FILENAME, _CONFIG_FILENAME_ALT):
+            candidate = (root_dir / name).resolve()
+            searched.append(candidate)
+            if candidate.exists():
+                return candidate, searched
+
+    # 3) CWD walk-up.
+    for candidate in _walk_up_candidates(cwd):
+        searched.append(candidate)
+        if candidate.exists():
+            return candidate, searched
+
+    # 4) Per-OS defaults.
+    for candidate in _os_default_candidates():
+        searched.append(candidate)
+        if candidate.exists():
+            return candidate, searched
+
+    return None, searched
 
 
 def load_projects(cwd: Path | None = None) -> LoadResult:
     """Resolve the project list for the configured working directory."""
     cwd = resolve_search_root(cwd)
-    config_path = _walk_up(cwd, _CONFIG_CANDIDATES)
     git_path = _walk_up(cwd, (".git/config",))
+
+    try:
+        config_path, searched = _resolve_config_path(cwd)
+    except ConfigError as exc:
+        # Explicit-override-to-missing-file: surface as `config_error`
+        # rather than `no_config`, because the user gave the resolver a
+        # concrete path and got nothing back.
+        return LoadResult(
+            projects=[],
+            state="config_error",
+            git_config=str(git_path) if git_path else None,
+            search_root=str(cwd),
+            error=str(exc),
+            searched_paths=[str(Path(os.environ["PROJECT_ISSUES_CONFIG"]).resolve())],
+        )
+
+    searched_strs = [str(p) for p in searched]
+
     if config_path:
         try:
             projects = _load_yaml(config_path)
@@ -432,6 +573,7 @@ def load_projects(cwd: Path | None = None) -> LoadResult:
                 git_config=str(git_path) if git_path else None,
                 search_root=str(cwd),
                 error=f"failed to load {config_path}: {exc}",
+                searched_paths=searched_strs,
             )
         log.info("loaded %d project(s) from %s", len(projects), config_path)
         return LoadResult(
@@ -440,6 +582,7 @@ def load_projects(cwd: Path | None = None) -> LoadResult:
             config_file=str(config_path),
             git_config=str(git_path) if git_path else None,
             search_root=str(cwd),
+            searched_paths=searched_strs,
         )
     auto = _autodiscover_from_git(cwd)
     if auto:
@@ -452,6 +595,7 @@ def load_projects(cwd: Path | None = None) -> LoadResult:
             state="ok",
             git_config=str(git_path) if git_path else None,
             search_root=str(cwd),
+            searched_paths=searched_strs,
         )
     log.info("no config and no usable git remote in %s", cwd)
     return LoadResult(
@@ -459,6 +603,7 @@ def load_projects(cwd: Path | None = None) -> LoadResult:
         state="no_config",
         git_config=str(git_path) if git_path else None,
         search_root=str(cwd),
+        searched_paths=searched_strs,
     )
 
 

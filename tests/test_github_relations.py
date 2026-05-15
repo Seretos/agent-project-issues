@@ -394,3 +394,275 @@ def test_include_relations_false_skips_extra_calls(monkeypatch: pytest.MonkeyPat
         "/repos/acme/backend/issues/42",
         "/repos/acme/backend/issues/42/comments",
     ]
+
+
+# ---------- new relation kinds (ticket #5) ---------------------------------
+
+
+def test_outgoing_mentions_from_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`#N` refs in the ticket's own body surface as outgoing `mentions`."""
+
+    body = "This issue references #11 and other/repo#22."
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/3":
+            return _json(_issue_payload(3, body=body))
+        if path == "/repos/acme/backend/issues/3/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/3/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/3/timeline":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="3"
+    )
+    kinds = sorted(r.kind for r in relations)
+    ticket_ids = sorted(r.ticket_id for r in relations)
+    assert kinds == ["mentions", "mentions"]
+    assert ticket_ids == ["#11", "other/repo#22"]
+
+
+def test_outgoing_closes_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`closes #N` in a PR body emits a `closes` relation (not `mentions`)."""
+
+    body = "Fixes #2 — see other/repo#7 for context."
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/5":
+            return _json(_issue_payload(5, body=body))
+        if path == "/repos/acme/backend/issues/5/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/5/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/5/timeline":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="5"
+    )
+    by_kind = {(r.kind, r.ticket_id) for r in relations}
+    assert ("closes", "#2") in by_kind
+    # #2 should be promoted to `closes`, NOT also surface as `mentions`.
+    assert ("mentions", "#2") not in by_kind
+    # `other/repo#7` is a plain mention (no closing kw).
+    assert ("mentions", "other/repo#7") in by_kind
+
+
+def test_duplicate_of_from_own_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed-as-duplicate ticket emits `duplicate_of` from its body."""
+
+    body = "Duplicate of #1"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/4":
+            return _json(_issue_payload(
+                4, body=body, state="closed", state_reason="duplicate",
+            ))
+        if path == "/repos/acme/backend/issues/4/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/4/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/4/timeline":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="4"
+    )
+    by_kind = {(r.kind, r.ticket_id) for r in relations}
+    assert ("duplicate_of", "#1") in by_kind
+
+
+def test_duplicated_by_relabel_from_cross_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cross-ref from a closed-as-duplicate source becomes `duplicated_by`."""
+
+    source = {
+        "number": 4,
+        "title": "Dup of #1",
+        "state": "closed",
+        "state_reason": "duplicate",
+        "body": "Duplicate of #1",
+        "html_url": "https://github.com/acme/backend/issues/4",
+        "repository": {"full_name": "acme/backend"},
+    }
+    timeline = [
+        {"event": "cross-referenced", "source": {"type": "issue", "issue": source}}
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/1":
+            return _json(_issue_payload(1))
+        if path == "/repos/acme/backend/issues/1/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/1/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/1/timeline":
+            return _json(timeline)
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="1"
+    )
+    kinds = {r.kind for r in relations}
+    assert "duplicated_by" in kinds
+    # `mentioned_by` for the same target should be dropped by dedupe.
+    assert not any(
+        r.kind == "mentioned_by" and r.ticket_id == "#4" for r in relations
+    )
+
+
+def test_closed_by_relabel_from_merged_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cross-ref from a merged PR with `closes #N` becomes `closed_by`."""
+
+    source = {
+        "number": 5,
+        "title": "Implement fix",
+        "state": "closed",
+        "merged_at": "2024-03-01T12:00:00Z",
+        "body": "Closes #2",
+        "html_url": "https://github.com/acme/backend/pull/5",
+        "pull_request": {
+            "url": "https://api.github.com/repos/acme/backend/pulls/5",
+            "merged_at": "2024-03-01T12:00:00Z",
+        },
+        "repository": {"full_name": "acme/backend"},
+    }
+    timeline = [
+        {"event": "cross-referenced", "source": {"type": "issue", "issue": source}}
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/2":
+            return _json(_issue_payload(2))
+        if path == "/repos/acme/backend/issues/2/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/timeline":
+            return _json(timeline)
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="2"
+    )
+    by_kind = {(r.kind, r.ticket_id) for r in relations}
+    assert ("closed_by", "#5") in by_kind
+    assert ("mentioned_by", "#5") not in by_kind
+
+
+def test_blocks_blocked_by_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue-Dependencies timeline events emit `blocks` / `blocked_by`."""
+
+    blocker = {
+        "number": 3,
+        "title": "Blocker",
+        "state": "open",
+        "html_url": "https://github.com/acme/backend/issues/3",
+        "repository": {"full_name": "acme/backend"},
+    }
+    timeline = [
+        {"event": "blocked_by_added", "blocked_by_issue": blocker},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/2":
+            return _json(_issue_payload(2))
+        if path == "/repos/acme/backend/issues/2/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/timeline":
+            return _json(timeline)
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="2"
+    )
+    by_kind = {(r.kind, r.ticket_id) for r in relations}
+    assert ("blocked_by", "#3") in by_kind
+
+
+def test_mentions_scan_depth_body_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`PROJECT_ISSUES_MENTIONS_SCAN_DEPTH=0` skips comment scanning."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/9":
+            return _json(_issue_payload(9, body="see #11"))
+        if path == "/repos/acme/backend/issues/9/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/9/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/9/timeline":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    seen = _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="9"
+    )
+    # The body mention is the only #11 reference.
+    assert any(r.kind == "mentions" and r.ticket_id == "#11" for r in relations)
+    # Comments endpoint should still be called once by `get_ticket` itself,
+    # but NOT a second time by the scanner (depth=0). The scanner-call
+    # would use ?per_page=N with N>0; the get_ticket call uses per_page=100.
+    comment_paths = [
+        r for r in seen
+        if r.url.path == "/repos/acme/backend/issues/9/comments"
+    ]
+    assert len(comment_paths) == 1
+
+
+def test_self_reference_is_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `#N` in the body that matches the ticket's own number is dropped."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/42":
+            return _json(_issue_payload(42, body="this issue #42 and also #99"))
+        if path == "/repos/acme/backend/issues/42/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/42/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/42/timeline":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="42"
+    )
+    ticket_ids = {r.ticket_id for r in relations}
+    assert "#99" in ticket_ids
+    assert "#42" not in ticket_ids

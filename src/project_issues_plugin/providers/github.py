@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 from typing import Any
 
 import httpx
@@ -303,29 +305,298 @@ def _has_next_link(link_header: str | None) -> bool:
     return False
 
 
+# ---------- ref / closing-keyword scanning ---------------------------------
+
+_CLOSING_KEYWORDS = ("close", "closes", "closed", "fix", "fixes", "fixed",
+                     "resolve", "resolves", "resolved")
+_REF_RE = re.compile(
+    r"(?:^|(?<=[\s,;:.!?(\[]))"
+    r"(?P<full>(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)"
+    r"/(?P<repo>[A-Za-z0-9._\-]+))?#(?P<num>\d+)"
+)
+_CLOSING_RE = re.compile(
+    r"\b(?P<kw>" + "|".join(_CLOSING_KEYWORDS) + r")\b\s*:?\s*"
+    r"(?P<full>(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)"
+    r"/(?P<repo>[A-Za-z0-9._\-]+))?#(?P<num>\d+)",
+    re.IGNORECASE,
+)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_FENCED_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _strip_noise(text: str) -> str:
+    """Remove fenced code blocks and HTML comments before scanning for refs."""
+    if not text:
+        return ""
+    text = _HTML_COMMENT_RE.sub(" ", text)
+    text = _FENCED_RE.sub(" ", text)
+    return text
+
+
+def _scan_refs(text: str, *, closing_only: bool) -> list[tuple[str | None, str | None, int]]:
+    """Return a list of (owner, repo, number) tuples from `text`.
+
+    `owner` and `repo` are `None` for same-repo refs (`#N`). When
+    `closing_only` is True, only refs preceded by a closing keyword
+    (`closes`/`fixes`/`resolves` and tense variants) are returned.
+    """
+    cleaned = _strip_noise(text or "")
+    if not cleaned:
+        return []
+    out: list[tuple[str | None, str | None, int]] = []
+    seen: set[tuple[str | None, str | None, int]] = set()
+    pattern = _CLOSING_RE if closing_only else _REF_RE
+    for m in pattern.finditer(cleaned):
+        owner = m.group("owner") if m.group("full") else None
+        repo = m.group("repo") if m.group("full") else None
+        try:
+            num = int(m.group("num"))
+        except (TypeError, ValueError):
+            continue
+        key = (owner, repo, num)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _mentions_scan_depth() -> int:
+    """Read the env-configurable mentions scan depth.
+
+    `PROJECT_ISSUES_MENTIONS_SCAN_DEPTH` semantics (D2 follow-up on #5):
+      - unset / -1  -> -1 (scan body + ALL comments; full pagination)
+      - 0           ->  0 (scan body only)
+      - N > 0       ->  N (scan body + first N comments)
+    Invalid values fall back to -1.
+    """
+    raw = os.environ.get("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH")
+    if raw is None or raw == "":
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _ref_to_relation(
+    owner: str | None,
+    repo: str | None,
+    num: int,
+    project: ProjectConfig,
+    kind: str,
+) -> Relation:
+    """Build a bare Relation from a parsed `#N` / `owner/repo#N` reference."""
+    if owner and repo:
+        full = f"{owner}/{repo}"
+        if full == f"{project.owner}/{project.repo}":
+            ticket_id = f"#{num}"
+            url = f"https://github.com/{project.owner}/{project.repo}/issues/{num}"
+        else:
+            ticket_id = f"{full}#{num}"
+            url = f"https://github.com/{full}/issues/{num}"
+    else:
+        ticket_id = f"#{num}"
+        url = f"https://github.com/{project.owner}/{project.repo}/issues/{num}"
+    return Relation(
+        kind=kind,
+        ticket_id=ticket_id,
+        title="",
+        url=url,
+        state="",
+        is_pull_request=False,
+    )
+
+
+# ---------- GraphQL fallback for `parent` ---------------------------------
+
+_PARENT_GRAPHQL_QUERY = (
+    "query($owner:String!,$repo:String!,$number:Int!){"
+    "repository(owner:$owner,name:$repo){"
+    "issueOrPullRequest(number:$number){"
+    "...on Issue{parent{number title url state repository{nameWithOwner}}}"
+    "}}}"
+)
+
+
+def _fetch_parent_via_graphql(
+    token: str | None,
+    project: ProjectConfig,
+    ticket_id: str,
+) -> dict | None:
+    """One-shot GraphQL call: return a REST-shaped parent payload or None.
+
+    Any error collapses to `None` — this is a best-effort sidecall.
+    """
+    if not token:
+        return None
+    try:
+        ticket_num = int(ticket_id)
+    except (TypeError, ValueError):
+        return None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": USER_AGENT,
+    }
+    payload = {
+        "query": _PARENT_GRAPHQL_QUERY,
+        "variables": {
+            "owner": project.owner,
+            "repo": project.repo,
+            "number": ticket_num,
+        },
+    }
+    try:
+        with httpx.Client(headers=headers, timeout=15.0) as c:
+            r = c.post("https://api.github.com/graphql", json=payload)
+    except (httpx.HTTPError, OSError):
+        return None
+    if not r.is_success:
+        return None
+    try:
+        body = r.json()
+    except Exception:
+        return None
+    if body.get("errors"):
+        return None
+    issue = (
+        ((body.get("data") or {}).get("repository") or {})
+        .get("issueOrPullRequest")
+    ) or {}
+    parent = issue.get("parent")
+    if not parent:
+        return None
+    repo_node = parent.get("repository") or {}
+    state = (parent.get("state") or "").lower()
+    return {
+        "number": parent.get("number"),
+        "title": parent.get("title") or "",
+        "html_url": parent.get("url") or "",
+        "state": "open" if state == "open" else "closed",
+        "repository": {"full_name": repo_node.get("nameWithOwner") or ""},
+    }
+
+
+# ---------- helpers for incoming relabel + blocking events -----------------
+
+
+def _relabel_incoming(
+    rel: Relation, source_issue: dict, *, ticket_num: int | None,
+) -> Relation:
+    """Promote a `mentioned_by` to a stronger incoming kind when possible.
+
+    - Source closed as duplicate, body's "Duplicate of #N" -> us:
+      relabel to `duplicated_by`.
+    - Source is a merged PR whose body has a closing keyword
+      targeting us: relabel to `closed_by`.
+    """
+    src_state = source_issue.get("state")
+    src_state_reason = source_issue.get("state_reason")
+    src_body = source_issue.get("body") or ""
+    is_pr = bool(source_issue.get("pull_request"))
+    merged_at = source_issue.get("merged_at") or (
+        (source_issue.get("pull_request") or {}).get("merged_at")
+    )
+
+    if (
+        src_state == "closed"
+        and src_state_reason == "duplicate"
+        and ticket_num is not None
+    ):
+        m = re.search(
+            r"duplicate\s+of\s+(?:[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?"
+            r"/[A-Za-z0-9._\-]+)?#(\d+)",
+            src_body,
+            re.IGNORECASE,
+        )
+        if m:
+            try:
+                tgt = int(m.group(1))
+            except (TypeError, ValueError):
+                tgt = None
+            if tgt == ticket_num:
+                return Relation(
+                    kind="duplicated_by",
+                    ticket_id=rel.ticket_id,
+                    title=rel.title,
+                    url=rel.url,
+                    state=rel.state,
+                    is_pull_request=rel.is_pull_request,
+                )
+
+    if is_pr and merged_at and ticket_num is not None:
+        for owner, repo, num in _scan_refs(src_body, closing_only=True):
+            if num == ticket_num and (owner is None or repo is None):
+                return Relation(
+                    kind="closed_by",
+                    ticket_id=rel.ticket_id,
+                    title=rel.title,
+                    url=rel.url,
+                    state=rel.state,
+                    is_pull_request=rel.is_pull_request,
+                )
+
+    return rel
+
+
+def _map_blocking_event(
+    event: dict, project: ProjectConfig, kind: str,
+) -> Relation | None:
+    """Map a GitHub Issue-Dependencies timeline event into a Relation."""
+    blocked_by = event.get("blocked_by_issue") or {}
+    blocking = event.get("blocking_issue") or {}
+    src = (event.get("source") or {}).get("issue") or {}
+    issue_raw = blocked_by or blocking or src
+    if not issue_raw or not issue_raw.get("number"):
+        return None
+    return _map_relation_from_sub_issue(issue_raw, project, kind)
+
+
+# ---------- core relation collector ----------------------------------------
+
+
 def _fetch_relations(
     client: httpx.Client,
     project: ProjectConfig,
     ticket_id: str,
     issue_payload: dict,
+    token: str | None = None,
 ) -> tuple[list[Relation], bool]:
     """Collect all relation links for a ticket. Returns (relations, truncated).
 
-    `truncated` is True when the timeline response advertised a `rel="next"`
-    page that we didn't follow (caller can re-query with pagination if
-    they care about completeness).
+    Relation kinds emitted (per ticket #5):
+      - `parent` — REST `parent` field, GraphQL fallback when missing.
+      - `child` — `/sub_issues` walk.
+      - `closes` / `mentions` — outgoing, scanned from queried ticket's
+        body (and comments per env-configurable depth).
+      - `duplicate_of` — outgoing, from `state == closed` and
+        `state_reason == "duplicate"` on the queried ticket itself.
+      - `mentioned_by` — generic incoming cross-references.
+      - `duplicated_by` / `closed_by` — re-labeled from incoming
+        cross-refs by inspecting source state / body.
+      - `blocks` / `blocked_by` — GitHub Issue Dependencies events.
     """
     relations: list[Relation] = []
     truncated = False
+    self_repo_full = f"{project.owner}/{project.repo}"
+    try:
+        self_num = int(ticket_id)
+    except (TypeError, ValueError):
+        self_num = None
 
-    # parent (from primary issue payload, if the sub-issue API is enabled)
+    # parent
     parent = issue_payload.get("parent")
     if parent:
-        relations.append(
-            _map_relation_from_sub_issue(parent, project, "parent")
-        )
+        relations.append(_map_relation_from_sub_issue(parent, project, "parent"))
+    else:
+        graphql_parent = _fetch_parent_via_graphql(token, project, ticket_id)
+        if graphql_parent:
+            relations.append(
+                _map_relation_from_sub_issue(graphql_parent, project, "parent")
+            )
 
-    # children via /sub_issues; 404/410 means feature not available on this host
+    # children via /sub_issues
     sub_r = client.get(
         f"{_repo_path(project)}/issues/{ticket_id}/sub_issues",
         params={"per_page": 100},
@@ -335,11 +606,73 @@ def _fetch_relations(
     else:
         _check(sub_r)
         for sub in sub_r.json() or []:
-            relations.append(
-                _map_relation_from_sub_issue(sub, project, "child")
-            )
+            relations.append(_map_relation_from_sub_issue(sub, project, "child"))
 
-    # timeline for cross-referenced / connected / marked_as_duplicate
+    # outgoing scan: closes / mentions / duplicate_of
+    self_body = issue_payload.get("body") or ""
+    closes_refs = _scan_refs(self_body, closing_only=True)
+    all_refs = _scan_refs(self_body, closing_only=False)
+
+    depth = _mentions_scan_depth()
+    if depth != 0:
+        comments_payload = _fetch_comments_for_scan(
+            client, project, ticket_id, depth
+        )
+        for comment in comments_payload:
+            cbody = comment.get("body") or ""
+            for ref in _scan_refs(cbody, closing_only=True):
+                if ref not in closes_refs:
+                    closes_refs.append(ref)
+            for ref in _scan_refs(cbody, closing_only=False):
+                if ref not in all_refs:
+                    all_refs.append(ref)
+
+    def _is_self(owner: str | None, repo: str | None, num: int) -> bool:
+        if num != self_num:
+            return False
+        if owner is None and repo is None:
+            return True
+        return f"{owner}/{repo}" == self_repo_full
+
+    closes_set = {
+        (o, r, n) for (o, r, n) in closes_refs if not _is_self(o, r, n)
+    }
+    mentions_only = [
+        (o, r, n) for (o, r, n) in all_refs
+        if not _is_self(o, r, n) and (o, r, n) not in closes_set
+    ]
+
+    for owner, repo, num in closes_set:
+        relations.append(_ref_to_relation(owner, repo, num, project, "closes"))
+    for owner, repo, num in mentions_only:
+        relations.append(_ref_to_relation(owner, repo, num, project, "mentions"))
+
+    if (
+        issue_payload.get("state") == "closed"
+        and issue_payload.get("state_reason") == "duplicate"
+    ):
+        m = re.search(
+            r"duplicate\s+of\s+(?:(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)"
+            r"/(?P<repo>[A-Za-z0-9._\-]+))?#(?P<num>\d+)",
+            self_body or "",
+            re.IGNORECASE,
+        )
+        if m:
+            try:
+                num = int(m.group("num"))
+            except (TypeError, ValueError):
+                num = None
+            if num is not None and not _is_self(
+                m.group("owner"), m.group("repo"), num
+            ):
+                relations.append(
+                    _ref_to_relation(
+                        m.group("owner"), m.group("repo"), num,
+                        project, "duplicate_of",
+                    )
+                )
+
+    # incoming: timeline scan
     tl_r = client.get(
         f"{_repo_path(project)}/issues/{ticket_id}/timeline",
         params={"per_page": 100},
@@ -348,11 +681,93 @@ def _fetch_relations(
     _check(tl_r)
     truncated = _has_next_link(tl_r.headers.get("Link"))
     for event in tl_r.json() or []:
-        mapped = _map_relation_from_timeline(event, project, self_id=str(ticket_id))
-        if mapped is not None:
-            relations.append(mapped)
+        etype = event.get("event")
+        if etype in ("blocked_by_added", "blocking_added"):
+            kind = "blocked_by" if etype == "blocked_by_added" else "blocks"
+            mapped = _map_blocking_event(event, project, kind)
+            if mapped is not None:
+                relations.append(mapped)
+            continue
+        if etype in ("blocked_by_removed", "blocking_removed"):
+            continue
+        mapped = _map_relation_from_timeline(
+            event, project, self_id=str(ticket_id),
+        )
+        if mapped is None:
+            continue
+        if mapped.kind == "mentioned_by" and etype == "cross-referenced":
+            src = (event.get("source") or {}).get("issue") or {}
+            mapped = _relabel_incoming(mapped, src, ticket_num=self_num)
+        relations.append(mapped)
 
-    return relations, truncated
+    return _dedupe_relations(relations), truncated
+
+
+def _fetch_comments_for_scan(
+    client: httpx.Client,
+    project: ProjectConfig,
+    ticket_id: str,
+    depth: int,
+) -> list[dict]:
+    """Fetch comments for ref-scanning, honoring the env-configurable depth."""
+    if depth == 0:
+        return []
+    if depth < 0:
+        out: list[dict] = []
+        page = 1
+        while True:
+            r = client.get(
+                f"{_repo_path(project)}/issues/{ticket_id}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            _check(r)
+            chunk = r.json() or []
+            out.extend(chunk)
+            if not _has_next_link(r.headers.get("Link")):
+                break
+            page += 1
+            if page > 100:
+                break
+        return out
+    per_page = min(max(1, depth), 100)
+    r = client.get(
+        f"{_repo_path(project)}/issues/{ticket_id}/comments",
+        params={"per_page": per_page},
+    )
+    _check(r)
+    return (r.json() or [])[:depth]
+
+
+def _dedupe_relations(rels: list[Relation]) -> list[Relation]:
+    """Collapse duplicates and drop weakened labels.
+
+    1. Drop exact (kind, ticket_id) duplicates — first occurrence wins.
+    2. When a target has a stronger label, drop the generic
+       `mentioned_by` / `mentions` for that same target.
+    """
+    seen: dict[tuple[str, str], Relation] = {}
+    strong_kinds_by_target: dict[str, set[str]] = {}
+    for r in rels:
+        key = (r.kind, r.ticket_id)
+        if key in seen:
+            continue
+        seen[key] = r
+        if r.kind in {
+            "duplicated_by", "closed_by", "duplicate_of", "closes",
+            "blocks", "blocked_by", "parent", "child",
+        }:
+            strong_kinds_by_target.setdefault(r.ticket_id, set()).add(r.kind)
+    out: list[Relation] = []
+    for r in seen.values():
+        if r.kind == "mentioned_by" and strong_kinds_by_target.get(r.ticket_id):
+            continue
+        if (
+            r.kind == "mentions"
+            and "closes" in strong_kinds_by_target.get(r.ticket_id, set())
+        ):
+            continue
+        out.append(r)
+    return out
 
 
 def _ensure_label(client: httpx.Client, project: ProjectConfig, name: str) -> None:
@@ -561,7 +976,7 @@ class GitHubProvider:
             comments = [_map_comment(it) for it in c.json()]
             if include_relations:
                 relations, truncated = _fetch_relations(
-                    client, project, ticket_id, issue_raw
+                    client, project, ticket_id, issue_raw, token=token,
                 )
             else:
                 relations, truncated = [], False

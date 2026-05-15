@@ -89,9 +89,18 @@ py -3 -m pip install -e ".[build]"
 .\scripts\build.ps1 -Clean -Package
 ```
 
+## AI-attribution markers
+
+Every AI-authored write is tagged so a human can audit, filter, or auto-close it. The convention is **two layers, body prefix is canonical**:
+
+1. **Body prefix `#ai-generated\n\n`** (source of truth) — prepended to issue / PR bodies and to comments. Always lands regardless of the caller's GitHub permissions because the body is just text the issue-creator controls. Idempotent: re-applying the prefix is a no-op.
+2. **`ai-generated` / `ai-modified` labels** (best-effort decoration) — applied when the caller has enough permission on the target repo (`push` to create the label, `triage` to apply it). If GitHub refuses (403) the label is dropped from the request and the operation proceeds; the body-prefix marker remains the durable record. A silent label-drop on the `POST /issues` response (GitHub returns 201 but strips the label for callers without `triage`) is detected after the fact and logged at WARNING.
+
+Downstream tooling should treat the body prefix as authoritative for AI-attribution and the label as a convenience indicator that may be missing for external contributors. See `Seretos/agent-marketplace#15` for the history.
+
 ## Notes
 - GitLab support is stubbed today (`tools/tickets.py` only resolves `github`). Extending it means implementing a `GitLabProvider`.
-- AI-marker labels (`ai-generated`, `ai-modified`, `ai-closed-not-planned`) are created lazily on first write to a repo.
+- AI-marker labels (`ai-generated`, `ai-modified`, `ai-closed-not-planned`) are created lazily on first write to a repo. Label create / apply failures are non-fatal — the body-prefix marker is the canonical source of truth.
 - `get_ticket` returns typed `relations` (parent / child / closes / closed_by / duplicate_of / duplicated_by / mentions / mentioned_by) alongside the ticket and comments. Cross-repo refs are formatted as `owner/repo#N`. Pass `include_relations=false` to skip the two extra API calls when relation context isn't needed; `relations_truncated=true` signals that the timeline had more pages than were fetched.
 - `list_tickets` accepts an extended filter set beyond the basics (`status`, `labels`, `assignee`, `search`, `limit`): `not_labels` (exclude), `author`, `created_after` / `created_before`, `updated_after` / `updated_before` (ISO dates), plus `sort_by` (`created` / `updated` / `comments`) and `sort_order` (`asc` / `desc`). When any of the exclusion / author / date filters is set the provider switches from the cheap `/repos/.../issues` endpoint to GitHub's Search API, which has its own rate-limit bucket (30 req/min); the default-fast path stays on the legacy endpoint.
 - Comment tools mirror the ticket surface: `add_comment` (write, gated by `modify`), `list_comments` and `get_comment` (read-only), and `update_comment` (write, gated by `modify`). `update_comment` re-applies the `#ai-generated` prefix to the new body so any AI edit stays labelled.

@@ -12,6 +12,7 @@ from project_issues_plugin.markers import (
     AI_MODIFIED_LABEL,
     LABEL_COLORS,
     LABEL_DESCRIPTIONS,
+    ensure_body_prefix,
     ensure_comment_prefix,
 )
 from project_issues_plugin.providers.base import (
@@ -348,9 +349,24 @@ def _fetch_relations(
 
 
 def _ensure_label(client: httpx.Client, project: ProjectConfig, name: str) -> None:
-    """Create the label if it doesn't exist. Idempotent — label-create failures
-    are not fatal; we log and continue (the issue will be tagged with whatever
-    labels the API accepts at PATCH/POST time)."""
+    """Create the label on the target repo if it doesn't already exist.
+
+    Hard-fails (raises `GitHubError`) when GitHub refuses the create call —
+    most notably 403 for tokens without `push` permission on the target.
+    The historical "log and continue" behaviour caused two production
+    failure modes for `ai-generated` (see ticket
+    Seretos/agent-marketplace#15): Mode A silent label-drop on the
+    follow-up `POST /issues` (the label vanished from the response and
+    the caller never knew) and Mode B hard 403 on the same POST when the
+    label didn't yet exist on the target.
+
+    Idempotent: 422 ("already_exists") is treated as success. Callers
+    that can tolerate a missing label — e.g. `create_ticket` /
+    `create_pr` / `update_ticket` / `update_pr`, all of which carry the
+    marker in the body prefix as the canonical source of truth — should
+    wrap this call in `_ensure_label_best_effort` so the operation
+    proceeds without the label rather than aborting.
+    """
     payload = {
         "name": name,
         "color": LABEL_COLORS.get(name, "ededed"),
@@ -361,10 +377,49 @@ def _ensure_label(client: httpx.Client, project: ProjectConfig, name: str) -> No
         return
     if resp.status_code == 422:
         return  # already exists
-    log.warning(
-        "could not create label '%s' on %s/%s: %d %s",
-        name, project.owner, project.repo, resp.status_code, resp.text[:200],
-    )
+    _check(resp)
+
+
+def _ensure_label_best_effort(
+    client: httpx.Client, project: ProjectConfig, name: str
+) -> bool:
+    """Best-effort wrapper around `_ensure_label`.
+
+    Returns True when the label is known to exist on the repo (created
+    or already-present), False when the repo refused creation (typically
+    403 for tokens that lack `push`). The False case lets the caller
+    drop the label from the subsequent POST payload so the issue / PR is
+    still created — the body-prefix marker is the canonical source of
+    truth and survives a missing label.
+    """
+    try:
+        _ensure_label(client, project, name)
+        return True
+    except GitHubError as exc:
+        log.warning(
+            "could not ensure label '%s' on %s/%s: %s; falling back to "
+            "body-prefix marker only",
+            name, project.owner, project.repo, exc,
+        )
+        return False
+
+
+def _label_present(payload: dict, name: str) -> bool:
+    """True iff GitHub's response payload includes a label named `name`.
+
+    GitHub silently drops labels from `POST /issues` when the caller has
+    no `triage` (Mode A in ticket #15): the request succeeds with 201 but
+    the resulting `labels` array is empty. This helper lets callers detect
+    that case after the fact and warn — the body-prefix marker still gives
+    machine-grep-able attribution, but the label is gone.
+    """
+    labels = payload.get("labels") or []
+    for entry in labels:
+        if isinstance(entry, str) and entry == name:
+            return True
+        if isinstance(entry, dict) and entry.get("name") == name:
+            return True
+    return False
 
 
 def _quote_label(name: str) -> str:
@@ -514,20 +569,51 @@ class GitHubProvider:
         labels: list[str],
         assignees: list[str],
     ) -> Ticket:
+        """Create an issue with the `ai-generated` AI-attribution marker.
+
+        Marker policy (ticket Seretos/agent-marketplace#15):
+          - Body prefix `#ai-generated\\n\\n` is the canonical source of
+            truth and is always applied (idempotent).
+          - The `ai-generated` LABEL is best-effort. If the caller cannot
+            create or apply the label (typically tokens without
+            `push` / `triage` on the target repo), the label is dropped
+            from the POST payload so the issue is still created. Mode A
+            (silent label-drop in the response despite a successful POST)
+            is detected after the call and logged.
+        """
         # Deduplicate while preserving order, ensure ai-generated is present.
         merged = list(dict.fromkeys([*labels, AI_GENERATED_LABEL]))
+        prefixed_body = ensure_body_prefix(body)
         with _client(token) as client:
-            _ensure_label(client, project, AI_GENERATED_LABEL)
+            label_ok = _ensure_label_best_effort(
+                client, project, AI_GENERATED_LABEL
+            )
             payload: dict[str, Any] = {
                 "title": title,
-                "body": body,
-                "labels": merged,
+                "body": prefixed_body,
             }
+            if label_ok:
+                payload["labels"] = merged
+            else:
+                # Drop only the AI marker; keep any caller-supplied labels
+                # so an unrelated `bug` / `enhancement` label still lands.
+                other = [lbl for lbl in merged if lbl != AI_GENERATED_LABEL]
+                if other:
+                    payload["labels"] = other
             if assignees:
                 payload["assignees"] = assignees
             r = client.post(f"{_repo_path(project)}/issues", json=payload)
             _check(r)
-            return _map_issue(r.json())
+            raw = r.json()
+            if label_ok and not _label_present(raw, AI_GENERATED_LABEL):
+                log.warning(
+                    "ticket #%s created on %s/%s without '%s' label "
+                    "(GitHub silently dropped it — caller likely lacks "
+                    "triage permission); body-prefix marker remains",
+                    raw.get("number"), project.owner, project.repo,
+                    AI_GENERATED_LABEL,
+                )
+            return _map_issue(raw)
 
     def update_ticket(
         self,
@@ -557,10 +643,20 @@ class GitHubProvider:
                 new_labels.difference_update(labels_remove)
 
             # If this ticket wasn't created by us, mark it as AI-modified.
+            # Label application is best-effort (see ticket #15): if the
+            # caller can't create or apply the label, proceed without it
+            # rather than blocking the legitimate update. The body is
+            # passed through unchanged on `update_ticket` because the
+            # caller has explicit edit intent — we don't re-stamp an
+            # already-existing body with a marker on every PATCH.
             if AI_GENERATED_LABEL not in current_labels:
                 if AI_MODIFIED_LABEL not in new_labels:
-                    _ensure_label(client, project, AI_MODIFIED_LABEL)
-                new_labels.add(AI_MODIFIED_LABEL)
+                    if _ensure_label_best_effort(
+                        client, project, AI_MODIFIED_LABEL
+                    ):
+                        new_labels.add(AI_MODIFIED_LABEL)
+                else:
+                    new_labels.add(AI_MODIFIED_LABEL)
 
             new_assignees = set(current_assignees)
             if assignees_add:
@@ -766,19 +862,29 @@ class GitHubProvider:
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
     ) -> PullRequest:
-        """Create a pull request, applying the AI-generated label.
+        """Create a pull request, applying the AI-generated marker.
 
-        Labels and assignees are applied in follow-up `POST /issues/{n}/...`
-        calls because the `POST /pulls` endpoint doesn't accept them
-        inline. We deduplicate `labels` while ensuring `ai-generated` is
-        included, mirroring `create_ticket`.
+        Marker policy mirrors `create_ticket` (see ticket
+        Seretos/agent-marketplace#15): body prefix is the canonical
+        source of truth; the `ai-generated` LABEL is best-effort. When
+        the caller lacks permission to create or apply the label, the
+        PR is still created and the follow-up labels POST is skipped (or
+        restricted to caller-supplied labels). Mode A silent-drop on the
+        labels POST is detected and logged.
+
+        Labels and assignees are applied in follow-up
+        `POST /issues/{n}/...` calls because the `POST /pulls` endpoint
+        doesn't accept them inline.
         """
         merged_labels = list(dict.fromkeys([*(labels or []), AI_GENERATED_LABEL]))
+        prefixed_body = ensure_body_prefix(body)
         with _client(token) as client:
-            _ensure_label(client, project, AI_GENERATED_LABEL)
+            label_ok = _ensure_label_best_effort(
+                client, project, AI_GENERATED_LABEL
+            )
             payload: dict[str, Any] = {
                 "title": title,
-                "body": body,
+                "body": prefixed_body,
                 "head": head,
                 "base": base,
                 "draft": draft,
@@ -787,15 +893,36 @@ class GitHubProvider:
             _check(r)
             pr_raw = r.json()
             pr_number = pr_raw["number"]
-            # Apply labels via the issues endpoint (PRs share it).
-            lbl_resp = client.post(
-                f"{_repo_path(project)}/issues/{pr_number}/labels",
-                json={"labels": merged_labels},
+            # Apply labels via the issues endpoint (PRs share it). Skip
+            # the call entirely when there's nothing to apply — including
+            # the case where `ai-generated` couldn't be ensured and the
+            # caller didn't supply any other labels.
+            labels_to_apply = (
+                merged_labels
+                if label_ok
+                else [lbl for lbl in merged_labels if lbl != AI_GENERATED_LABEL]
             )
-            _check(lbl_resp)
-            # Reflect the new labels back into the PR payload so the
-            # returned dataclass advertises them.
-            pr_raw["labels"] = lbl_resp.json()
+            if labels_to_apply:
+                lbl_resp = client.post(
+                    f"{_repo_path(project)}/issues/{pr_number}/labels",
+                    json={"labels": labels_to_apply},
+                )
+                _check(lbl_resp)
+                applied_raw = lbl_resp.json()
+                # Reflect the new labels back into the PR payload so the
+                # returned dataclass advertises them.
+                pr_raw["labels"] = applied_raw
+                if label_ok and not _label_present(
+                    {"labels": applied_raw}, AI_GENERATED_LABEL
+                ):
+                    log.warning(
+                        "PR #%s created on %s/%s without '%s' label "
+                        "(GitHub silently dropped it — caller likely "
+                        "lacks triage permission); body-prefix marker "
+                        "remains",
+                        pr_number, project.owner, project.repo,
+                        AI_GENERATED_LABEL,
+                    )
             if assignees:
                 a_resp = client.post(
                     f"{_repo_path(project)}/issues/{pr_number}/assignees",
@@ -842,10 +969,17 @@ class GitHubProvider:
                 new_labels.update(labels_add)
             if labels_remove:
                 new_labels.difference_update(labels_remove)
+            # `ai-modified` is best-effort (see ticket #15): if we can't
+            # ensure the label exists, proceed without it rather than
+            # failing the legitimate update.
             if AI_GENERATED_LABEL not in current_labels:
                 if AI_MODIFIED_LABEL not in new_labels:
-                    _ensure_label(client, project, AI_MODIFIED_LABEL)
-                new_labels.add(AI_MODIFIED_LABEL)
+                    if _ensure_label_best_effort(
+                        client, project, AI_MODIFIED_LABEL
+                    ):
+                        new_labels.add(AI_MODIFIED_LABEL)
+                else:
+                    new_labels.add(AI_MODIFIED_LABEL)
 
             new_assignees = set(current_assignees)
             if assignees_add:

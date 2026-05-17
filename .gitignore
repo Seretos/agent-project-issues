@@ -12,7 +12,9 @@ dist/
 .vscode/
 .idea/
 
-# PyInstaller output — produced locally by scripts/build.ps1 and
-# shipped to end users via GitHub Releases (release tarball), not the repo.
-bin/project-issues.exe
+# Build output — scripts/build.ps1 stages the per-OS PyInstaller
+# binaries and the shell-wrapper pair (copied from release/wrappers/)
+# into bin/. Everything in there is reproducible from source; the
+# release tarball is what ships to end users.
+/bin/
 *.pyinstaller.tmp/

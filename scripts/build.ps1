@@ -30,6 +30,14 @@ param(
 $root = (Resolve-Path "$PSScriptRoot/..").Path
 Set-Location $root
 
+# PowerShell 5.1 compatibility shim: the $IsWindows / $IsLinux automatic
+# variables only exist in PS 7+. Windows PowerShell 5.1 is Windows-only,
+# so when they're undefined we know we're on Windows.
+if (-not (Test-Path variable:IsWindows)) {
+    $IsWindows = $true
+    $IsLinux   = $false
+}
+
 # Note: do NOT set $ErrorActionPreference = "Stop" globally. PowerShell 5.1
 # wraps native-command stderr as ErrorRecord, which trips Stop semantics for
 # tools like PyInstaller that log heavily to stderr. We check $LASTEXITCODE
@@ -119,6 +127,61 @@ function Invoke-Py {
     & $script:PyCmd @script:PyArgs @args
 }
 
+# 1b. Isolate plugin + build deps in a project-local virtualenv.
+# Modern Linux distros (Ubuntu 23.04+, Debian 12+, Fedora 38+) mark the
+# system Python as PEP 668 externally-managed, which blocks `pip install`
+# against it; a venv sidesteps that without the --break-system-packages
+# override. On Windows the marker doesn't exist, but a venv keeps the
+# build hermetic anyway. CI's actions/setup-python interpreter has no
+# PEP 668 marker either, so the extra venv-create step there is cheap.
+$venvDir = Join-Path $root ".venv"
+if ($IsWindows) {
+    $venvPy = Join-Path $venvDir "Scripts/python.exe"
+} else {
+    $venvPy = Join-Path $venvDir "bin/python"
+}
+
+if (-not (Test-Path $venvPy)) {
+    Write-Step "Creating virtualenv at .venv/"
+    Invoke-Py -m venv $venvDir
+    if ($LASTEXITCODE -ne 0) {
+        if (-not $IsWindows) {
+            Write-Host "    On Debian/Ubuntu, ensure python3-venv is installed:" -ForegroundColor Yellow
+            Write-Host "      sudo apt install python3-venv" -ForegroundColor Yellow
+        }
+        Fail "Failed to create virtualenv at $venvDir."
+    }
+    if (-not (Test-Path $venvPy)) {
+        Fail "venv was created but $venvPy is missing."
+    }
+}
+
+# Rebind Python launcher to the venv. All subsequent Invoke-Py calls
+# (pip install, PyInstaller) now run inside the venv.
+$script:PyCmd = $venvPy
+$script:PyArgs = @()
+Write-Host "    Using $venvPy"
+
+# Verify pip is present. On Ubuntu 24.04 without `python3.12-venv`
+# installed, `python3 -m venv` succeeds but ensurepip can't find its
+# bundled wheels — the resulting venv has no pip. Bootstrap it; if
+# that also fails, surface the exact apt package to install.
+Invoke-Py -m pip --version > $null 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Step "Bootstrapping pip in venv (ensurepip)"
+    Invoke-Py -m ensurepip --upgrade --default-pip
+    if ($LASTEXITCODE -ne 0) {
+        if (-not $IsWindows) {
+            Write-Host "    The venv has no pip and ensurepip cannot bootstrap it." -ForegroundColor Yellow
+            Write-Host "    On Debian/Ubuntu, install the per-version venv package, e.g.:" -ForegroundColor Yellow
+            Write-Host "      sudo apt install python3.12-venv python3-pip" -ForegroundColor Yellow
+            Write-Host "    Then remove the broken .venv/ and re-run:" -ForegroundColor Yellow
+            Write-Host "      rm -rf .venv && pwsh scripts/build.ps1" -ForegroundColor Yellow
+        }
+        Fail "venv has no pip and ensurepip failed."
+    }
+}
+
 # 2. Ensure plugin + build deps are installed.
 Write-Step "Ensuring dependencies (plugin + pyinstaller)"
 Invoke-Py -m pip install --quiet --disable-pip-version-check -e ".[build]"
@@ -145,10 +208,9 @@ if (-not (Test-Path $script:DistBinary)) {
 $exeSize = [math]::Round((Get-Item $script:DistBinary).Length / 1MB, 1)
 Write-Host "    $($script:DistBinary | Resolve-Path -Relative) (${exeSize} MB)"
 
-# 5. Copy into bin/<os>-x86_64/ where the OS-specific plugin entry
-# expects it. On Windows we also keep the legacy bin/project-issues.exe
-# in place (today's plugin.json points there); #13 introduces the
-# wrapper scripts that replace those direct entries.
+# 5. Copy the PyInstaller artifact into bin/<os>-x86_64/. The shell
+# wrappers staged in step 5b are the actual plugin.json entry points;
+# they dispatch into these per-OS directories at runtime.
 Write-Step "Copying to bin/$($script:OsTriple)/$($script:BinaryName)"
 New-Item -ItemType Directory -Force -Path $script:OsBinDir | Out-Null
 $destOsBin = Join-Path $script:OsBinDir $script:BinaryName
@@ -157,14 +219,10 @@ if ($IsWindows) {
     # Defender briefly locks freshly-emitted .exe files. Retry the copy
     # for up to ~4 s (5 tries x 800 ms). If the lock is the dev's own
     # Claude Code session keeping the .exe alive, surface that clearly.
-    New-Item -ItemType Directory -Force -Path "bin" | Out-Null
-    $legacyDest = Join-Path $root "bin/project-issues.exe"
-
     $copied = $false
     for ($i = 0; $i -lt 5; $i++) {
         try {
             Copy-Item -Force $script:DistBinary $destOsBin -ErrorAction Stop
-            Copy-Item -Force $script:DistBinary $legacyDest -ErrorAction Stop
             $copied = $true
             break
         } catch [System.IO.IOException] {
@@ -181,7 +239,7 @@ if ($IsWindows) {
             Write-Host "    Close it (or run '/mcp' and disconnect 'project-issues') and re-run the build."
             Write-Host "    To kill it now without that:   Stop-Process -Name project-issues -Force"
         }
-        Fail "Could not copy dist/project-issues.exe to bin/ -- file remained locked."
+        Fail "Could not copy $($script:BinaryName) to $destOsBin -- file remained locked."
     }
 } else {
     # Linux: no AV file-locking, but ensure the destination dir exists
@@ -192,6 +250,46 @@ if ($IsWindows) {
     chmod +x $destOsBin
     if ($LASTEXITCODE -ne 0) {
         Fail "chmod +x on $destOsBin failed."
+    }
+}
+
+# 5b. Stage the shell-wrapper pair from release/wrappers/ into bin/.
+# These are the actual entry points referenced by plugin.json
+# (`bin/project-issues`, extensionless): the POSIX shebang script runs
+# on Linux/macOS; PATHEXT picks up the .cmd on Windows. Each wrapper
+# dispatches into the matching bin/<os-triple>/ directory. release.yml
+# does the same staging during publish — running it here too keeps the
+# local checkout's bin/ structure in parity with the published ZIP, so
+# `bin/project-issues` behaves the same locally as in the installed
+# plugin.
+Write-Step "Staging shell wrappers into bin/"
+$wrapperSrc   = Join-Path $root "release/wrappers"
+$posixWrapper = Join-Path $root "bin/project-issues"
+$cmdWrapper   = Join-Path $root "bin/project-issues.cmd"
+Copy-Item -Force (Join-Path $wrapperSrc "project-issues")     $posixWrapper
+Copy-Item -Force (Join-Path $wrapperSrc "project-issues.cmd") $cmdWrapper
+if (-not $IsWindows) {
+    chmod +x $posixWrapper
+    if ($LASTEXITCODE -ne 0) {
+        Fail "chmod +x on $posixWrapper failed."
+    }
+}
+
+# Clean up the obsolete legacy binary at bin/project-issues.exe if it
+# survived from an older build. Without this, PATHEXT on Windows
+# resolves `bin/project-issues` to the .exe (which appears before .cmd
+# in the default PATHEXT order), silently bypassing the wrapper
+# dispatch. If the file is locked (running MCP), warn instead of
+# failing -- the user can clean it up after disconnecting the server.
+$legacyExe = Join-Path $root "bin/project-issues.exe"
+if (Test-Path $legacyExe) {
+    try {
+        Remove-Item -Force $legacyExe -ErrorAction Stop
+        Write-Host "    Removed obsolete bin/project-issues.exe (superseded by .cmd wrapper)"
+    } catch {
+        Write-Host "    WARNING: could not remove obsolete bin/project-issues.exe (likely locked)." -ForegroundColor Yellow
+        Write-Host "    PATHEXT will still resolve to the stale .exe over the .cmd wrapper." -ForegroundColor Yellow
+        Write-Host "    Close any running MCP session and delete bin/project-issues.exe manually." -ForegroundColor Yellow
     }
 }
 

@@ -57,7 +57,7 @@ function Fail($msg) {
 #   Linux:   project-issues,     copied into bin/linux-x86_64/.
 # The legacy bin/project-issues.exe location is also populated on
 # Windows so the existing plugin.json (which points there today)
-# keeps working — #13 will swap plugin.json to a wrapper script.
+# keeps working -- #13 will swap plugin.json to a wrapper script.
 if ($IsWindows) {
     $script:BinaryName    = "project-issues.exe"
     $script:OsTriple      = "windows-x86_64"
@@ -141,6 +141,27 @@ if ($IsWindows) {
     $venvPy = Join-Path $venvDir "bin/python"
 }
 
+# Detect cross-platform .venv contamination: a venv created under WSL/Linux
+# and then "touched" by a Windows build (or vice versa) leaves pyvenv.cfg
+# pointing at a foreign-OS interpreter while both Scripts/ and bin/ end up
+# coexisting. ensurepip then fails with a nonsense mixed path like
+# `/usr/bin\python.exe`. Purge the dir and rebuild fresh.
+$venvCfg = Join-Path $venvDir "pyvenv.cfg"
+if ((Test-Path $venvPy) -and (Test-Path $venvCfg)) {
+    $cfgExec = (Select-String -Path $venvCfg -Pattern '^executable\s*=\s*(.+)$' `
+                              -ErrorAction SilentlyContinue).Matches[0].Groups[1].Value
+    if ($cfgExec) {
+        $cfgExec = $cfgExec.Trim()
+        $cfgIsWindowsPath = $cfgExec -match '^[A-Za-z]:[\\/]' -or $cfgExec -like '*\*'
+        $cfgIsPosixPath   = $cfgExec.StartsWith('/')
+        if ( ($IsWindows -and $cfgIsPosixPath) -or
+             (-not $IsWindows -and $cfgIsWindowsPath) ) {
+            Write-Step "Existing .venv is from a foreign OS ($cfgExec) -- purging"
+            Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 if (-not (Test-Path $venvPy)) {
     Write-Step "Creating virtualenv at .venv/"
     Invoke-Py -m venv $venvDir
@@ -164,7 +185,7 @@ Write-Host "    Using $venvPy"
 
 # Verify pip is present. On Ubuntu 24.04 without `python3.12-venv`
 # installed, `python3 -m venv` succeeds but ensurepip can't find its
-# bundled wheels — the resulting venv has no pip. Bootstrap it; if
+# bundled wheels -- the resulting venv has no pip. Bootstrap it; if
 # that also fails, surface the exact apt package to install.
 Invoke-Py -m pip --version > $null 2>&1
 if ($LASTEXITCODE -ne 0) {
@@ -258,7 +279,7 @@ if ($IsWindows) {
 # (`bin/project-issues`, extensionless): the POSIX shebang script runs
 # on Linux/macOS; PATHEXT picks up the .cmd on Windows. Each wrapper
 # dispatches into the matching bin/<os-triple>/ directory. release.yml
-# does the same staging during publish — running it here too keeps the
+# does the same staging during publish -- running it here too keeps the
 # local checkout's bin/ structure in parity with the published ZIP, so
 # `bin/project-issues` behaves the same locally as in the installed
 # plugin.

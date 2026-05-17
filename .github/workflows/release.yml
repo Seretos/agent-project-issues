@@ -178,7 +178,12 @@ jobs:
   # Job 3 - Assemble orphan release branch, build ZIP, publish
   # ---------------------------------------------------------------------------
   release:
-    needs: build
+    # stamp is in needs: explicitly so the release job can read
+    # needs.stamp.outputs.{plugin_name,tag} -- GitHub Actions only
+    # propagates job outputs to jobs that declare a direct dependency,
+    # so even though `build` transitively depends on `stamp`, that
+    # alone leaves needs.stamp.outputs.* empty here.
+    needs: [stamp, build]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:

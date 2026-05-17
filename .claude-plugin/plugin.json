@@ -1,0 +1,17 @@
+{
+  "name": "agent-project-issues",
+  "description": "MCP server for GitHub/GitLab issue management. Read/create/update tickets and add comments with automatic safety markers (ai-generated / ai-modified labels, #ai-generated comment prefix). Per-project permissions; falls back to read-only auto-discovery from the git remote when no config is present.",
+  "version": "0.0.5",
+  "author": {
+    "name": "Arne von Appen"
+  },
+  "mcpServers": {
+    "project-issues": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/project-issues",
+      "args": [],
+      "env": {
+        "PROJECT_ISSUES_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+      }
+    }
+  }
+}

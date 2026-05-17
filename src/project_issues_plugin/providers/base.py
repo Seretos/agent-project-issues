@@ -216,3 +216,62 @@ class PipelineRun:
     updated_at: str
     run_attempt: int
     failure: PipelineFailure | None = None
+
+
+# ---------- token capabilities (ticket #32) ---------------------------------
+
+
+@dataclass
+class TokenCapabilities:
+    """Result of `probe_token_capabilities` — what a given token may do
+    against a given project.
+
+    Mirrors the nested `Permissions` model from `config.py` so the result
+    can be substituted in directly for auto-discovered projects:
+
+    - `issues_create` / `issues_modify` — issue write operations.
+    - `pulls_create` / `pulls_modify` / `pulls_merge` — pull-request
+      write operations.
+
+    `reason` is `None` on the happy path. On any failure mode it carries
+    a stable string identifier so the caller (and tests) can branch on
+    it without parsing free-form text:
+
+    - `"bad_credentials"`        — 401 from the provider.
+    - `"repo_invisible_to_token"` — 404 from the provider (the token has
+      no visibility into the repo, which is GitHub's privacy-preserving
+      response for both "doesn't exist" and "exists but you can't see it").
+    - `"network_error"`           — transport-level failure (DNS,
+      connection refused, timeout, ...).
+    - `"permissions_field_missing"` — request succeeded but GitHub
+      didn't populate `permissions` on the response (classic PAT
+      sometimes, or unexpected payload shape). Combined with all-False
+      flags this preserves today's hardcoded-False default behavior.
+
+    When `reason` is not `None`, all boolean flags should be False —
+    the caller must not grant any operation based on a failed probe.
+    """
+
+    issues_create: bool = False
+    issues_modify: bool = False
+    pulls_create: bool = False
+    pulls_modify: bool = False
+    pulls_merge: bool = False
+    reason: str | None = None
+
+
+class TokenCapabilityProvider:
+    """Mixin/interface: providers that can probe a token's effective
+    capabilities against a single project implement this method.
+
+    Implementations MUST NOT raise on expected failure modes (401, 404,
+    network error, missing field) — they must return a `TokenCapabilities`
+    with `reason` set and all flags False so the caller can degrade
+    gracefully. Only programming errors (bad project shape, etc.) should
+    propagate.
+    """
+
+    def probe_token_capabilities(
+        self, project, token: str
+    ) -> TokenCapabilities:
+        raise NotImplementedError

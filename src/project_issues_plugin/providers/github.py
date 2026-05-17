@@ -29,6 +29,7 @@ from project_issues_plugin.providers.base import (
     StatusSpec,
     Ticket,
     TicketFilters,
+    TokenCapabilities,
 )
 
 log = logging.getLogger("project-issues.github")
@@ -918,7 +919,74 @@ def _list_via_search(
     return r.json().get("items", [])
 
 
+def _map_permissions_to_capabilities(perms: dict) -> TokenCapabilities:
+    """Translate the `permissions` block GitHub returns on `GET /repos`
+    into a `TokenCapabilities`.
+
+    GitHub's permission ladder (low -> high): `pull`, `triage`, `push`,
+    `maintain`, `admin`. The mapping:
+
+    - `pull`     -> read only (no write flags).
+    - `triage+`  -> `issues.modify` (label/assign/state on existing issues).
+    - `push+`    -> `issues.create`, `pulls.create`, `pulls.modify`.
+    - `maintain+` -> `pulls.merge` (matches GitHub's branch-protection
+      semantics where merge requires maintain-equivalent rights).
+    - `admin`    -> everything.
+
+    `pull` alone never grants any write capability.
+    """
+    admin = bool(perms.get("admin"))
+    maintain = bool(perms.get("maintain")) or admin
+    push = bool(perms.get("push")) or maintain
+    triage = bool(perms.get("triage")) or push
+    # `pull` is the read flag; not needed for any of the write bits
+    # because triage/push/maintain/admin all imply read.
+    return TokenCapabilities(
+        issues_create=push,
+        issues_modify=triage,
+        pulls_create=push,
+        pulls_modify=push,
+        pulls_merge=maintain,
+        reason=None,
+    )
+
+
 class GitHubProvider:
+    def probe_token_capabilities(
+        self, project: ProjectConfig, token: str
+    ) -> TokenCapabilities:
+        """Probe `GET /repos/{owner}/{repo}` to learn what `token` may
+        do against `project`.
+
+        Failure modes are returned (not raised) so the caller can pass
+        the result through to `_project_to_dict` unconditionally. See
+        `TokenCapabilities.reason` for the stable failure identifiers.
+        """
+        try:
+            with _client(token) as client:
+                r = client.get(_repo_path(project))
+        except httpx.HTTPError:
+            return TokenCapabilities(reason="network_error")
+        if r.status_code == 401:
+            return TokenCapabilities(reason="bad_credentials")
+        if r.status_code == 404:
+            return TokenCapabilities(reason="repo_invisible_to_token")
+        if not r.is_success:
+            # Treat other unexpected statuses the same way as a missing
+            # field: don't grant any write capability, but record what
+            # happened so a caller can debug.
+            return TokenCapabilities(
+                reason=f"http_{r.status_code}"
+            )
+        try:
+            body = r.json()
+        except ValueError:
+            return TokenCapabilities(reason="permissions_field_missing")
+        perms = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(perms, dict):
+            return TokenCapabilities(reason="permissions_field_missing")
+        return _map_permissions_to_capabilities(perms)
+
     def list_tickets(
         self,
         project: ProjectConfig,

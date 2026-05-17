@@ -51,7 +51,6 @@ RelationKind = Literal[
     "mentioned_by",
     "blocks",
     "blocked_by",
-    # Reserved for GitLab; not currently emitted by GitHub.
     "relates_to",
 ]
 

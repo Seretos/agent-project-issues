@@ -33,11 +33,32 @@ server start to expose the absolute paths.
   one). This is also surfaced when the var name is empty/None.
 
 Field is always emitted (it's a status enum, not a path leak).
+
+**Token-derived permissions for auto-discovered projects (ticket #32)**
+
+When a project has `source == "git-remote"` (no explicit YAML entry)
+AND a usable token is present, the provider is asked to probe the
+token's effective capabilities against the repo and the result is used
+in place of the hardcoded-False default. The probe is cached for 5
+minutes per `(provider, path, token-fingerprint)` so a single
+`list_projects` burst doesn't hammer the API.
+
+Two extra per-project fields document the source:
+
+- `permissions_source`:
+  - `"config"`     — permissions came from the YAML entry.
+  - `"token-probe"` — permissions came from a successful probe.
+  - `"default"`    — no probe was possible (no token, or probe failed)
+                      and the all-False default applies.
+- `permissions_probe_error`: stable `TokenCapabilities.reason` string
+  when a probe failed (`"bad_credentials"`, `"repo_invisible_to_token"`,
+  `"network_error"`, `"permissions_field_missing"`, ...), else `None`.
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -47,6 +68,7 @@ from project_issues_plugin.config import (
     load_projects,
     resolve_token,
 )
+from project_issues_plugin.providers.base import TokenCapabilities
 
 # Env var that flips debug mode on. Truthy values enable the raw-path
 # fields in the `runtime` block. Anything else (unset, "0", "false",
@@ -85,7 +107,97 @@ def _token_error(p: ProjectConfig) -> str | None:
     return None
 
 
+# ----- token-capability probe cache (ticket #32) -----------------------------
+#
+# Same TTL pattern as `_STATUS_CACHE_TTL_SECONDS` in tools/tickets.py (no
+# separate cache module, by design). Permissions on a token can change
+# when a user rotates org membership or a fine-grained PAT's scopes are
+# edited, so the TTL is shorter than the status-cache TTL (5 minutes vs
+# 1 hour).
+_PROBE_CACHE_TTL_SECONDS = 5 * 60
+_probe_cache: dict[tuple[str, str | None, str], tuple[float, TokenCapabilities]] = {}
+
+
+def _probe_cache_clear() -> None:
+    """Test-only hook — clears the module-level probe cache."""
+    _probe_cache.clear()
+
+
+def _token_fingerprint(token: str) -> str:
+    """Stable, short fingerprint for cache-keying tokens without
+    storing them verbatim in the cache. Uses the last 8 chars (after
+    rejecting empty input). This is enough to invalidate on rotation
+    while keeping the in-process cache content non-secret-revealing.
+    """
+    return token[-8:] if len(token) >= 8 else token
+
+
+def _probe_capabilities(p: ProjectConfig, token: str) -> TokenCapabilities:
+    """Run (or replay from cache) the provider's token-capabilities
+    probe for `p` using `token`.
+
+    Caches by `(provider, path, token-fingerprint)` for
+    `_PROBE_CACHE_TTL_SECONDS`. Provider errors are returned as
+    `TokenCapabilities(reason=...)` (the provider's own contract), not
+    raised, so a failed probe still produces a usable result.
+    """
+    # Imported lazily to avoid a circular import at module load time
+    # (tools/projects.py is imported very early, tools/_providers pulls
+    # in the github provider which itself imports from base).
+    from project_issues_plugin.tools._providers import _PROVIDERS
+
+    key = (p.provider, p.display_path, _token_fingerprint(token))
+    now = time.monotonic()
+    cached = _probe_cache.get(key)
+    if cached is not None and (now - cached[0]) < _PROBE_CACHE_TTL_SECONDS:
+        return cached[1]
+    impl = _PROVIDERS.get(p.provider)
+    if impl is None or not hasattr(impl, "probe_token_capabilities"):
+        # No provider implementation -> treat as a "no probe possible"
+        # outcome so the caller falls back to `permissions_source="default"`.
+        result = TokenCapabilities(reason="provider_unsupported")
+    else:
+        try:
+            result = impl.probe_token_capabilities(p, token)
+        except Exception as exc:  # noqa: BLE001 - probe must never raise
+            result = TokenCapabilities(reason=f"probe_raised:{type(exc).__name__}")
+    _probe_cache[key] = (now, result)
+    return result
+
+
 def _project_to_dict(p: ProjectConfig) -> dict:
+    # Default: use the YAML-configured permissions verbatim.
+    issues_create = p.permissions.issues.create
+    issues_modify = p.permissions.issues.modify
+    pulls_create = p.permissions.pulls.create
+    pulls_modify = p.permissions.pulls.modify
+    pulls_merge = p.permissions.pulls.merge
+    permissions_source: str
+    permissions_probe_error: str | None = None
+
+    if p.source == "config":
+        # YAML-defined projects are authoritative — never override.
+        permissions_source = "config"
+    else:
+        # Auto-discovered (git-remote) project. If a token is available,
+        # ask the provider what the token can actually do; otherwise
+        # keep the all-False default (the existing safe behavior).
+        token = resolve_token(p)
+        if token:
+            caps = _probe_capabilities(p, token)
+            if caps.reason is None:
+                issues_create = caps.issues_create
+                issues_modify = caps.issues_modify
+                pulls_create = caps.pulls_create
+                pulls_modify = caps.pulls_modify
+                pulls_merge = caps.pulls_merge
+                permissions_source = "token-probe"
+            else:
+                permissions_source = "default"
+                permissions_probe_error = caps.reason
+        else:
+            permissions_source = "default"
+
     return {
         "id": p.id,
         "description": p.description,
@@ -97,15 +209,17 @@ def _project_to_dict(p: ProjectConfig) -> dict:
         "permissions": {
             "read": True,
             "issues": {
-                "create": p.permissions.issues.create,
-                "modify": p.permissions.issues.modify,
+                "create": issues_create,
+                "modify": issues_modify,
             },
             "pulls": {
-                "create": p.permissions.pulls.create,
-                "modify": p.permissions.pulls.modify,
-                "merge": p.permissions.pulls.merge,
+                "create": pulls_create,
+                "modify": pulls_modify,
+                "merge": pulls_merge,
             },
         },
+        "permissions_source": permissions_source,
+        "permissions_probe_error": permissions_probe_error,
         "token_env": p.token_env,
         "token_available": resolve_token(p) is not None,
         "token_error": _token_error(p),
@@ -207,6 +321,11 @@ def register(mcp: FastMCP) -> None:
         Permissions are authoritative — if a namespace flag is false,
         the corresponding operation is not allowed.
 
+        For auto-discovered projects (`source == "git-remote"`) with a
+        usable token, the permissions reflect what GitHub says the
+        token may actually do (see `permissions_source` /
+        `permissions_probe_error`).
+
         Diagnostic fields:
 
           - `runtime.os` — `"windows"` or `"linux"`.
@@ -217,6 +336,14 @@ def register(mcp: FastMCP) -> None:
           - Per project, `token_error`:
               `null` (token present), `"env_var_unset"`,
               `"env_var_empty"`, or `"no_token_env"`.
+          - Per project, `permissions_source`:
+              `"config"` (from YAML), `"token-probe"` (derived from a
+              live API probe of the token), or `"default"` (no probe
+              was possible — the all-False default applies).
+          - Per project, `permissions_probe_error`: stable failure
+              identifier (e.g. `"bad_credentials"`,
+              `"repo_invisible_to_token"`, `"network_error"`) when a
+              probe was attempted and failed, else `null`.
 
         Raw config-paths are hidden by default to keep the agent from
         learning the location of the permissions file. Start the

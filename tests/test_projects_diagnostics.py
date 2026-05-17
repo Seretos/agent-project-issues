@@ -199,3 +199,248 @@ def test_find_projects_includes_runtime_block(configured: dict) -> None:
     # Matches carry token_error too.
     for m in out["matches"]:
         assert "token_error" in m
+
+
+# ---------- ticket #32: token-derived permissions ---------------------------
+
+
+def test_config_project_carries_permissions_source_config(configured: dict) -> None:
+    """YAML-defined projects must always report `permissions_source="config"`
+    and `permissions_probe_error=None` — they are authoritative and
+    must never trigger a network probe."""
+    out = configured["list_projects"]()
+    by_id = {p["id"]: p for p in out["projects"]}
+    for project_id in ("t-set", "t-unset", "t-empty", "t-no-env"):
+        assert by_id[project_id]["permissions_source"] == "config", project_id
+        assert by_id[project_id]["permissions_probe_error"] is None, project_id
+
+
+def _autodiscovered_project(path: str = "acme/backend") -> ProjectConfig:
+    return ProjectConfig(
+        id="_auto",
+        description="Auto-discovered from git remote",
+        provider="github",
+        path=path,
+        token_env="GITHUB_TOKEN",
+        source="git-remote",
+    )
+
+
+@pytest.fixture
+def _clean_probe_cache():
+    """The probe cache is process-global; reset it before AND after each
+    test so order-of-execution can't leak state."""
+    from project_issues_plugin.tools import projects as proj_tools
+    proj_tools._probe_cache_clear()
+    yield
+    proj_tools._probe_cache_clear()
+
+
+def test_autodiscovered_project_uses_probed_permissions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _clean_probe_cache,
+) -> None:
+    """End-to-end: when `list_projects` returns an auto-discovered
+    project AND a token is available, the per-project permissions in
+    the response must come from the live probe, not the all-False
+    default. The `permissions_source` field must be `"token-probe"`."""
+    from project_issues_plugin import config as cfg_mod_local
+    from project_issues_plugin.providers.base import TokenCapabilities
+
+    for var in (
+        "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
+        "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
+        "XDG_CONFIG_HOME", "APPDATA", "USERPROFILE",
+        "PROJECT_ISSUES_DEBUG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
+
+    # Stub the loader to hand back a single auto-discovered project so
+    # we don't need a real git repo on disk.
+    auto = _autodiscovered_project()
+    fake_result = cfg_mod_local.LoadResult(
+        projects=[auto],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(cfg_mod_local, "load_projects", lambda **_: fake_result)
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    # Stub the provider so we don't touch the network.
+    from project_issues_plugin.tools import _providers as providers_mod
+    class _FakeProvider:
+        def probe_token_capabilities(self, project, token):
+            assert project.path == "acme/backend"
+            assert token == "ghp_real_value"
+            return TokenCapabilities(
+                issues_create=True, issues_modify=True,
+                pulls_create=True, pulls_modify=True, pulls_merge=False,
+                reason=None,
+            )
+    monkeypatch.setitem(providers_mod._PROVIDERS, "github", _FakeProvider())
+
+    captured: dict = {}
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+    proj_tools.register(_Stub())
+    out = captured["list_projects"]()
+
+    assert len(out["projects"]) == 1
+    p = out["projects"][0]
+    assert p["source"] == "git-remote"
+    assert p["permissions_source"] == "token-probe"
+    assert p["permissions_probe_error"] is None
+    assert p["permissions"]["issues"]["create"] is True
+    assert p["permissions"]["issues"]["modify"] is True
+    assert p["permissions"]["pulls"]["create"] is True
+    assert p["permissions"]["pulls"]["merge"] is False
+
+
+def test_no_token_keeps_default_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _clean_probe_cache,
+) -> None:
+    """Auto-discovered project WITHOUT a token must NOT probe and must
+    keep all-False permissions. `permissions_source` is `"default"`."""
+    from project_issues_plugin import config as cfg_mod_local
+
+    for var in (
+        "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
+        "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
+        "XDG_CONFIG_HOME", "APPDATA", "USERPROFILE",
+        "PROJECT_ISSUES_DEBUG", "GITHUB_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    auto = _autodiscovered_project()
+    fake_result = cfg_mod_local.LoadResult(
+        projects=[auto],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(cfg_mod_local, "load_projects", lambda **_: fake_result)
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    # If the probe is called at all the test must fail — assert by
+    # installing a provider that raises.
+    from project_issues_plugin.tools import _providers as providers_mod
+    class _ExplodingProvider:
+        def probe_token_capabilities(self, project, token):
+            raise AssertionError("probe must not run without a token")
+    monkeypatch.setitem(providers_mod._PROVIDERS, "github", _ExplodingProvider())
+
+    captured: dict = {}
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+    proj_tools.register(_Stub())
+    out = captured["list_projects"]()
+
+    p = out["projects"][0]
+    assert p["permissions_source"] == "default"
+    assert p["permissions_probe_error"] is None
+    assert p["permissions"]["issues"]["create"] is False
+    assert p["permissions"]["pulls"]["merge"] is False
+
+
+def test_probed_permissions_are_cached_within_ttl(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """A second call within the TTL must hit the cache (probe called once)."""
+    from project_issues_plugin import config as cfg_mod_local
+    from project_issues_plugin.providers.base import TokenCapabilities
+
+    for var in (
+        "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
+        "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
+        "XDG_CONFIG_HOME", "APPDATA", "USERPROFILE",
+        "PROJECT_ISSUES_DEBUG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
+
+    auto = _autodiscovered_project()
+    fake_result = cfg_mod_local.LoadResult(
+        projects=[auto], config_file=None, searched_paths=[], state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(cfg_mod_local, "load_projects", lambda **_: fake_result)
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    from project_issues_plugin.tools import _providers as providers_mod
+    call_count = {"n": 0}
+    class _CountingProvider:
+        def probe_token_capabilities(self, project, token):
+            call_count["n"] += 1
+            return TokenCapabilities(issues_create=True)
+    monkeypatch.setitem(providers_mod._PROVIDERS, "github", _CountingProvider())
+
+    captured: dict = {}
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+    proj_tools.register(_Stub())
+    captured["list_projects"]()
+    captured["list_projects"]()
+    captured["list_projects"]()
+    assert call_count["n"] == 1
+
+
+def test_probe_failure_records_error_and_keeps_defaults(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """A failed probe (e.g. 404) must NOT grant permissions; the failure
+    reason flows through to `permissions_probe_error`."""
+    from project_issues_plugin import config as cfg_mod_local
+    from project_issues_plugin.providers.base import TokenCapabilities
+
+    for var in (
+        "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
+        "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
+        "XDG_CONFIG_HOME", "APPDATA", "USERPROFILE",
+        "PROJECT_ISSUES_DEBUG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
+
+    auto = _autodiscovered_project()
+    fake_result = cfg_mod_local.LoadResult(
+        projects=[auto], config_file=None, searched_paths=[], state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(cfg_mod_local, "load_projects", lambda **_: fake_result)
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    from project_issues_plugin.tools import _providers as providers_mod
+    class _FailingProvider:
+        def probe_token_capabilities(self, project, token):
+            return TokenCapabilities(reason="repo_invisible_to_token")
+    monkeypatch.setitem(providers_mod._PROVIDERS, "github", _FailingProvider())
+
+    captured: dict = {}
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+    proj_tools.register(_Stub())
+    out = captured["list_projects"]()
+    p = out["projects"][0]
+    assert p["permissions_source"] == "default"
+    assert p["permissions_probe_error"] == "repo_invisible_to_token"
+    assert p["permissions"]["issues"]["create"] is False
+    assert p["permissions"]["pulls"]["merge"] is False

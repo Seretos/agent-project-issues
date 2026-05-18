@@ -52,21 +52,19 @@ function Fail($msg) {
     exit 1
 }
 
-# Platform-aware artifact naming.
-#   Windows: project-issues.exe, copied into bin/windows-x86_64/.
-#   Linux:   project-issues,     copied into bin/linux-x86_64/.
-# The legacy bin/project-issues.exe location is also populated on
-# Windows so the existing plugin.json (which points there today)
-# keeps working -- #13 will swap plugin.json to a wrapper script.
+# Platform-aware artifact naming. PyInstaller emits into dist/; the
+# binary is then staged directly at bin/<name>, mirroring the agent-
+# worktree layout that the release artifact uses. plugin.json points
+# at the extensionless bin/project-issues -- POSIX hosts exec the ELF
+# directly, Windows MCP hosts resolve to bin/project-issues.exe via
+# PATHEXT. No shell/batch wrapper hop (ticket #37).
 if ($IsWindows) {
-    $script:BinaryName    = "project-issues.exe"
-    $script:OsTriple      = "windows-x86_64"
+    $script:BinaryName = "project-issues.exe"
 } else {
-    $script:BinaryName    = "project-issues"
-    $script:OsTriple      = "linux-x86_64"
+    $script:BinaryName = "project-issues"
 }
 $script:DistBinary = Join-Path $root "dist/$($script:BinaryName)"
-$script:OsBinDir   = Join-Path $root "bin/$($script:OsTriple)"
+$script:BinDir     = Join-Path $root "bin"
 
 # 1. Verify Python.
 # Windows: prefer py.exe -3 locally, python.exe in CI (so we get the
@@ -229,12 +227,11 @@ if (-not (Test-Path $script:DistBinary)) {
 $exeSize = [math]::Round((Get-Item $script:DistBinary).Length / 1MB, 1)
 Write-Host "    $($script:DistBinary | Resolve-Path -Relative) (${exeSize} MB)"
 
-# 5. Copy the PyInstaller artifact into bin/<os>-x86_64/. The shell
-# wrappers staged in step 5b are the actual plugin.json entry points;
-# they dispatch into these per-OS directories at runtime.
-Write-Step "Copying to bin/$($script:OsTriple)/$($script:BinaryName)"
-New-Item -ItemType Directory -Force -Path $script:OsBinDir | Out-Null
-$destOsBin = Join-Path $script:OsBinDir $script:BinaryName
+# 5. Copy the PyInstaller artifact directly into bin/<name>. This IS
+# the plugin.json entry point on the current OS -- no wrapper hop.
+Write-Step "Copying to bin/$($script:BinaryName)"
+New-Item -ItemType Directory -Force -Path $script:BinDir | Out-Null
+$destOsBin = Join-Path $script:BinDir $script:BinaryName
 
 if ($IsWindows) {
     # Defender briefly locks freshly-emitted .exe files. Retry the copy
@@ -271,46 +268,6 @@ if ($IsWindows) {
     chmod +x $destOsBin
     if ($LASTEXITCODE -ne 0) {
         Fail "chmod +x on $destOsBin failed."
-    }
-}
-
-# 5b. Stage the shell-wrapper pair from release/wrappers/ into bin/.
-# These are the actual entry points referenced by plugin.json
-# (`bin/project-issues`, extensionless): the POSIX shebang script runs
-# on Linux/macOS; PATHEXT picks up the .cmd on Windows. Each wrapper
-# dispatches into the matching bin/<os-triple>/ directory. release.yml
-# does the same staging during publish -- running it here too keeps the
-# local checkout's bin/ structure in parity with the published ZIP, so
-# `bin/project-issues` behaves the same locally as in the installed
-# plugin.
-Write-Step "Staging shell wrappers into bin/"
-$wrapperSrc   = Join-Path $root "release/wrappers"
-$posixWrapper = Join-Path $root "bin/project-issues"
-$cmdWrapper   = Join-Path $root "bin/project-issues.cmd"
-Copy-Item -Force (Join-Path $wrapperSrc "project-issues")     $posixWrapper
-Copy-Item -Force (Join-Path $wrapperSrc "project-issues.cmd") $cmdWrapper
-if (-not $IsWindows) {
-    chmod +x $posixWrapper
-    if ($LASTEXITCODE -ne 0) {
-        Fail "chmod +x on $posixWrapper failed."
-    }
-}
-
-# Clean up the obsolete legacy binary at bin/project-issues.exe if it
-# survived from an older build. Without this, PATHEXT on Windows
-# resolves `bin/project-issues` to the .exe (which appears before .cmd
-# in the default PATHEXT order), silently bypassing the wrapper
-# dispatch. If the file is locked (running MCP), warn instead of
-# failing -- the user can clean it up after disconnecting the server.
-$legacyExe = Join-Path $root "bin/project-issues.exe"
-if (Test-Path $legacyExe) {
-    try {
-        Remove-Item -Force $legacyExe -ErrorAction Stop
-        Write-Host "    Removed obsolete bin/project-issues.exe (superseded by .cmd wrapper)"
-    } catch {
-        Write-Host "    WARNING: could not remove obsolete bin/project-issues.exe (likely locked)." -ForegroundColor Yellow
-        Write-Host "    PATHEXT will still resolve to the stale .exe over the .cmd wrapper." -ForegroundColor Yellow
-        Write-Host "    Close any running MCP session and delete bin/project-issues.exe manually." -ForegroundColor Yellow
     }
 }
 
@@ -395,17 +352,9 @@ zip_path = sys.argv[2]
 EXE_ATTR = (0o755 << 16) | 0x8000
 REG_ATTR = (0o644 << 16) | 0x8000
 
-# Any path under bin/ that looks like the plugin binary (with or
-# without .exe) gets the executable mode bits. This covers both the
-# legacy bin/project-issues.exe and the new
-# bin/<os>-x86_64/project-issues[.exe] layout.
+# The two top-level binaries get the executable mode bits.
 def is_binary(rel: str) -> bool:
-    return (
-        rel == "bin/project-issues.exe"
-        or rel.startswith("bin/") and rel.rsplit("/", 1)[-1] in (
-            "project-issues", "project-issues.exe",
-        )
-    )
+    return rel in ("bin/project-issues", "bin/project-issues.exe")
 
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     for dirpath, dirnames, filenames in os.walk(stage):
@@ -439,4 +388,4 @@ print(f"wrote {zip_path} ({os.path.getsize(zip_path)} bytes)")
 }
 
 Write-Step "Done."
-Write-Host "$($script:OsBinDir | Resolve-Path -Relative)/$($script:BinaryName) is ready."
+Write-Host "$($script:BinDir | Resolve-Path -Relative)/$($script:BinaryName) is ready."

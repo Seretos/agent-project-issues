@@ -24,7 +24,7 @@ tests/                          # pytest, runs on every push (test.yml)
 scripts/build.ps1               # PyInstaller wrapper + smoke test + optional packaging
 project-issues.spec             # PyInstaller config
 pyproject.toml                  # setuptools (package-dir = src/) + pytest config
-.claude-plugin/plugin.json      # plugin manifest, points at bin/project-issues.exe
+.claude-plugin/plugin.json      # plugin manifest, points at bin/project-issues (Windows MCP hosts resolve to .exe via PATHEXT)
 
 .github/workflows/
   test.yml                      # pytest on every push and PR
@@ -35,7 +35,7 @@ pyproject.toml                  # setuptools (package-dir = src/) + pytest confi
 ## Branches
 
 - `main` — source of truth. All edits go here.
-- `release` — orphan branch, force-pushed by `release.yml`. Contains only install-ready files: `.claude-plugin/plugin.json`, `bin/project-issues.exe`, `README.md`. Clients clone at the version tag (e.g. `v0.0.1`), which lives on a release-branch commit.
+- `release` — orphan branch, force-pushed by `release.yml`. Contains only install-ready files: `.claude-plugin/plugin.json`, `bin/project-issues` (Linux ELF), `bin/project-issues.exe` (Windows PE), `README.md`. Clients clone at the version tag (e.g. `v0.0.1`), which lives on a release-branch commit.
 
 The release branch shares no history with main. Don't try to merge between them.
 

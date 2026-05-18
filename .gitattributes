@@ -1,20 +1,9 @@
-# The POSIX wrapper MUST stay LF-terminated; CRLF would break the
-# shebang on Linux clones and silently send the script through the
-# wrong interpreter.
-release/wrappers/project-issues text eol=lf
-
-# The Windows wrapper is a batch file -- batch interpreters tolerate
-# either line ending, but CRLF is conventional on Windows.
-release/wrappers/project-issues.cmd text eol=crlf
-
-# The release workflow copies release/wrappers/project-issues -> bin/project-issues
-# and commits that to the orphan release branch. Without an explicit rule
-# `core.autocrlf=true` re-introduces CRLF on the index-write, which breaks
-# the shebang on Linux consumers (ticket #34).
-bin/project-issues text eol=lf
-
-# PyInstaller outputs MUST never be touched by EOL normalisation, even if
-# someone's local core.autocrlf is misconfigured. The Linux binary has no
-# .exe suffix so its binary nature isn't auto-detected from the extension.
-bin/linux-x86_64/project-issues binary
-bin/windows-x86_64/project-issues.exe binary
+# The release artifact ships the per-OS PyInstaller binaries directly
+# at bin/<name>, mirroring the agent-worktree layout. The shell + batch
+# wrappers that ticket #37 traced CRLF-mangling to were removed in
+# favour of letting the MCP host pick the right file via PATHEXT.
+# PyInstaller outputs are detected as binary by content (ELF / PE magic
+# bytes); the explicit rules here are belt-and-suspenders documentation
+# for build-side tooling that ever stages these paths in a source tree.
+bin/project-issues binary
+bin/project-issues.exe binary

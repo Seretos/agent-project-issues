@@ -11,18 +11,20 @@ name: release
 #                            in the matrix (windows-latest +
 #                            ubuntu-22.04). The build script (cross-
 #                            platform per #12) emits the per-OS binary
-#                            into bin/<os>-x86_64/. Each matrix branch
-#                            uploads its bin/ directory as a separate
+#                            directly to bin/<name>. Each matrix branch
+#                            uploads that single file as a separate
 #                            artifact.
-#   release (ubuntu-22.04)-> downloads both bin artifacts + the
-#                            stamped manifests, copies the shell-
-#                            wrapper pair from release/wrappers/ into
-#                            bin/, force-pushes the orphan release
-#                            branch, builds the install ZIP with
-#                            Unix mode bits stamped on the binaries +
-#                            POSIX wrapper, creates the GitHub
-#                            Release, and dispatches to the
-#                            marketplace.
+#   release (ubuntu-22.04)-> downloads both bin artifacts (Linux ELF
+#                            lands at bin/project-issues, Windows PE at
+#                            bin/project-issues.exe) + the stamped
+#                            manifests, force-pushes the orphan release
+#                            branch, builds the install ZIP with Unix
+#                            mode bits stamped on the binaries, creates
+#                            the GitHub Release, and dispatches to the
+#                            marketplace. No shell/batch wrapper is
+#                            shipped (ticket #37): POSIX hosts exec the
+#                            extensionless ELF directly and Windows MCP
+#                            hosts resolve the .exe via PATHEXT.
 #
 # The 22.04 pin (not ubuntu-latest) matches the WSL2 glibc target
 # from #10/#11; ubuntu-latest's glibc 2.39 would emit binaries that
@@ -120,11 +122,9 @@ jobs:
         include:
           - os: windows-latest
             artifact-name: bin-windows
-            os-triple: windows-x86_64
             binary: project-issues.exe
           - os: ubuntu-22.04
             artifact-name: bin-linux
-            os-triple: linux-x86_64
             binary: project-issues
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -159,10 +159,10 @@ jobs:
       - name: Verify binary present
         shell: bash
         run: |
-          OUT="bin/${{ matrix.os-triple }}/${{ matrix.binary }}"
+          OUT="bin/${{ matrix.binary }}"
           if [ ! -f "$OUT" ]; then
             echo "::error::expected $OUT was not produced"
-            ls -la bin/ "bin/${{ matrix.os-triple }}" || true
+            ls -la bin/ || true
             exit 1
           fi
           ls -la "$OUT"
@@ -171,7 +171,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}
-          path: bin/${{ matrix.os-triple }}/${{ matrix.binary }}
+          path: bin/${{ matrix.binary }}
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -198,33 +198,32 @@ jobs:
           name: stamped-manifests
           path: .
 
+      # The per-OS artifacts each contain just the binary file. By
+      # pointing both downloads at `bin/` they land as
+      # `bin/project-issues` (Linux ELF) and `bin/project-issues.exe`
+      # (Windows PE) directly -- matching the agent-worktree layout
+      # where the extensionless name on POSIX hosts is the Linux
+      # binary itself, and Windows MCP hosts resolve the `.exe` via
+      # PATHEXT. This deletes the shell/batch wrapper hop that ticket
+      # #37 traced CRLF-mangling to: no text wrapper ships at all,
+      # so no installer's `core.autocrlf=true` can corrupt anything.
       - name: Download Windows binary
         uses: actions/download-artifact@v4
         with:
           name: bin-windows
-          path: bin/windows-x86_64/
+          path: bin/
 
       - name: Download Linux binary
         uses: actions/download-artifact@v4
         with:
           name: bin-linux
-          path: bin/linux-x86_64/
+          path: bin/
 
-      - name: Stage wrappers into bin/
-        # Per ticket #13: release/wrappers/project-issues (POSIX) +
-        # project-issues.cmd (Windows batch) are versioned in the
-        # source tree; the assembly step copies them next to the
-        # per-OS binary directories so the plugin.json `command`
-        # entry can resolve to bin/project-issues without an
-        # extension.
+      - name: Mark per-OS binaries executable
         shell: bash
         run: |
-          mkdir -p bin
-          cp release/wrappers/project-issues     bin/project-issues
-          cp release/wrappers/project-issues.cmd bin/project-issues.cmd
           chmod +x bin/project-issues
-          chmod +x bin/windows-x86_64/project-issues.exe
-          chmod +x bin/linux-x86_64/project-issues
+          chmod +x bin/project-issues.exe
           echo "=== bin/ contents ==="
           ls -laR bin
 
@@ -255,14 +254,9 @@ jobs:
           REG_ATTR = (0o644 << 16) | 0x8000
 
           def is_executable(rel: str) -> bool:
-              # The shell wrappers + both PyInstaller binaries.
-              if rel == "bin/project-issues":
-                  return True
-              if rel.startswith("bin/"):
-                  leaf = rel.rsplit("/", 1)[-1]
-                  if leaf in ("project-issues", "project-issues.exe"):
-                      return True
-              return False
+              # The two PyInstaller binaries are shipped directly at
+              # bin/<name>, matching the agent-worktree layout.
+              return rel in ("bin/project-issues", "bin/project-issues.exe")
 
           with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
               for dirpath, dirnames, filenames in os.walk(stage):
@@ -309,36 +303,24 @@ jobs:
 
           cp -a "$STAGE_DIR"/. .
 
-          # Ship a `.gitattributes` with the orphan branch so the install
-          # path (Copilot CLI clones the release into WSL with its own git
-          # config) cannot rewrite line endings. Per spec `text eol=lf`
-          # should override `core.autocrlf=true`, but the Copilot CLI
-          # install path observably ignores it (ticket #37). Marking every
-          # shipped file as `binary` is immune to that: git never converts
-          # binary-flagged blobs on checkout, regardless of any
-          # `core.autocrlf` setting in the clone. The POSIX wrapper, the
-          # .cmd wrapper, and both PyInstaller outputs are byte-identical
-          # at the source (LF / CRLF / binary respectively) on the
-          # ubuntu-22.04 runner where the orphan branch is assembled, so
-          # `binary` ships the bytes through verbatim.
+          # Belt-and-suspenders: both files are detected as binary by
+          # content (ELF / PE magic bytes) so git already wouldn't
+          # apply EOL conversion. Shipping an explicit `.gitattributes`
+          # in the orphan branch documents intent and protects against
+          # installer tooling that tries to second-guess text-vs-binary
+          # detection -- which is exactly the failure mode that bit us
+          # in ticket #37 when the wrapper was a shell script.
           cat > .gitattributes <<'EOF'
-          bin/project-issues                    binary
-          bin/project-issues.cmd                binary
-          bin/linux-x86_64/project-issues       binary
-          bin/windows-x86_64/project-issues.exe binary
+          bin/project-issues     binary
+          bin/project-issues.exe binary
           EOF
 
-          # Stamp the POSIX exec bit on the three executables so a
-          # Linux clone of the orphan branch yields -rwxr-xr-x rather
-          # than 0644 (which causes EACCES when the MCP host tries to
-          # spawn the wrapper or its delegate).
-          git add bin/windows-x86_64/project-issues.exe \
-                  bin/linux-x86_64/project-issues \
-                  bin/project-issues
-          git update-index --chmod=+x bin/windows-x86_64/project-issues.exe
-          git update-index --chmod=+x bin/linux-x86_64/project-issues
+          # Stamp the POSIX exec bit on both binaries so a Linux clone
+          # yields -rwxr-xr-x rather than 0644 (which would cause
+          # EACCES when the MCP host spawns the binary).
+          git add bin/project-issues bin/project-issues.exe
           git update-index --chmod=+x bin/project-issues
-          # .cmd stays 0644 -- Windows ignores POSIX mode bits.
+          git update-index --chmod=+x bin/project-issues.exe
 
           git add -A
           git commit -m "release: v${{ inputs.version }}"

@@ -12,9 +12,10 @@ dist/
 .vscode/
 .idea/
 
-# Build output — scripts/build.ps1 stages the per-OS PyInstaller
-# binaries and the shell-wrapper pair (copied from release/wrappers/)
-# into bin/. Everything in there is reproducible from source; the
-# release tarball is what ships to end users.
+# Build output -- scripts/build.ps1 emits the PyInstaller binary
+# directly to bin/project-issues (Linux) or bin/project-issues.exe
+# (Windows). The release pipeline produces the same layout from the
+# matrix artifacts. Everything in there is reproducible from source;
+# the release tarball is what ships to end users.
 /bin/
 *.pyinstaller.tmp/

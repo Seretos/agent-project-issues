@@ -1,0 +1,4 @@
+bin/project-issues                    binary
+bin/project-issues.cmd                binary
+bin/linux-x86_64/project-issues       binary
+bin/windows-x86_64/project-issues.exe binary

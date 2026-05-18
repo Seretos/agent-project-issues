@@ -309,6 +309,20 @@ jobs:
 
           cp -a "$STAGE_DIR"/. .
 
+          # Ship a `.gitattributes` with the orphan branch so that clients
+          # cloning the release (e.g. Copilot CLI in WSL, marketplace
+          # tooling on Windows) honor the eol rules at checkout, regardless
+          # of their local `core.autocrlf` setting. Without this file in
+          # the branch itself, the LF-encoded blob still gets rewritten to
+          # CRLF on the consumer's disk when their git config defaults to
+          # autocrlf=true, breaking the POSIX shebang (ticket #37).
+          cat > .gitattributes <<'EOF'
+          bin/project-issues               text eol=lf
+          bin/project-issues.cmd           text eol=crlf
+          bin/linux-x86_64/project-issues  binary
+          bin/windows-x86_64/project-issues.exe binary
+          EOF
+
           # Stamp the POSIX exec bit on the three executables so a
           # Linux clone of the orphan branch yields -rwxr-xr-x rather
           # than 0644 (which causes EACCES when the MCP host tries to

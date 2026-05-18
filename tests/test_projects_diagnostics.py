@@ -30,7 +30,10 @@ from project_issues_plugin.tools import projects as proj_tools
 
 
 def _write_cfg(tmp_path: Path) -> None:
-    cfg = tmp_path / ".claude" / "project-issues.yml"
+    # Project-boundary walk requires `.git/` at the repo root the config
+    # lives in. Plant an empty one — the resolver only checks existence.
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    cfg = tmp_path / ".seretos" / "project-issues.yml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(textwrap.dedent(
         """
@@ -162,7 +165,6 @@ def test_no_config_state_still_has_runtime_block(
     for var in (
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
         "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
-        "XDG_CONFIG_HOME", "APPDATA", "USERPROFILE",
         "PROJECT_ISSUES_DEBUG",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -171,7 +173,9 @@ def test_no_config_state_still_has_runtime_block(
     fake_home = tmp_path / "fake-home"
     fake_home.mkdir()
     monkeypatch.setattr(cfg_mod.Path, "home", lambda: fake_home)
-    monkeypatch.setattr(cfg_mod, "_is_windows", lambda: False)
+    # No enclosing git repo for `empty` (test-controlled) — short-circuit the
+    # walker so the developer's filesystem can't bleed in.
+    monkeypatch.setattr(cfg_mod, "_find_git_repo_root", lambda _start: None)
     monkeypatch.setenv("PROJECT_ISSUES_PLUGIN_CWD", str(empty))
 
     captured: dict = {}

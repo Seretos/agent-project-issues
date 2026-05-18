@@ -1,7 +1,9 @@
 # Example project-issues plugin configuration (v1).
 #
-# Place this file at `.claude/project-issues.yml` in your project root
-# (or any parent directory — the loader walks up from CWD).
+# Place this file at `.seretos/project-issues.yml` in your project root.
+# The loader walks outward by git project boundaries: it checks each
+# enclosing repo's `.seretos/` directory, then `~/.seretos/` as the
+# user-level fallback.
 #
 # Token values live in a sibling `.env` file by convention.
 

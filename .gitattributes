@@ -6,3 +6,15 @@ release/wrappers/project-issues text eol=lf
 # The Windows wrapper is a batch file -- batch interpreters tolerate
 # either line ending, but CRLF is conventional on Windows.
 release/wrappers/project-issues.cmd text eol=crlf
+
+# The release workflow copies release/wrappers/project-issues -> bin/project-issues
+# and commits that to the orphan release branch. Without an explicit rule
+# `core.autocrlf=true` re-introduces CRLF on the index-write, which breaks
+# the shebang on Linux consumers (ticket #34).
+bin/project-issues text eol=lf
+
+# PyInstaller outputs MUST never be touched by EOL normalisation, even if
+# someone's local core.autocrlf is misconfigured. The Linux binary has no
+# .exe suffix so its binary nature isn't auto-detected from the extension.
+bin/linux-x86_64/project-issues binary
+bin/windows-x86_64/project-issues.exe binary

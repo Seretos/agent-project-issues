@@ -13,7 +13,7 @@ Self-contained `.exe` — no Python, no `pip install`.
 
 ## Read-only setup (zero config)
 
-Put your token once in `~/.claude/settings.json`:
+Put your token once in `~/.claude/settings.json` (the Claude Code host file — that path is fixed by Claude Code itself and unrelated to the plugin's own `.seretos/` directory):
 
 ```json
 {
@@ -27,7 +27,7 @@ In any repo with a `github.com` `origin` remote, the plugin auto-discovers a sin
 
 ## Write access (per-project)
 
-Drop a `.claude/project-issues.yml` next to your repo (a `.yaml` extension also works):
+Drop a `.seretos/project-issues.yml` at the root of your repo (a `.yaml` extension also works):
 
 ```yaml
 version: 1
@@ -50,6 +50,26 @@ projects:
 ```
 
 A complete example lives at [`config.example.yml`](./config.example.yml) in the repo root.
+
+### Where the loader looks for the config
+
+The resolver walks **git project boundaries** outward from the CWD:
+
+1. `$PROJECT_ISSUES_CONFIG` (explicit override; missing path = hard error).
+2. `$PROJECT_ISSUES_PLUGIN_ROOT/project-issues.yml` (binary-adjacent override for self-contained installs — note: not under `.seretos/`).
+3. `<enclosing-git-repo>/.seretos/project-issues.{yml,yaml}`. The walk finds the nearest `.git`-bearing ancestor, checks its `.seretos/`, then jumps *out* of that repo (next iteration starts above its root). Repeats project-by-project until no enclosing repo exists.
+4. `~/.seretos/project-issues.{yml,yaml}` (user-level fallback).
+
+Configs are **not merged** — the first match wins entirely. Higher/outer configs are ignored. If a project is not in the winning config, the agent has no access to it.
+
+**One exception:** the CWD repo is always included via auto-discovery (`source: "git-remote"`, read-only by default, permissions derived from the GitHub/GitLab token's effective rights) — unless it's already declared in the winning config, in which case the explicit declaration wins.
+
+### Known limitation: GitHub Copilot CLI
+
+In Claude Code CLI the host passes the user's working directory to the MCP, so the project-boundary walk lands on the repo's `.seretos/`. **GitHub Copilot CLI** does not pass a usable CWD — it spawns the MCP from the plugin install dir. Two workarounds:
+
+- **Recommended:** put your config in `~/.seretos/project-issues.yml`. The user-level fallback is the dedicated escape hatch.
+- **Per-project:** export `PROJECT_ISSUES_PLUGIN_CWD=$(pwd)` before launching `copilot`. The plugin reads it as the search root.
 
 Each `projects[]` entry can reuse the global `GITHUB_TOKEN` or scope to a per-project token (`token_env: GITHUB_TOKEN_ACME`) — the env var name is just a pointer; the token value itself is read from the process environment.
 
@@ -94,7 +114,7 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 
 ### Migrating from the previous `.toml` config
 
-Before v1 the config lived in `.claude/project-issues.toml` and used a flat `permissions = { ... }` table plus split `owner` / `repo` fields. The format changed in a single breaking step — no auto-converter, no fallback. Migration is a literal field-by-field copy.
+Before v1 the config lived in `.seretos/project-issues.toml` (originally `.claude/project-issues.toml` — both folder names have since been retired) and used a flat `permissions = { ... }` table plus split `owner` / `repo` fields. The format changed in a single breaking step — no auto-converter, no fallback. Migration is a literal field-by-field copy.
 
 **Before — `.claude/project-issues.toml`:**
 
@@ -119,7 +139,7 @@ modify = false
 merge  = false
 ```
 
-**After — `.claude/project-issues.yml`:**
+**After — `.seretos/project-issues.yml`:**
 
 ```yaml
 version: 1

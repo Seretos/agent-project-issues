@@ -40,9 +40,11 @@ making any HTTP call:
 | `list_tickets`   | read-only — no gate                 |
 | `get_ticket`     | read-only — no gate                 |
 
-`_auto`-discovered projects (no TOML) have `create=false, modify=false` and
-are therefore read-only by construction. Write access requires an explicit
-`.claude/project-issues.toml` entry.
+`_auto`-discovered projects (no explicit config) have `create=false, modify=false`
+by default and are therefore read-only by construction. Write access requires an
+explicit `.seretos/project-issues.yml` entry. The auto-entry's read permissions
+are derived from the token's effective rights on the target repo via a probe,
+not assumed.
 
 ## AI-attribution markers
 

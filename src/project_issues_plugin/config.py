@@ -2,13 +2,24 @@
 
 Resolves the project list for the server's current working directory:
 
-  1. Walk up from CWD looking for `.claude/project-issues.yml` (or
-     `.yaml`). If found, parse it, load the referenced `.env`, and
-     return the configured projects.
-  2. Otherwise, walk up looking for `.git/config` and inspect the
-     `origin` remote URL. For github.com / gitlab.com, synthesize a
-     single read-only project with id="_auto".
-  3. Otherwise, return an empty list.
+  1. Walk **project boundaries** outward from CWD looking for
+     `.seretos/project-issues.yml` (or `.yaml`). "Project boundary" =
+     enclosing git repo: at each step, find the nearest `.git`-bearing
+     ancestor, check its `.seretos/`, then jump *out* of that repo
+     (start the next iteration above its root). Stop when no enclosing
+     git repo exists.
+  2. Otherwise, check `~/.seretos/project-issues.{yml,yaml}` as the
+     user-level fallback.
+  3. Configs are **not merged**: the first match wins entirely.
+     Higher/outer configs are ignored. If a project is not in the
+     winning config, the agent has no access to it.
+  4. **One exception** (#33): the CWD git repo is always auto-included
+     via the git-remote auto-discovery (`id="_auto"`,
+     `source="git-remote"`, permissions via token-probe) — but only if
+     the CWD repo is not already declared in the winning config. The
+     strict whitelist still applies to every other repo.
+  5. If neither a config nor an enclosing git repo exists, the result
+     is empty.
 
 YAML schema (v1):
 
@@ -53,7 +64,6 @@ import io
 import logging
 import os
 import re
-import sys
 import warnings
 from configparser import ConfigParser
 from pathlib import Path
@@ -196,6 +206,23 @@ def _walk_up(start: Path, names: tuple[str, ...]) -> Path | None:
             candidate = cur / name
             if candidate.exists():
                 return candidate
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def _find_git_repo_root(start: Path) -> Path | None:
+    """Return the nearest ancestor of `start` containing a `.git` entry,
+    or None if no enclosing git repo exists.
+
+    `.git` can be either a directory (regular checkout) or a file
+    (worktrees / submodules), so we use `.exists()` instead of
+    `.is_dir()`.
+    """
+    cur = start.resolve()
+    while True:
+        if (cur / ".git").exists():
+            return cur
         if cur.parent == cur:
             return None
         cur = cur.parent
@@ -415,68 +442,56 @@ class LoadResult(BaseModel):
     searched_paths: list[str] = Field(default_factory=list)
 
 
-# Per-OS default search candidates. The resolver iterates these AFTER
-# the explicit / plugin-root / CWD-walk candidates. The first existing
-# file wins — see `_resolve_config_path` for the full priority order.
-#
-# `WSL2 is treated as Linux` (plan-comment D3 = Option A): /root/.claude
-# and ~/.claude already fall out of the Linux candidate set, so #11 is
-# fixed without any WSL-specific magic.
+# The config dir is `.seretos/` across the whole Seretos plugin family
+# (`.claude/` was the pre-refactor name — hard cut, no legacy fallback).
+_CONFIG_DIRNAME = ".seretos"
 _CONFIG_FILENAME = "project-issues.yml"
 _CONFIG_FILENAME_ALT = "project-issues.yaml"
 
 
-def _is_windows() -> bool:
-    """OS detection (plan-comment D1 = Option A — `sys.platform`)."""
-    return sys.platform.startswith("win")
+def _home_default_candidates() -> list[Path]:
+    """User-level fallback: `~/.seretos/project-issues.{yml,yaml}`.
 
-
-def _os_default_candidates() -> list[Path]:
-    """Per-OS default config locations, in priority order.
-
-    Linux (and WSL2):
-      1. `${XDG_CONFIG_HOME:-~/.config}/project-issues.yml`
-      2. `~/.claude/project-issues.yml`
-
-    Windows:
-      1. `%APPDATA%\\project-issues\\project-issues.yml`
-      2. `%USERPROFILE%\\.claude\\project-issues.yml`
+    Used when no enclosing git repo carries a `.seretos/` config. This
+    is the documented escape hatch for hosts (e.g. GitHub Copilot CLI)
+    that don't pass a usable CWD into the MCP — see ticket #35.
     """
-    candidates: list[Path] = []
-    if _is_windows():
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            candidates.append(Path(appdata) / "project-issues" / _CONFIG_FILENAME)
-        userprofile = os.environ.get("USERPROFILE")
-        if userprofile:
-            candidates.append(Path(userprofile) / ".claude" / _CONFIG_FILENAME)
-    else:
-        xdg = os.environ.get("XDG_CONFIG_HOME")
-        xdg_dir = Path(xdg) if xdg else Path.home() / ".config"
-        candidates.append(xdg_dir / _CONFIG_FILENAME)
-        candidates.append(Path.home() / ".claude" / _CONFIG_FILENAME)
-    return candidates
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return []
+    return [
+        home / _CONFIG_DIRNAME / _CONFIG_FILENAME,
+        home / _CONFIG_DIRNAME / _CONFIG_FILENAME_ALT,
+    ]
 
 
-def _walk_up_candidates(start: Path) -> list[Path]:
-    """Every `.claude/project-issues.{yml,yaml}` between `start` and the
-    filesystem root, deepest-first.
+def _walk_project_boundaries(start: Path) -> list[Path]:
+    """`<repo>/.seretos/project-issues.{yml,yaml}` walked outward by
+    **git project boundary** rather than directory level.
 
-    The deepest-first order is the deterministic resolution rule
-    documented for ticket #19: when a user starts Claude Code from
-    `<repo>/` and a sibling `<repo>/<sub>/.claude/project-issues.yml`
-    also exists, only the CWD-near config (or one above it) is ever a
-    candidate — the sub-folder's config is never inspected, because
-    `_walk_up` walks **upward** from the CWD, not downward.
+    From `start`, find the nearest enclosing git repo and check its
+    `.seretos/` directory. Then jump *out* of that repo (start the next
+    iteration above its root) and repeat. The walk terminates when no
+    enclosing git repo exists.
+
+    Rationale (#35 + refactor): the meta-repo / per-plugin nesting in
+    `agent-plugins/plugins/<plugin>/` would otherwise produce a chain
+    of every directory between CWD and `/`. Project-by-project keeps
+    the candidate list short and semantically meaningful — each repo
+    gets exactly one chance to own its config.
     """
     out: list[Path] = []
     cur = start.resolve()
     while True:
-        for name in (_CONFIG_FILENAME, _CONFIG_FILENAME_ALT):
-            out.append(cur / ".claude" / name)
-        if cur.parent == cur:
+        repo = _find_git_repo_root(cur)
+        if not repo:
             return out
-        cur = cur.parent
+        for name in (_CONFIG_FILENAME, _CONFIG_FILENAME_ALT):
+            out.append(repo / _CONFIG_DIRNAME / name)
+        if repo.parent == repo:
+            return out
+        cur = repo.parent
 
 
 def _resolve_config_path(
@@ -488,14 +503,17 @@ def _resolve_config_path(
 
       1. ``$PROJECT_ISSUES_CONFIG`` — explicit override, highest priority.
          If the value points to a non-existent file the resolver raises
-         ``ConfigError`` rather than silently falling through (D2 = A);
-         this makes typos loud instead of mysterious.
+         ``ConfigError`` rather than silently falling through; this
+         makes typos loud instead of mysterious.
       2. ``$PROJECT_ISSUES_PLUGIN_ROOT/project-issues.yml`` (or
          ``.yaml``) — for self-contained plugin checkouts that ship
-         their own config next to the binary.
-      3. ``$CWD/.claude/project-issues.yml`` and every ancestor
-         directory, deepest-first.
-      4. Per-OS defaults — see `_os_default_candidates`.
+         their own config next to the binary. Note: this is the only
+         resolver step that does NOT live under ``.seretos/``, because
+         it's a binary-adjacent override for distribution scenarios,
+         not a user-level config.
+      3. Walk **git project boundaries** outward from ``cwd``: every
+         enclosing repo's ``<repo>/.seretos/project-issues.{yml,yaml}``.
+      4. User-level fallback ``~/.seretos/project-issues.{yml,yaml}``.
 
     Returns a `(winner_or_None, all_paths_inspected)` tuple. The
     `all_paths_inspected` list always reflects the order the resolver
@@ -525,14 +543,14 @@ def _resolve_config_path(
             if candidate.exists():
                 return candidate, searched
 
-    # 3) CWD walk-up.
-    for candidate in _walk_up_candidates(cwd):
+    # 3) Walk project boundaries.
+    for candidate in _walk_project_boundaries(cwd):
         searched.append(candidate)
         if candidate.exists():
             return candidate, searched
 
-    # 4) Per-OS defaults.
-    for candidate in _os_default_candidates():
+    # 4) Home default.
+    for candidate in _home_default_candidates():
         searched.append(candidate)
         if candidate.exists():
             return candidate, searched
@@ -541,7 +559,14 @@ def _resolve_config_path(
 
 
 def load_projects(cwd: Path | None = None) -> LoadResult:
-    """Resolve the project list for the configured working directory."""
+    """Resolve the project list for the configured working directory.
+
+    Configs are **not merged**: the first-found `.seretos/project-issues.yml`
+    wins entirely. The CWD repo is the only exception — it's always
+    auto-included via git-remote discovery if not already in the
+    winning config (#33). The strict whitelist still applies to every
+    other repo.
+    """
     cwd = resolve_search_root(cwd)
     git_path = _walk_up(cwd, (".git/config",))
 
@@ -562,10 +587,13 @@ def load_projects(cwd: Path | None = None) -> LoadResult:
 
     searched_strs = [str(p) for p in searched]
 
+    projects: list[ProjectConfig] = []
     if config_path:
         try:
             projects = _load_yaml(config_path)
         except (ConfigError, OSError) as exc:
+            # Parse failure: don't try to silently substitute auto-discovery —
+            # the user told us where the config lives, and it's broken.
             return LoadResult(
                 projects=[],
                 state="config_error",
@@ -576,31 +604,33 @@ def load_projects(cwd: Path | None = None) -> LoadResult:
                 searched_paths=searched_strs,
             )
         log.info("loaded %d project(s) from %s", len(projects), config_path)
-        return LoadResult(
-            projects=projects,
-            state="ok" if projects else "config_empty",
-            config_file=str(config_path),
-            git_config=str(git_path) if git_path else None,
-            search_root=str(cwd),
-            searched_paths=searched_strs,
-        )
+
+    # Additive CWD-repo auto-discovery (#33). Dedup by (provider, path).
+    # Whitelist semantics for fremde repos stay intact — `_autodiscover_from_git`
+    # only ever returns the CWD repo, never anything else.
     auto = _autodiscover_from_git(cwd)
     if auto:
-        log.info(
-            "auto-discovered read-only project (%s %s)",
-            auto.provider, auto.display_path,
-        )
-        return LoadResult(
-            projects=[auto],
-            state="ok",
-            git_config=str(git_path) if git_path else None,
-            search_root=str(cwd),
-            searched_paths=searched_strs,
-        )
-    log.info("no config and no usable git remote in %s", cwd)
+        key = (auto.provider, (auto.path or "").lower())
+        existing = {(p.provider, (p.path or "").lower()) for p in projects}
+        if key not in existing:
+            log.info(
+                "auto-discovered cwd repo (%s %s) — appending to project list",
+                auto.provider, auto.display_path,
+            )
+            projects.append(auto)
+
+    if projects:
+        state: Literal["ok", "config_empty", "no_config", "config_error"] = "ok"
+    elif config_path:
+        state = "config_empty"
+    else:
+        log.info("no config and no usable git remote in %s", cwd)
+        state = "no_config"
+
     return LoadResult(
-        projects=[],
-        state="no_config",
+        projects=projects,
+        state=state,
+        config_file=str(config_path) if config_path else None,
         git_config=str(git_path) if git_path else None,
         search_root=str(cwd),
         searched_paths=searched_strs,

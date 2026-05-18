@@ -64,7 +64,7 @@ The workflow:
 | Variable | Effect |
 |---|---|
 | `PROJECT_ISSUES_PLUGIN_ROOT` | Set by Claude Code to the plugin's install dir. Logged on startup. |
-| `PROJECT_ISSUES_PLUGIN_CWD` | Override the search root for `.claude/project-issues.yml` and `.git/config`. Highest priority. |
+| `PROJECT_ISSUES_PLUGIN_CWD` | Override the search root for `.seretos/project-issues.yml` and `.git/config`. Highest priority. Set this when a host (e.g. GitHub Copilot CLI) spawns the MCP from somewhere other than the user's working directory. |
 | `CLAUDE_PROJECT_DIR` | Fallback search root if the plugin var is unset. |
 | `PROJECT_ISSUES_PLUGIN_LOG` | Logging level (`DEBUG`/`INFO`/…). Default `INFO`. Goes to stderr. |
 | `GITHUB_TOKEN` / `GITLAB_TOKEN` | Default tokens for `_auto` projects discovered from the git remote. |

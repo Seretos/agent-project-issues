@@ -309,17 +309,22 @@ jobs:
 
           cp -a "$STAGE_DIR"/. .
 
-          # Ship a `.gitattributes` with the orphan branch so that clients
-          # cloning the release (e.g. Copilot CLI in WSL, marketplace
-          # tooling on Windows) honor the eol rules at checkout, regardless
-          # of their local `core.autocrlf` setting. Without this file in
-          # the branch itself, the LF-encoded blob still gets rewritten to
-          # CRLF on the consumer's disk when their git config defaults to
-          # autocrlf=true, breaking the POSIX shebang (ticket #37).
+          # Ship a `.gitattributes` with the orphan branch so the install
+          # path (Copilot CLI clones the release into WSL with its own git
+          # config) cannot rewrite line endings. Per spec `text eol=lf`
+          # should override `core.autocrlf=true`, but the Copilot CLI
+          # install path observably ignores it (ticket #37). Marking every
+          # shipped file as `binary` is immune to that: git never converts
+          # binary-flagged blobs on checkout, regardless of any
+          # `core.autocrlf` setting in the clone. The POSIX wrapper, the
+          # .cmd wrapper, and both PyInstaller outputs are byte-identical
+          # at the source (LF / CRLF / binary respectively) on the
+          # ubuntu-22.04 runner where the orphan branch is assembled, so
+          # `binary` ships the bytes through verbatim.
           cat > .gitattributes <<'EOF'
-          bin/project-issues               text eol=lf
-          bin/project-issues.cmd           text eol=crlf
-          bin/linux-x86_64/project-issues  binary
+          bin/project-issues                    binary
+          bin/project-issues.cmd                binary
+          bin/linux-x86_64/project-issues       binary
           bin/windows-x86_64/project-issues.exe binary
           EOF
 

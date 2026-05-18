@@ -1,0 +1,4 @@
+bin/project-issues               text eol=lf
+bin/project-issues.cmd           text eol=crlf
+bin/linux-x86_64/project-issues  binary
+bin/windows-x86_64/project-issues.exe binary

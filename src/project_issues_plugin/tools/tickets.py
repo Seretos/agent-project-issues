@@ -216,6 +216,29 @@ def register(mcp: FastMCP) -> None:
         is added automatically when the ticket wasn't previously
         `ai-generated`. Do not pass the marker labels yourself.
 
+        **Response shape:** lean by design. The returned `ticket` object
+        contains only fields the agent typically needs after an update:
+
+        ```
+        {
+          "project_id": str,
+          "ticket": {
+            "id":         str,
+            "status":     str,
+            "labels":     [str, ...],
+            "assignees":  [str, ...],
+            "url":        str,
+            "updated_at": str,
+          }
+        }
+        ```
+
+        `title` and `body` are NOT echoed back — the caller already
+        supplied them (or they didn't change). To re-read the full
+        ticket including body, call `get_ticket`. This trim avoids
+        re-streaming multi-kB bodies for status-only or label-only
+        updates (ticket #36).
+
         Requires the project's `issues.modify` permission.
         """
         def go() -> dict:
@@ -229,7 +252,17 @@ def register(mcp: FastMCP) -> None:
                 labels_add=labels_add, labels_remove=labels_remove,
                 assignees_add=assignees_add, assignees_remove=assignees_remove,
             )
-            return {"project_id": project.id, "ticket": asdict(ticket)}
+            return {
+                "project_id": project.id,
+                "ticket": {
+                    "id": ticket.id,
+                    "status": ticket.status,
+                    "labels": list(ticket.labels),
+                    "assignees": list(ticket.assignees),
+                    "url": ticket.url,
+                    "updated_at": ticket.updated_at,
+                },
+            }
         return _safe(go)
 
     @mcp.tool()

@@ -205,6 +205,80 @@ def test_find_projects_includes_runtime_block(configured: dict) -> None:
         assert "token_error" in m
 
 
+# ---------- ticket #38: empty-query lists all projects ----------------------
+
+
+def test_find_projects_empty_query_lists_all(configured: dict) -> None:
+    """`find_projects("")` returns every configured project (alphabetical
+    by id) with `score: 0`. This replaces the previous no-match behaviour
+    so agents asking "what projects are available?" don't get an
+    empty list."""
+    out = configured["find_projects"](query="")
+    ids = [m["id"] for m in out["matches"]]
+    assert ids == ["t-empty", "t-no-env", "t-set", "t-unset"]
+    for m in out["matches"]:
+        assert m["score"] == 0
+    assert out["state"] == "ok"
+
+
+def test_find_projects_whitespace_query_lists_all(configured: dict) -> None:
+    """Whitespace-only queries behave the same as empty."""
+    out = configured["find_projects"](query="   ")
+    ids = [m["id"] for m in out["matches"]]
+    assert ids == ["t-empty", "t-no-env", "t-set", "t-unset"]
+
+
+def test_find_projects_empty_query_respects_limit(configured: dict) -> None:
+    out = configured["find_projects"](query="", limit=2)
+    ids = [m["id"] for m in out["matches"]]
+    assert ids == ["t-empty", "t-no-env"]
+
+
+def test_find_projects_non_empty_query_unchanged(configured: dict) -> None:
+    """Non-empty queries still use the fuzzy scorer."""
+    out = configured["find_projects"](query="set")
+    ids = [m["id"] for m in out["matches"]]
+    # "set" is a substring of "t-set" — should match it.
+    assert "t-set" in ids
+    # And the score should be > 0 for fuzzy matches.
+    for m in out["matches"]:
+        assert m["score"] > 0
+
+
+def test_find_projects_empty_query_in_no_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """When no projects are configured, empty-query still returns an
+    empty matches list and the `state` diagnostic flags the cause."""
+    for var in (
+        "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
+        "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
+        "PROJECT_ISSUES_DEBUG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(cfg_mod.Path, "home", lambda: fake_home)
+    monkeypatch.setattr(cfg_mod, "_find_git_repo_root", lambda _start: None)
+    monkeypatch.setenv("PROJECT_ISSUES_PLUGIN_CWD", str(empty))
+
+    captured: dict = {}
+
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    proj_tools.register(_Stub())
+    out = captured["find_projects"](query="")
+    assert out["matches"] == []
+    assert out["state"] == "no_config"
+
+
 # ---------- ticket #32: token-derived permissions ---------------------------
 
 
@@ -401,6 +475,79 @@ def test_probed_permissions_are_cached_within_ttl(
     captured["list_projects"]()
     captured["list_projects"]()
     assert call_count["n"] == 1
+
+
+def _autodiscovered_gitlab_project(path: str = "acme/backend") -> ProjectConfig:
+    return ProjectConfig(
+        id="_auto",
+        description="Auto-discovered from git remote (gitlab.com)",
+        provider="gitlab",
+        path=path,
+        token_env="GITLAB_TOKEN",
+        source="git-remote",
+    )
+
+
+def test_autodiscovered_gitlab_project_probes_via_gitlab_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _clean_probe_cache,
+) -> None:
+    """Auto-discovered gitlab.com remote → permissions come from the
+    GitLab provider's `probe_token_capabilities`, matching the GitHub
+    auto-discovery contract."""
+    from project_issues_plugin import config as cfg_mod_local
+    from project_issues_plugin.providers.base import TokenCapabilities
+
+    for var in (
+        "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
+        "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
+        "XDG_CONFIG_HOME", "APPDATA", "USERPROFILE",
+        "PROJECT_ISSUES_DEBUG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat_real_value")
+
+    auto = _autodiscovered_gitlab_project()
+    fake_result = cfg_mod_local.LoadResult(
+        projects=[auto], config_file=None, searched_paths=[], state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(cfg_mod_local, "load_projects", lambda **_: fake_result)
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    from project_issues_plugin.tools import _providers as providers_mod
+
+    class _FakeGitLabProvider:
+        def probe_token_capabilities(self, project, token):
+            assert project.provider == "gitlab"
+            assert project.path == "acme/backend"
+            assert token == "glpat_real_value"
+            return TokenCapabilities(
+                issues_create=True, issues_modify=True,
+                pulls_create=True, pulls_modify=True, pulls_merge=True,
+                reason=None,
+            )
+    monkeypatch.setitem(providers_mod._PROVIDERS, "gitlab", _FakeGitLabProvider())
+
+    captured: dict = {}
+
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+    proj_tools.register(_Stub())
+    out = captured["list_projects"]()
+
+    assert len(out["projects"]) == 1
+    p = out["projects"][0]
+    assert p["provider"] == "gitlab"
+    assert p["source"] == "git-remote"
+    assert p["permissions_source"] == "token-probe"
+    assert p["permissions_probe_error"] is None
+    # Full write surface granted by the api scope.
+    assert p["permissions"]["issues"]["create"] is True
+    assert p["permissions"]["pulls"]["merge"] is True
 
 
 def test_probe_failure_records_error_and_keeps_defaults(

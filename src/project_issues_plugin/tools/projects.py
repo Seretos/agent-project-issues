@@ -364,6 +364,13 @@ def register(mcp: FastMCP) -> None:
         Use whenever the user names a project naturally ("the mobile
         app"). Returns up to `limit` matches sorted by relevance.
 
+        **Query behavior:**
+          - Empty or whitespace-only query returns **all** projects
+            (alphabetical by id), each with `score: 0`. Use this to
+            enumerate without a separate `list_projects` call.
+          - Non-empty query → fuzzy match by id / description / path,
+            sorted by relevance descending.
+
         If `matches` is empty, INSPECT `state` first — do not say "the
         project doesn't exist" when the cause is missing or broken
         configuration:
@@ -377,14 +384,22 @@ def register(mcp: FastMCP) -> None:
         `config_file_loaded`, per-match `token_error`).
         """
         result = load_projects()
-        scored: list[tuple[int, ProjectConfig]] = []
-        for p in result.projects:
-            s = _score(query, p)
-            if s > 0:
-                scored.append((s, p))
-        scored.sort(key=lambda pair: pair[0], reverse=True)
         cap = max(1, limit)
-        results = [{**_project_to_dict(p), "score": s} for s, p in scored[:cap]]
+        q_trimmed = (query or "").strip()
+        if not q_trimmed:
+            sorted_projects = sorted(result.projects, key=lambda p: p.id.lower())
+            results = [
+                {**_project_to_dict(p), "score": 0}
+                for p in sorted_projects[:cap]
+            ]
+        else:
+            scored: list[tuple[int, ProjectConfig]] = []
+            for p in result.projects:
+                s = _score(query, p)
+                if s > 0:
+                    scored.append((s, p))
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            results = [{**_project_to_dict(p), "score": s} for s, p in scored[:cap]]
         return {
             "query": query,
             "matches": results,

@@ -51,6 +51,36 @@ projects:
 
 A complete example lives at [`config.example.yml`](./config.example.yml) in the repo root.
 
+#### GitLab — self-hosted and gitlab.com
+
+```yaml
+version: 1
+
+projects:
+  - id: acme-gitlab
+    description: Acme backend on self-hosted GitLab
+    provider: gitlab
+    path: acme/backend                  # full namespace; supports groups
+    base_url: https://gitlab.example.com  # omit for gitlab.com
+    token_env: GITLAB_TOKEN_ACME
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:                            # GitLab calls them "merge requests"
+        create: true
+        modify: true                    # merging is a separate flag below
+        merge: false
+```
+
+GitLab differences worth knowing:
+
+- **PAT scopes** — the provider asks GitLab to introspect the token's scopes via `/personal_access_tokens/self`. A token with the `api` scope grants the full write surface (`issues.*`, `pulls.*`, `merge_pr`). Anything else (`read_api`, `read_repository`, etc.) is treated as read-only, with `permissions_probe_error: "insufficient_scope"` on the project record.
+- **Status state-space** — GitLab issues only have `open` ↔ `closed`. The `closed:completed` / `closed:not_planned` distinction from GitHub collapses to `closed`; the `ai-closed-not-planned` label is the agent-side convention for "won't do" semantics. `update_ticket(status="closed:not_planned")` still works — it maps to `state_event="close"` and the caller should add the marker label via `labels_add` for the same effect.
+- **Merge strategies** — `merge_pr(strategy="merge")` and `merge_pr(strategy="squash")` are native. `strategy="rebase"` is rejected with a clear error because GitLab's rebase is a separate flow (a `PUT .../rebase` endpoint that doesn't merge); callers wanting rebase-first-merge should call the rebase endpoint and then `merge_pr(strategy="merge")`.
+- **Comment ids** — GitLab notes are scoped per issue/MR, unlike GitHub's repo-wide comment ids. `get_comment` / `update_comment` accept the composite form `"<issue_iid>/<note_id>"` (e.g. `"5/99"`); a bare note id surfaces a clear error.
+- **Pipelines** — `list_pipeline_runs(ticket_id=...)` walks the issue's related MRs and aggregates their pipelines. `get_pipeline_run(include_failure_context=true)` fetches the failing jobs' traces (last ~4KB tail) but does not surface GitHub-style structured annotations — GitLab has no equivalent surface, so `annotations: []` on every failing job.
+
 ### Where the loader looks for the config
 
 The resolver walks **git project boundaries** outward from the CWD:
@@ -200,7 +230,7 @@ Every AI-authored write is tagged so a human can audit, filter, or auto-close it
 Downstream tooling should treat the body prefix as authoritative for AI-attribution and the label as a convenience indicator that may be missing for external contributors. See `Seretos/agent-marketplace#15` for the history.
 
 ## Notes
-- GitLab support is stubbed today (`tools/tickets.py` only resolves `github`). Extending it means implementing a `GitLabProvider`.
+- GitLab is supported alongside GitHub. Issues, merge requests (mapped to the common PR surface), notes, and pipelines all flow through the same tool calls — `provider: gitlab` plus a `path` (e.g. `group/sub/project`) is the only config-side difference. For self-hosted instances add `base_url: https://gitlab.example.com`. Status hints collapse `terminal_completed` and `terminal_declined` to `"closed"` because GitLab has no `state_reason`; agents wanting "not planned" semantics apply the `ai-closed-not-planned` label. See the GitLab notes block under "Per-project setup" below.
 - AI-marker labels (`ai-generated`, `ai-modified`, `ai-closed-not-planned`) are created lazily on first write to a repo. Label create / apply failures are non-fatal — the body-prefix marker is the canonical source of truth.
 - `get_ticket` returns typed `relations` (parent / child / closes / closed_by / duplicate_of / duplicated_by / mentions / mentioned_by) alongside the ticket and comments. Cross-repo refs are formatted as `owner/repo#N`. Pass `include_relations=false` to skip the two extra API calls when relation context isn't needed; `relations_truncated=true` signals that the timeline had more pages than were fetched.
 - `list_tickets` accepts an extended filter set beyond the basics (`status`, `labels`, `assignee`, `search`, `limit`): `not_labels` (exclude), `author`, `created_after` / `created_before`, `updated_after` / `updated_before` (ISO dates), plus `sort_by` (`created` / `updated` / `comments`) and `sort_order` (`asc` / `desc`). When any of the exclusion / author / date filters is set the provider switches from the cheap `/repos/.../issues` endpoint to GitHub's Search API, which has its own rate-limit bucket (30 req/min); the default-fast path stays on the legacy endpoint.

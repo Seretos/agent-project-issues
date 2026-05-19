@@ -1,0 +1,12 @@
+{
+  "name": "agent-project-issues",
+  "version": "0.1.0",
+  "description": "MCP server for GitHub/GitLab issue management on Codex. Read/create/update tickets and add comments with automatic safety markers (ai-generated / ai-modified labels, #ai-generated comment prefix). Per-project permissions; falls back to read-only auto-discovery from the git remote when no config is present.",
+  "author": { "name": "Arne von Appen" },
+  "repository": "https://github.com/Seretos/agent-project-issues",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agent Project Issues",
+    "shortDescription": "GitHub/GitLab issue management as a Codex MCP server."
+  }
+}

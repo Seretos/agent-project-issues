@@ -80,11 +80,10 @@ jobs:
           echo "plugin_name=${PLUGIN_NAME}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
 
-      - name: Stamp version into pyproject.toml + plugin.json
+      - name: Stamp version into pyproject.toml + plugin manifests
         # bash + sed/jq per plan-comment D1 = A (POSIX-native, less
-        # magic than the previous pwsh regex). The two files are
-        # tiny; we re-read after editing to fail loudly if either
-        # substitution missed.
+        # magic than the previous pwsh regex). Each file is re-read
+        # after editing to fail loudly if a substitution missed.
         shell: bash
         run: |
           V="${{ inputs.version }}"
@@ -94,14 +93,15 @@ jobs:
           grep -E "^version[[:space:]]*=[[:space:]]*\"$V\"" pyproject.toml \
             || { echo "::error::pyproject.toml stamp failed"; exit 1; }
 
-          # plugin.json — patch via jq for JSON safety.
-          tmp=$(mktemp)
-          jq --arg v "$V" '.version = $v' .claude-plugin/plugin.json > "$tmp"
-          mv "$tmp" .claude-plugin/plugin.json
-
-          STAMPED=$(jq -r '.version' .claude-plugin/plugin.json)
-          [ "$STAMPED" = "$V" ] || { echo "::error::plugin.json stamp failed (got $STAMPED)"; exit 1; }
-          echo "Stamped version $V into pyproject.toml + plugin.json"
+          # Both plugin manifests get the same version, patched via jq for JSON safety.
+          for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
+            tmp=$(mktemp)
+            jq --arg v "$V" '.version = $v' "$manifest" > "$tmp"
+            mv "$tmp" "$manifest"
+            STAMPED=$(jq -r '.version' "$manifest")
+            [ "$STAMPED" = "$V" ] || { echo "::error::$manifest stamp failed (got $STAMPED)"; exit 1; }
+          done
+          echo "Stamped version $V into pyproject.toml + both plugin manifests"
 
       - name: Upload stamped manifests
         uses: actions/upload-artifact@v4
@@ -110,6 +110,7 @@ jobs:
           path: |
             pyproject.toml
             .claude-plugin/plugin.json
+            .codex-plugin/plugin.json
 
   # ---------------------------------------------------------------------------
   # Job 2 - Cross-OS binary build
@@ -241,6 +242,8 @@ jobs:
           ZIP_PATH="${RUNNER_TEMP}/${ZIP_NAME}"
 
           cp -a .claude-plugin "$STAGE/"
+          [ -d .codex-plugin ] && cp -a .codex-plugin "$STAGE/"
+          [ -f .mcp.json     ] && cp -a .mcp.json     "$STAGE/"
           cp -a bin             "$STAGE/"
           [ -f README.md ] && cp README.md "$STAGE/"
           [ -f LICENSE   ] && cp LICENSE   "$STAGE/"
@@ -285,6 +288,8 @@ jobs:
         run: |
           STAGE_DIR=$(mktemp -d)
           cp -a .claude-plugin "$STAGE_DIR/"
+          [ -d .codex-plugin ] && cp -a .codex-plugin "$STAGE_DIR/"
+          [ -f .mcp.json     ] && cp -a .mcp.json     "$STAGE_DIR/"
           cp -a bin             "$STAGE_DIR/"
           [ -f README.md ] && cp README.md "$STAGE_DIR/"
           [ -f LICENSE   ] && cp LICENSE   "$STAGE_DIR/"

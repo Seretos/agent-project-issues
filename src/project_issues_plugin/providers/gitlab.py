@@ -42,6 +42,7 @@ from project_issues_plugin.markers import (
     ensure_body_prefix,
     ensure_comment_prefix,
     has_ai_generated_marker,
+    strip_leading_ai_marker,
 )
 from project_issues_plugin.providers.base import (
     Comment,
@@ -51,6 +52,7 @@ from project_issues_plugin.providers.base import (
     PRFilters,
     PullRequest,
     Relation,
+    RelationKindUnsupported,
     Status,
     StatusSpec,
     Ticket,
@@ -367,6 +369,193 @@ def _map_pipeline_run(raw: dict) -> PipelineRun:
 
 
 # ---------- helpers used by GitLabProvider methods ---------------------------
+
+
+def _parse_gitlab_relation_target(
+    target: str, project: ProjectConfig,
+) -> tuple[str, str]:
+    """Parse a relation target into (project_path, issue_iid_as_str).
+
+    Accepts:
+      - `"!N"` / `"#N"` / `"N"` — same-project as `project`.
+      - `"group/project#N"` — cross-project (raises NotImplementedError
+        for now; reserved surface).
+    """
+    raw = target.strip()
+    if not raw:
+        raise ValueError("relation target is empty")
+    if "/" in raw and ("#" in raw or "!" in raw):
+        raise NotImplementedError(
+            "cross-project relation targets are not yet supported"
+        )
+    iid_part = raw.lstrip("#!")
+    if not iid_part.isdigit():
+        raise ValueError(
+            f"invalid relation target {target!r}: expected '#N' / '!N' "
+            f"(same-project issue iid)"
+        )
+    return _project_path(project), iid_part
+
+
+def _gitlab_link_type(kind: str) -> str:
+    """Map our kind vocabulary to GitLab's `link_type` string."""
+    if kind == "blocks":
+        return "blocks"
+    if kind == "blocked_by":
+        return "is_blocked_by"
+    if kind == "relates_to":
+        return "relates_to"
+    raise ValueError(f"unmappable kind {kind!r} for GitLab issue links")
+
+
+def _gitlab_post_issue_link(
+    client: httpx.Client,
+    source_project_path: str,
+    source_iid: str,
+    *,
+    target_project_path: str,
+    target_issue_iid: str,
+    link_type: str,
+    relation_kind_for_caller: str,
+    project: ProjectConfig,
+) -> Relation:
+    """POST to the Issue Links endpoint and return a `Relation`."""
+    body: dict[str, Any] = {
+        "target_project_id": target_project_path,
+        "target_issue_iid": target_issue_iid,
+        "link_type": link_type,
+    }
+    r = client.post(
+        f"/projects/{source_project_path}/issues/{source_iid}/links",
+        json=body,
+    )
+    _check(r)
+    raw = r.json()
+    # Response carries the *target* issue payload nested. The shape is
+    # documented as a "single issue link" wrapping target_issue fields
+    # at top level — best-effort map back to a Relation.
+    target_url = raw.get("web_url") or raw.get("target_web_url") or ""
+    return Relation(
+        kind=relation_kind_for_caller,
+        ticket_id=f"#{target_issue_iid}",
+        title=raw.get("title") or "",
+        url=target_url,
+        state=raw.get("state") or "",
+        is_pull_request=False,
+    )
+
+
+def _gitlab_delete_issue_link(
+    client: httpx.Client,
+    source_project_path: str,
+    source_iid: str,
+    *,
+    target_project_path: str,
+    target_issue_iid: str,
+) -> None:
+    """Find the link id between source and target, then DELETE it."""
+    r = client.get(
+        f"/projects/{source_project_path}/issues/{source_iid}/links",
+    )
+    _check(r)
+    link_id: int | None = None
+    for link in r.json() or []:
+        # Each link entry exposes the OTHER issue's fields and an
+        # `issue_link_id` we need for deletion.
+        if (
+            str(link.get("iid")) == str(target_issue_iid)
+            and link.get("issue_link_id") is not None
+        ):
+            link_id = link["issue_link_id"]
+            break
+    if link_id is None:
+        raise GitLabError(
+            404,
+            f"no issue link from #{source_iid} to "
+            f"#{target_issue_iid} found to remove",
+        )
+    r2 = client.delete(
+        f"/projects/{source_project_path}/issues/{source_iid}"
+        f"/links/{link_id}",
+    )
+    _check(r2)
+
+
+def _gitlab_mark_duplicate_of(
+    client: httpx.Client,
+    project: ProjectConfig,
+    source_iid: str,
+    *,
+    target_project_path: str,
+    target_iid: str,
+) -> Relation:
+    """Mark `source` as duplicate of `target` on GitLab.
+
+    No native duplicate-link type exists, so we emulate it with:
+      1. body-edit appending `Duplicate of !N`,
+      2. `state_event=close`,
+      3. a `relates_to` issue link as a structured spur.
+
+    The body edit is run through `apply_body_marker` so the
+    AI-attribution marker stays consistent.
+    """
+    path = _project_path(project)
+    src_r = client.get(f"/projects/{path}/issues/{source_iid}")
+    _check(src_r)
+    src = src_r.json()
+    current_body = src.get("description") or ""
+    current_labels = set(src.get("labels") or [])
+    will_be_ai_generated = AI_GENERATED_LABEL in current_labels
+
+    dup_line = f"Duplicate of !{target_iid}"
+    body_without_marker = strip_leading_ai_marker(current_body)
+    if dup_line not in body_without_marker:
+        new_body_core = (
+            f"{dup_line}\n\n{body_without_marker}"
+            if body_without_marker
+            else dup_line
+        )
+    else:
+        new_body_core = body_without_marker
+    new_body = apply_body_marker(
+        new_body_core, will_be_ai_generated=will_be_ai_generated,
+    )
+    payload: dict[str, Any] = {
+        "description": new_body,
+        "state_event": "close",
+    }
+    pu = client.put(f"/projects/{path}/issues/{source_iid}", json=payload)
+    _check(pu)
+
+    # Add the structured relates_to spur. If it already exists, GitLab
+    # 409s — swallow as "already there".
+    try:
+        relation = _gitlab_post_issue_link(
+            client, path, source_iid,
+            target_project_path=target_project_path,
+            target_issue_iid=target_iid,
+            link_type="relates_to",
+            relation_kind_for_caller="duplicate_of",
+            project=project,
+        )
+        return relation
+    except GitLabError as exc:
+        if exc.status != 409:
+            raise
+        # Already linked — synthesise a Relation from the target issue.
+        tg = client.get(
+            f"/projects/{target_project_path}/issues/{target_iid}",
+        )
+        _check(tg)
+        tj = tg.json()
+        return Relation(
+            kind="duplicate_of",
+            ticket_id=f"#{target_iid}",
+            title=tj.get("title") or "",
+            url=tj.get("web_url") or "",
+            state=tj.get("state") or "",
+            is_pull_request=False,
+        )
 
 
 def _split_composite_comment_id(
@@ -1448,6 +1637,130 @@ class GitLabProvider(TokenCapabilityProvider):
             r2 = client.get(f"/projects/{path}/merge_requests/{pr_id}")
             _check(r2)
             return _map_mr(r2.json())
+
+    # ---------- relations (write side) ---------------------------------------
+
+    _SUPPORTED_RELATION_KINDS: tuple[str, ...] = (
+        "blocks", "blocked_by", "relates_to", "duplicate_of",
+    )
+
+    def add_relation(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        kind: str,
+        target: str,
+    ) -> Relation:
+        """Create a typed relation from `ticket_id` to `target` (ticket #41).
+
+        Provider mapping:
+          - `blocks` / `blocked_by` / `relates_to` → Issue Links REST
+            (`POST /projects/:id/issues/:iid/links` with link_type
+            `blocks` / `is_blocked_by` / `relates_to`).
+          - `duplicate_of` → body-edit (append `Duplicate of !N`) plus
+            close the source plus add a `relates_to` issue link so the
+            duplicate is reachable through the structured-link surface
+            too. The body edit is re-marked via `apply_body_marker` so
+            the AI-attribution marker stays consistent.
+          - `parent` / `child` → GitLab Work Items GraphQL (planned;
+            see follow-up). Currently raises `RelationKindUnsupported`
+            so callers don't silently fall through.
+
+        `target` is parsed via `_parse_gitlab_relation_target`;
+        currently same-project only.
+        """
+        if kind == "parent" or kind == "child":
+            # Work Items GraphQL hierarchyWidget is non-trivial — left
+            # as a follow-up so the rest of this surface lands.
+            raise RelationKindUnsupported(
+                kind, "gitlab", self._SUPPORTED_RELATION_KINDS,
+            )
+        if kind not in self._SUPPORTED_RELATION_KINDS:
+            raise RelationKindUnsupported(
+                kind, "gitlab", self._SUPPORTED_RELATION_KINDS,
+            )
+        target_project, target_iid = _parse_gitlab_relation_target(
+            target, project,
+        )
+        path = _project_path(project)
+        with _client(project, token) as client:
+            if kind in ("blocks", "blocked_by", "relates_to"):
+                link_type = _gitlab_link_type(kind)
+                return _gitlab_post_issue_link(
+                    client, path, ticket_id,
+                    target_project_path=target_project,
+                    target_issue_iid=target_iid,
+                    link_type=link_type,
+                    relation_kind_for_caller=kind,
+                    project=project,
+                )
+            if kind == "duplicate_of":
+                return _gitlab_mark_duplicate_of(
+                    client, project, ticket_id,
+                    target_project_path=target_project,
+                    target_iid=target_iid,
+                )
+            raise RelationKindUnsupported(  # pragma: no cover
+                kind, "gitlab", self._SUPPORTED_RELATION_KINDS,
+            )
+
+    def remove_relation(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        kind: str,
+        target: str,
+    ) -> dict:
+        """Remove a typed relation. Inverse of `add_relation`.
+
+        For `duplicate_of`, removal reopens the source (state_event
+        =reopen) and deletes the auxiliary `relates_to` link, but does
+        NOT strip the `Duplicate of !N` line from the body — body
+        history is preserved deliberately.
+        """
+        if kind == "parent" or kind == "child":
+            raise RelationKindUnsupported(
+                kind, "gitlab", self._SUPPORTED_RELATION_KINDS,
+            )
+        if kind not in self._SUPPORTED_RELATION_KINDS:
+            raise RelationKindUnsupported(
+                kind, "gitlab", self._SUPPORTED_RELATION_KINDS,
+            )
+        target_project, target_iid = _parse_gitlab_relation_target(
+            target, project,
+        )
+        path = _project_path(project)
+        with _client(project, token) as client:
+            if kind in ("blocks", "blocked_by", "relates_to"):
+                _gitlab_delete_issue_link(
+                    client, path, ticket_id,
+                    target_project_path=target_project,
+                    target_issue_iid=target_iid,
+                )
+                return {"removed": True}
+            if kind == "duplicate_of":
+                # Tear down the relates_to link (best-effort) and
+                # reopen. Body content stays.
+                try:
+                    _gitlab_delete_issue_link(
+                        client, path, ticket_id,
+                        target_project_path=target_project,
+                        target_issue_iid=target_iid,
+                    )
+                except GitLabError:
+                    # Link may already be gone; reopen anyway.
+                    pass
+                pr = client.put(
+                    f"/projects/{path}/issues/{ticket_id}",
+                    json={"state_event": "reopen"},
+                )
+                _check(pr)
+                return {"removed": True}
+            raise RelationKindUnsupported(  # pragma: no cover
+                kind, "gitlab", self._SUPPORTED_RELATION_KINDS,
+            )
 
     # ---------- pipelines / CI runs ------------------------------------------
 

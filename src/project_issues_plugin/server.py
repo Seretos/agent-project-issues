@@ -33,6 +33,7 @@ def main() -> None:
         bulk as bulk_tools,
         pulls as pull_tools,
         pipelines as pipeline_tools,
+        relations as relation_tools,
     )
     project_tools.register(mcp)
     ticket_tools.register(mcp)
@@ -40,5 +41,6 @@ def main() -> None:
     bulk_tools.register(mcp)
     pull_tools.register(mcp)
     pipeline_tools.register(mcp)
+    relation_tools.register(mcp)
 
     mcp.run()

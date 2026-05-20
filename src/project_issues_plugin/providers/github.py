@@ -18,6 +18,7 @@ from project_issues_plugin.markers import (
     LABEL_DESCRIPTIONS,
     ensure_body_prefix,
     ensure_comment_prefix,
+    strip_leading_ai_marker,
 )
 from project_issues_plugin.providers.base import (
     Comment,
@@ -27,6 +28,7 @@ from project_issues_plugin.providers.base import (
     PRFilters,
     PullRequest,
     Relation,
+    RelationKindUnsupported,
     Status,
     StatusSpec,
     Ticket,
@@ -209,6 +211,173 @@ def _split_github_status(
         f"use list_ticket_statuses to discover valid values. "
         f"Accepted: open, closed, closed:completed, closed:not_planned."
     )
+
+
+def _parse_relation_target(
+    target: str, project: ProjectConfig,
+) -> tuple[str, str]:
+    """Parse a relation target into (repo_path, issue_number_as_str).
+
+    Accepts:
+      - `"#5"` / `"5"` — same-repo as `project`.
+      - `"owner/repo#5"` — cross-repo (raises NotImplementedError for
+        now; left here so the surface is stable when we lift the
+        restriction).
+
+    Returns the repo prefix in the same shape `_repo_path` produces
+    (`"/repos/{owner}/{repo}"`) so it can be slotted directly into URL
+    construction.
+    """
+    raw = target.strip()
+    if not raw:
+        raise ValueError("relation target is empty")
+    if "/" in raw and "#" in raw:
+        repo_part, _, num_part = raw.partition("#")
+        if "/" not in repo_part or not num_part:
+            raise ValueError(
+                f"invalid relation target {target!r}: "
+                f"expected 'owner/repo#N' or '#N'"
+            )
+        raise NotImplementedError(
+            "cross-repo relation targets are not yet supported"
+        )
+    num_part = raw.lstrip("#")
+    if not num_part.isdigit():
+        raise ValueError(
+            f"invalid relation target {target!r}: expected '#N' "
+            f"(same-repo issue number)"
+        )
+    return _repo_path(project), num_part
+
+
+def _fetch_issue_payload(
+    client: httpx.Client, repo_path: str, number: str,
+) -> dict:
+    """GET the issue payload for a number."""
+    r = client.get(f"{repo_path}/issues/{number}")
+    _check(r)
+    return r.json()
+
+
+def _fetch_issue_internal_id(
+    client: httpx.Client, repo_path: str, number: str,
+) -> tuple[int, dict]:
+    """Return (internal_numeric_id, full_payload) for an issue number.
+
+    The Sub-Issues and Dependencies APIs both take the *internal*
+    issue id (the database PK in the response's `id` field), NOT the
+    user-facing issue `number`. Callers must therefore GET the issue
+    first to translate.
+    """
+    raw = _fetch_issue_payload(client, repo_path, number)
+    internal_id = raw.get("id")
+    if not isinstance(internal_id, int):
+        raise GitHubError(
+            500,
+            f"issue payload for {repo_path}/issues/{number} did not "
+            f"carry an int `id` field — cannot resolve internal id",
+        )
+    return internal_id, raw
+
+
+def _github_post_sub_issue(
+    client: httpx.Client,
+    parent_repo_path: str,
+    parent_issue_number: str,
+    *,
+    sub_issue_internal_id: int,
+    relation_kind_for_caller: str,
+    target_raw: dict,
+    project: ProjectConfig,
+) -> Relation:
+    """POST to the Sub-Issues endpoint and return a `Relation` for the agent."""
+    r = client.post(
+        f"{parent_repo_path}/issues/{parent_issue_number}/sub_issues",
+        json={"sub_issue_id": sub_issue_internal_id},
+    )
+    _check(r)
+    return _map_relation_from_sub_issue(
+        target_raw, project, relation_kind_for_caller,
+    )
+
+
+def _github_post_dependency(
+    client: httpx.Client,
+    repo_path: str,
+    source_issue_number: str,
+    *,
+    dep_endpoint: str,
+    target_internal_id: int,
+    relation_kind_for_caller: str,
+    target_raw: dict,
+    project: ProjectConfig,
+) -> Relation:
+    """POST to the Dependencies endpoint (api 2026-03-10)."""
+    r = client.post(
+        f"{repo_path}/issues/{source_issue_number}/dependencies/{dep_endpoint}",
+        json={"issue_id": target_internal_id},
+    )
+    _check(r)
+    return _map_relation_from_sub_issue(
+        target_raw, project, relation_kind_for_caller,
+    )
+
+
+def _github_mark_duplicate_of(
+    client: httpx.Client,
+    project: ProjectConfig,
+    source_issue_number: str,
+    *,
+    target_number: str,
+    target_raw: dict,
+) -> Relation:
+    """Mark `source` as duplicate of `target` via body edit + state change.
+
+    GitHub has no native typed `duplicate_of` link surface; the read
+    path detects duplicates from `state=closed AND
+    state_reason="duplicate"` on the queried ticket (`_fetch_relations`
+    at github.py:653-672), optionally cross-checked against a
+    `Duplicate of #N` body regex. We replicate that here:
+
+      1. GET the source issue to read its current body + labels.
+      2. Append a `Duplicate of #N` line to the body (after the AI
+         marker, so `apply_body_marker` keeps the marker correct).
+      3. PATCH with state=closed, state_reason="duplicate", body=new.
+    """
+    src = _fetch_issue_payload(
+        client, _repo_path(project), source_issue_number,
+    )
+    current_body = src.get("body") or ""
+    current_labels = {lbl["name"] for lbl in (src.get("labels") or [])}
+    will_be_ai_generated = AI_GENERATED_LABEL in current_labels
+
+    dup_line = f"Duplicate of #{target_number}"
+    # Insert the duplicate-of line AFTER the AI marker (re-stamped) but
+    # at the start of the body so it's the first prose the reader
+    # sees. apply_body_marker strips any existing leading #ai-* line.
+    # Pre-strip marker so we can splice cleanly, then re-stamp via the
+    # canonical helper.
+    body_without_marker = strip_leading_ai_marker(current_body)
+    if dup_line not in body_without_marker:
+        if body_without_marker:
+            new_body_core = f"{dup_line}\n\n{body_without_marker}"
+        else:
+            new_body_core = dup_line
+    else:
+        new_body_core = body_without_marker
+    new_body = apply_body_marker(
+        new_body_core, will_be_ai_generated=will_be_ai_generated,
+    )
+    pr = client.patch(
+        f"{_repo_path(project)}/issues/{source_issue_number}",
+        json={
+            "state": "closed",
+            "state_reason": "duplicate",
+            "body": new_body,
+        },
+    )
+    _check(pr)
+    return _map_relation_from_sub_issue(target_raw, project, "duplicate_of")
 
 
 def _issue_state(raw: dict) -> str:
@@ -1697,6 +1866,180 @@ class GitHubProvider:
             r2 = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
             _check(r2)
             return _map_pr(r2.json())
+
+    # ---------- relations (write side) --------------------------------------
+
+    _SUPPORTED_RELATION_KINDS: tuple[str, ...] = (
+        "parent", "child", "blocks", "blocked_by", "duplicate_of",
+    )
+
+    def add_relation(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        kind: str,
+        target: str,
+    ) -> Relation:
+        """Create a typed relation from `ticket_id` to `target` (ticket #41).
+
+        Provider mapping:
+          - `parent` / `child` → Sub-Issues API (issues/.../sub_issues).
+            Canonical wire form is `child`: `add_relation(A, kind=parent,
+            target=B)` is internally treated as
+            `add_relation(B, kind=child, target=A)`.
+          - `blocks` / `blocked_by` → Dependencies API (api 2026-03-10):
+            `POST /issues/{n}/dependencies/blocked_by` with
+            `{"issue_id": <internal_id>}`. `blocks` is implemented as
+            `add_relation(target, kind=blocked_by, source=ticket_id)`.
+          - `duplicate_of` → side-effect: append `Duplicate of #N` to the
+            body **and** close the source with state_reason="duplicate"
+            so the existing read path (`_fetch_relations`) surfaces the
+            link. The body edit is re-marked via `apply_body_marker`
+            to keep the AI-attribution marker consistent.
+          - `relates_to` → unsupported on GitHub (no native typed link).
+
+        `target` is parsed via `_parse_relation_target`; currently
+        same-repo only (cross-repo targets raise NotImplementedError).
+        """
+        if kind not in self._SUPPORTED_RELATION_KINDS:
+            raise RelationKindUnsupported(
+                kind, "github", self._SUPPORTED_RELATION_KINDS,
+            )
+        with _client(token) as client:
+            # Resolve target to (cross_repo, issue_number, internal_id).
+            target_repo, target_number = _parse_relation_target(target, project)
+            target_internal_id, target_raw = _fetch_issue_internal_id(
+                client, target_repo, target_number,
+            )
+            if kind == "parent":
+                # parent(A→B): A's parent is B → POST /issues/B/sub_issues
+                # with sub_issue_id=A. Source/target swap on the wire.
+                return _github_post_sub_issue(
+                    client, target_repo, target_number,
+                    sub_issue_internal_id=_fetch_issue_internal_id(
+                        client, _repo_path(project), ticket_id,
+                    )[0],
+                    relation_kind_for_caller="parent",
+                    target_raw=_fetch_issue_payload(
+                        client, target_repo, target_number,
+                    ),
+                    project=project,
+                )
+            if kind == "child":
+                return _github_post_sub_issue(
+                    client, _repo_path(project), ticket_id,
+                    sub_issue_internal_id=target_internal_id,
+                    relation_kind_for_caller="child",
+                    target_raw=target_raw,
+                    project=project,
+                )
+            if kind == "blocked_by":
+                return _github_post_dependency(
+                    client, _repo_path(project), ticket_id,
+                    dep_endpoint="blocked_by",
+                    target_internal_id=target_internal_id,
+                    relation_kind_for_caller="blocked_by",
+                    target_raw=target_raw,
+                    project=project,
+                )
+            if kind == "blocks":
+                # blocks(A→B): A blocks B → on B's endpoint, add A as
+                # blocked_by. Swap source/target on the wire.
+                source_internal_id, _ = _fetch_issue_internal_id(
+                    client, _repo_path(project), ticket_id,
+                )
+                return _github_post_dependency(
+                    client, target_repo, target_number,
+                    dep_endpoint="blocked_by",
+                    target_internal_id=source_internal_id,
+                    relation_kind_for_caller="blocks",
+                    target_raw=target_raw,
+                    project=project,
+                )
+            if kind == "duplicate_of":
+                return _github_mark_duplicate_of(
+                    client, project, ticket_id,
+                    target_number=target_number,
+                    target_raw=target_raw,
+                )
+            raise RelationKindUnsupported(
+                kind, "github", self._SUPPORTED_RELATION_KINDS,
+            )
+
+    def remove_relation(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        kind: str,
+        target: str,
+    ) -> dict:
+        """Remove a typed relation. Inverse of `add_relation`.
+
+        For `duplicate_of`, removal reopens the source issue (state →
+        open, state_reason → cleared) but does NOT strip the `Duplicate
+        of #N` line from the body — body history is preserved
+        deliberately so a reader can see the historic intent. Removing
+        the body line is the caller's job via `update_ticket(body=...)`.
+        """
+        if kind not in self._SUPPORTED_RELATION_KINDS:
+            raise RelationKindUnsupported(
+                kind, "github", self._SUPPORTED_RELATION_KINDS,
+            )
+        with _client(token) as client:
+            target_repo, target_number = _parse_relation_target(target, project)
+            target_internal_id, _ = _fetch_issue_internal_id(
+                client, target_repo, target_number,
+            )
+            if kind == "parent":
+                source_internal_id, _ = _fetch_issue_internal_id(
+                    client, _repo_path(project), ticket_id,
+                )
+                r = client.request(
+                    "DELETE",
+                    f"{target_repo}/issues/{target_number}/sub_issue",
+                    json={"sub_issue_id": source_internal_id},
+                )
+                _check(r)
+                return {"removed": True}
+            if kind == "child":
+                r = client.request(
+                    "DELETE",
+                    f"{_repo_path(project)}/issues/{ticket_id}/sub_issue",
+                    json={"sub_issue_id": target_internal_id},
+                )
+                _check(r)
+                return {"removed": True}
+            if kind == "blocked_by":
+                r = client.delete(
+                    f"{_repo_path(project)}/issues/{ticket_id}"
+                    f"/dependencies/blocked_by/{target_internal_id}",
+                )
+                _check(r)
+                return {"removed": True}
+            if kind == "blocks":
+                source_internal_id, _ = _fetch_issue_internal_id(
+                    client, _repo_path(project), ticket_id,
+                )
+                r = client.delete(
+                    f"{target_repo}/issues/{target_number}"
+                    f"/dependencies/blocked_by/{source_internal_id}",
+                )
+                _check(r)
+                return {"removed": True}
+            if kind == "duplicate_of":
+                # Reopen source — the read path's duplicate_of detection
+                # is gated on `state=closed AND state_reason=duplicate`.
+                pr = client.patch(
+                    f"{_repo_path(project)}/issues/{ticket_id}",
+                    json={"state": "open"},
+                )
+                _check(pr)
+                return {"removed": True}
+            raise RelationKindUnsupported(
+                kind, "github", self._SUPPORTED_RELATION_KINDS,
+            )
 
     # ---------- pipelines / CI runs -----------------------------------------
 

@@ -66,6 +66,17 @@ def apply_body_marker(body: str | None, *, will_be_ai_generated: bool) -> str:
     return prefix + stripped
 
 
+def strip_leading_ai_marker(body: str | None) -> str:
+    """Return `body` with any leading `#ai-*` marker line removed.
+
+    Idempotent and tolerant of leading blank lines (the same prefix
+    pattern `apply_body_marker` uses internally). Used by callers that
+    need to splice content above the marker before re-stamping via
+    `apply_body_marker`.
+    """
+    return _AI_MARKER_LINE_RE.sub("", body or "")
+
+
 def has_ai_generated_marker(body: str | None) -> bool:
     """Return True if `body` already starts with the `#ai-generated` marker.
 

@@ -55,6 +55,46 @@ RelationKind = Literal[
 ]
 
 
+# Kinds that the write-side `add_relation` / `remove_relation` tools
+# accept. Read-only inverse kinds (`closed_by`, `duplicated_by`,
+# `mentioned_by`, `mentions`) are not settable directly — they emerge
+# from the other side of a write or from body content.
+WRITABLE_RELATION_KINDS: tuple[str, ...] = (
+    "parent",
+    "child",
+    "blocks",
+    "blocked_by",
+    "duplicate_of",
+    "relates_to",
+)
+
+
+class RelationKindUnsupported(NotImplementedError):
+    """Raised by a provider when `add_relation` / `remove_relation` is
+    called with a relation kind that provider cannot model natively.
+
+    Carries `kind`, `provider`, and `supported_kinds` so the agent can
+    branch on the failure or surface a precise error to the user.
+    Subclass of `NotImplementedError` so the generic `_safe` wrapper in
+    `tools/_providers.py` translates it to `{"error": "..."}` without
+    further plumbing.
+    """
+
+    def __init__(
+        self,
+        kind: str,
+        provider: str,
+        supported_kinds: tuple[str, ...] | list[str],
+    ) -> None:
+        self.kind = kind
+        self.provider = provider
+        self.supported_kinds = tuple(supported_kinds)
+        super().__init__(
+            f"relation kind {kind!r} is not supported on provider "
+            f"{provider!r}; supported_kinds={list(supported_kinds)}"
+        )
+
+
 @dataclass
 class Relation:
     """A typed link between this ticket and another ticket / PR.

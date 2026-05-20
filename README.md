@@ -86,9 +86,8 @@ GitLab differences worth knowing:
 The resolver walks **git project boundaries** outward from the CWD:
 
 1. `$PROJECT_ISSUES_CONFIG` (explicit override; missing path = hard error).
-2. `$PROJECT_ISSUES_PLUGIN_ROOT/project-issues.yml` (binary-adjacent override for self-contained installs — note: not under `.seretos/`).
-3. `<enclosing-git-repo>/.seretos/project-issues.{yml,yaml}`. The walk finds the nearest `.git`-bearing ancestor, checks its `.seretos/`, then jumps *out* of that repo (next iteration starts above its root). Repeats project-by-project until no enclosing repo exists.
-4. `~/.seretos/project-issues.{yml,yaml}` (user-level fallback).
+2. `<enclosing-git-repo>/.seretos/project-issues.{yml,yaml}`. The walk finds the nearest `.git`-bearing ancestor, checks its `.seretos/`, then jumps *out* of that repo (next iteration starts above its root). Repeats project-by-project until no enclosing repo exists.
+3. `~/.seretos/project-issues.{yml,yaml}` (user-level fallback).
 
 Configs are **not merged** — the first match wins entirely. Higher/outer configs are ignored. If a project is not in the winning config, the agent has no access to it.
 

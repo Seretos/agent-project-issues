@@ -370,22 +370,6 @@ class TestConfigPathResolver:
         assert "non-existent" in (result.error or "")
         assert any("missing.yml" in p for p in result.searched_paths)
 
-    def test_plugin_root_beats_project_boundary_walk(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        """`$PROJECT_ISSUES_PLUGIN_ROOT/project-issues.yml` outranks
-        the project-boundary walk. Note: the plugin-root config sits
-        directly under the plugin install dir (not under `.seretos/`),
-        because it's a binary-adjacent override, not user config."""
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "project-issues.yml").write_text("version: 1\nprojects: []\n")
-        cwd_cfg = tmp_path / ".seretos" / "project-issues.yml"
-        cwd_cfg.parent.mkdir(parents=True)
-        cwd_cfg.write_text("version: 1\nprojects: []\n")
-
-        monkeypatch.setenv("PROJECT_ISSUES_PLUGIN_ROOT", str(plugin_root))
-        winner, _ = _resolve_config_path(tmp_path)
-        assert winner == (plugin_root / "project-issues.yml").resolve()
-
     def test_project_boundary_wins_over_home(self, tmp_path: Path, _isolated_env: Path):
         """A `.seretos/` config in an enclosing git repo wins over the
         user-level `~/.seretos/` fallback."""

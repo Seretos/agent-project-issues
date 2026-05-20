@@ -651,6 +651,8 @@ def test_add_comment_applies_marker_prefix(
                 "id": 99, "body": captured["body"]["body"],
                 "author": {"username": "alice"},
                 "created_at": "2024-01-01T00:00:00Z",
+                "noteable_iid": 5,
+                "noteable_type": "Issue",
             })
         return _json({}, status_code=404)
 
@@ -658,6 +660,29 @@ def test_add_comment_applies_marker_prefix(
     c = GitLabProvider().add_comment(_project(), "t", "5", "comment text")
     assert c.id == "99"
     assert captured["body"]["body"].startswith("#ai-generated")
+    # Ticket #41 addendum A: url is synthesised from project.web_url +
+    # noteable_iid + note id.
+    assert c.url == "https://gitlab.com/acme/backend/-/issues/5#note_99"
+
+
+def test_add_comment_synthesises_mr_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Note attached to a merge request → `/-/merge_requests/<iid>#note_X`."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            return _json({
+                "id": 99, "body": "x",
+                "author": {"username": "a"},
+                "created_at": "2024-01-01T00:00:00Z",
+                "noteable_iid": 7,
+                "noteable_type": "MergeRequest",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    c = GitLabProvider().add_pr_comment(_project(), "t", "7", "comment text")
+    assert c.url == "https://gitlab.com/acme/backend/-/merge_requests/7#note_99"
 
 
 def test_list_comments_filters_system_notes(
@@ -694,14 +719,67 @@ def test_get_comment_composite_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert c.id == "99"
 
 
-def test_get_comment_plain_id_raises(
+def test_get_comment_plain_id_raises_without_ticket_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plain note ids aren't addressable without context — must surface
-    a clear error so the caller migrates to the composite form."""
+    """Plain note ids without a ticket_id aren't addressable — must
+    surface a clear error so the caller adds the parent iid."""
     _install_mock(monkeypatch, lambda r: _json({}, 200))
-    with pytest.raises(GitLabError, match="issue_iid"):
+    with pytest.raises(GitLabError, match="issue_iid|ticket_id"):
         GitLabProvider().get_comment(_project(), "t", comment_id="99")
+
+
+def test_get_comment_bare_id_with_ticket_id_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #41 addendum B/C: bare note id + ticket_id round-trips."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        # Composite reconstructed internally → request hits the same
+        # endpoint as the explicit composite form.
+        assert "acme%2Fbackend/issues/5/notes/99" in str(req.url)
+        return _json({
+            "id": 99, "body": "x",
+            "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z",
+            "noteable_iid": 5, "noteable_type": "Issue",
+        })
+
+    _install_mock(monkeypatch, handler)
+    c = GitLabProvider().get_comment(
+        _project(), "t", comment_id="99", ticket_id="5",
+    )
+    assert c.id == "99"
+    assert c.url == "https://gitlab.com/acme/backend/-/issues/5#note_99"
+
+
+def test_update_comment_bare_id_with_ticket_id_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #41 addendum B/C: update_comment also accepts the bare-id
+    round-trip when ticket_id is supplied."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and "issues/5/notes/99" in path:
+            return _json({
+                "id": 99, "body": "human original",
+                "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z",
+            })
+        if req.method == "PUT" and "issues/5/notes/99" in path:
+            captured["body"] = json.loads(req.content.decode())
+            return _json({
+                "id": 99, "body": captured["body"]["body"],
+                "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z",
+                "noteable_iid": 5, "noteable_type": "Issue",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    c = GitLabProvider().update_comment(
+        _project(), "t", comment_id="99", body="new", ticket_id="5",
+    )
+    assert captured["body"]["body"] == "#ai-modified\n\nnew"
+    assert c.url == "https://gitlab.com/acme/backend/-/issues/5#note_99"
 
 
 def test_update_comment_stamps_modified_for_human_note(

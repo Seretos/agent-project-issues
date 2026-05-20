@@ -63,9 +63,13 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Get a single comment by id.
 
-        `ticket_id` is accepted for surface symmetry with `add_comment`
-        but is not used by the underlying request — GitHub comment ids
-        are repo-wide and look up the comment directly.
+        `ticket_id` carries consistent semantics across providers
+        (ticket #41 addendum):
+          - GitHub: unused (comment ids are repo-wide).
+          - GitLab: required when `comment_id` is a bare note id (as
+            returned by `add_comment`). Composite `"<iid>/<note_id>"`
+            in `comment_id` keeps working too — `ticket_id` is then
+            ignored.
 
         Read-only: requires a token only if the repo is private.
         """
@@ -73,7 +77,9 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            comment = provider.get_comment(project, token, comment_id)
+            comment = provider.get_comment(
+                project, token, comment_id, ticket_id=ticket_id,
+            )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)
 
@@ -86,9 +92,9 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Update an existing comment's body.
 
-        `ticket_id` is accepted for surface symmetry with `add_comment`.
-        On GitHub it's currently unused (comment ids are repo-wide); on
-        GitLab the parameter is required to address the note.
+        `ticket_id` carries the same cross-provider semantics as in
+        `get_comment` — on GitLab it's used to address the note when
+        `comment_id` is a bare note id (ticket #41 addendum).
 
         The body is rewritten so the first line is exactly one `#ai-*`
         marker matching the comment's authorship: `#ai-generated` if
@@ -105,6 +111,8 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            comment = provider.update_comment(project, token, comment_id, body)
+            comment = provider.update_comment(
+                project, token, comment_id, body, ticket_id=ticket_id,
+            )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

@@ -197,19 +197,43 @@ def _map_issue(raw: dict) -> Ticket:
     )
 
 
-def _map_note(raw: dict) -> Comment:
+def _map_note(
+    raw: dict, project: ProjectConfig | None = None,
+) -> Comment:
     """Translate a GitLab note (comment) payload into a `Comment`.
 
     System notes (state changes, label edits, etc.) carry
     `"system": true`. They are NOT filtered here — callers that want
     to skip system notes do so at the list-comments call site.
+
+    `url` handling (ticket #41 addendum A): GitLab note payloads do
+    NOT include a `web_url` field. When `project` is supplied we
+    synthesise the canonical anchor URL from `project.web_url`,
+    `noteable_type` (`Issue` or `MergeRequest`) and `noteable_iid`.
+    Falls back to empty string when `project` is omitted or the
+    payload lacks the noteable hints (e.g. legacy responses).
     """
     author = raw.get("author") or {}
+    raw_url = raw.get("web_url") or ""
+    if not raw_url and project is not None and project.web_url:
+        noteable_iid = raw.get("noteable_iid")
+        noteable_type = (raw.get("noteable_type") or "").lower()
+        note_id = raw.get("id")
+        if noteable_iid is not None and note_id is not None:
+            segment = (
+                "merge_requests"
+                if noteable_type == "mergerequest"
+                else "issues"
+            )
+            raw_url = (
+                f"{project.web_url}/-/{segment}/{noteable_iid}"
+                f"#note_{note_id}"
+            )
     return Comment(
         id=str(raw["id"]),
         author=author.get("username", ""),
         body=raw.get("body") or "",
-        url=raw.get("web_url") or "",
+        url=raw_url,
         created_at=raw.get("created_at") or "",
     )
 
@@ -343,6 +367,32 @@ def _map_pipeline_run(raw: dict) -> PipelineRun:
 
 
 # ---------- helpers used by GitLabProvider methods ---------------------------
+
+
+def _split_composite_comment_id(
+    comment_id: str, ticket_id: str | None,
+) -> tuple[str, str]:
+    """Resolve a (issue_iid, note_id) pair from the two accepted forms.
+
+    Accepts (ticket #41 addendum B/C):
+      - Composite `"<iid>/<note_id>"` in `comment_id` — `ticket_id` is
+        ignored (composite wins).
+      - Bare note id in `comment_id` + parent iid in `ticket_id` — the
+        natural round-trip from `add_comment`'s bare-id response.
+
+    Raises `GitLabError(400)` when neither form provides an iid.
+    """
+    if "/" in comment_id:
+        issue_iid, note_id = comment_id.split("/", 1)
+        return issue_iid, note_id
+    if ticket_id:
+        return ticket_id, comment_id
+    raise GitLabError(
+        400,
+        "GitLab notes are scoped to a parent issue/MR; pass either "
+        "comment_id='<issue_iid>/<note_id>' or supply ticket_id "
+        "alongside a bare note id",
+    )
 
 
 def _status_to_state_event(status: Status) -> str:
@@ -801,7 +851,7 @@ class GitLabProvider(TokenCapabilityProvider):
             )
             _check(c)
             comments = [
-                _map_note(it) for it in c.json()
+                _map_note(it, project) for it in c.json()
                 if not it.get("system", False)
             ]
             relations: list[Relation] = []
@@ -1018,7 +1068,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 json={"body": prefixed},
             )
             _check(r)
-            return _map_note(r.json())
+            return _map_note(r.json(), project)
 
     def list_comments(
         self,
@@ -1045,7 +1095,7 @@ class GitLabProvider(TokenCapabilityProvider):
             )
             _check(r)
             return [
-                _map_note(it) for it in r.json()
+                _map_note(it, project) for it in r.json()
                 if not it.get("system", False)
             ]
 
@@ -1054,36 +1104,35 @@ class GitLabProvider(TokenCapabilityProvider):
         project: ProjectConfig,
         token: str | None,
         comment_id: str,
+        ticket_id: str | None = None,
     ) -> Comment:
         """Fetch a single note by id.
 
         GitLab notes are scoped to their parent issue/MR — unlike GitHub
         comment ids which are repo-wide. The note id alone is not enough
-        to address a note; we'd need the parent issue_iid too. The
-        tool-layer wrapper accepts `ticket_id` for this reason and
-        passes it along via the `comment_id` parameter encoded as
-        `"<issue_iid>/<note_id>"`. Callers using the raw note id pass
-        the note id by itself and we attempt to dispatch through the
-        merge-request notes endpoint as well — but the recommended form
-        is the slash-encoded composite key.
+        to address a note; we also need the parent issue's iid.
+
+        Two input forms are accepted (ticket #41 addendum B/C):
+          - Composite key in `comment_id`: `"<iid>/<note_id>"`. Used by
+            agents that previously stitched the IDs themselves.
+          - Bare note id in `comment_id` + parent iid in `ticket_id`.
+            This is the natural round-trip after `add_comment` (which
+            returns a bare note id) and gives `ticket_id` consistent
+            semantics across GitHub and GitLab.
+
+        At least one of the two forms must supply the parent iid; a
+        bare note id with no `ticket_id` raises `GitLabError(400)`.
         """
-        # Composite-key form: "issue_iid/note_id"
         path = _project_path(project)
-        if "/" in comment_id:
-            issue_iid, note_id = comment_id.split("/", 1)
-            with _client(project, token) as client:
-                r = client.get(
-                    f"/projects/{path}/issues/{issue_iid}/notes/{note_id}",
-                )
-                _check(r)
-                return _map_note(r.json())
-        # Plain id — not addressable on GitLab without context. Surface
-        # a clear error rather than guessing.
-        raise GitLabError(
-            400,
-            "GitLab notes are scoped to a parent issue/MR; pass the "
-            "comment id as '<issue_iid>/<note_id>'",
+        issue_iid, note_id = _split_composite_comment_id(
+            comment_id, ticket_id,
         )
+        with _client(project, token) as client:
+            r = client.get(
+                f"/projects/{path}/issues/{issue_iid}/notes/{note_id}",
+            )
+            _check(r)
+            return _map_note(r.json(), project)
 
     def update_comment(
         self,
@@ -1091,6 +1140,7 @@ class GitLabProvider(TokenCapabilityProvider):
         token: str | None,
         comment_id: str,
         body: str,
+        ticket_id: str | None = None,
     ) -> Comment:
         """Edit a note, re-stamping the AI-marker.
 
@@ -1098,16 +1148,14 @@ class GitLabProvider(TokenCapabilityProvider):
         — if the existing note carries `#ai-generated`, the edit
         preserves that marker; otherwise it stamps `#ai-modified`.
 
-        Accepts the same composite-key form as `get_comment`.
+        Accepts the same two comment-id forms as `get_comment` (ticket
+        #41 addendum B/C): composite `"<iid>/<note_id>"` in `comment_id`,
+        or bare note id in `comment_id` plus parent iid in `ticket_id`.
         """
         path = _project_path(project)
-        if "/" not in comment_id:
-            raise GitLabError(
-                400,
-                "GitLab notes are scoped to a parent issue/MR; pass the "
-                "comment id as '<issue_iid>/<note_id>'",
-            )
-        issue_iid, note_id = comment_id.split("/", 1)
+        issue_iid, note_id = _split_composite_comment_id(
+            comment_id, ticket_id,
+        )
         with _client(project, token) as client:
             r0 = client.get(
                 f"/projects/{path}/issues/{issue_iid}/notes/{note_id}",
@@ -1123,7 +1171,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 json={"body": prefixed},
             )
             _check(r)
-            return _map_note(r.json())
+            return _map_note(r.json(), project)
 
     # ---------- merge requests (PR surface) ----------------------------------
 
@@ -1190,7 +1238,7 @@ class GitLabProvider(TokenCapabilityProvider):
             )
             _check(c)
             comments = [
-                _map_note(it) for it in c.json()
+                _map_note(it, project) for it in c.json()
                 if not it.get("system", False)
             ]
         return pr, comments
@@ -1338,7 +1386,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 json={"body": prefixed},
             )
             _check(r)
-            return _map_note(r.json())
+            return _map_note(r.json(), project)
 
     def merge_pr(
         self,

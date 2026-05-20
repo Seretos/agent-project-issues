@@ -1309,8 +1309,14 @@ class GitHubProvider:
         project: ProjectConfig,
         token: str | None,
         comment_id: str,
+        ticket_id: str | None = None,  # noqa: ARG002 — accepted for cross-provider symmetry
     ) -> Comment:
-        """Fetch a single comment by its repo-wide comment id."""
+        """Fetch a single comment by its repo-wide comment id.
+
+        `ticket_id` is accepted for cross-provider signature symmetry
+        (GitLab needs it to address a note) but is not used here —
+        GitHub comment ids are repo-wide and look up directly.
+        """
         with _client(token) as client:
             r = client.get(
                 f"{_repo_path(project)}/issues/comments/{comment_id}",
@@ -1324,6 +1330,7 @@ class GitHubProvider:
         token: str | None,
         comment_id: str,
         body: str,
+        ticket_id: str | None = None,  # noqa: ARG002 — accepted for cross-provider symmetry
     ) -> Comment:
         """Update a comment's body, re-stamping the AI-marker.
 

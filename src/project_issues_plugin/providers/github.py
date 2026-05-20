@@ -756,6 +756,43 @@ def _map_blocking_event(
     return _map_relation_from_sub_issue(issue_raw, project, kind)
 
 
+def _fetch_dependencies(
+    client: httpx.Client,
+    project: ProjectConfig,
+    ticket_id: str,
+) -> list[Relation]:
+    """Read both directions of the Issue Dependencies API (2026-03-10).
+
+    Authoritative source for `blocks` / `blocked_by` — the legacy
+    timeline-event surface (`blocked_by_added` / `blocking_added`) is
+    no longer emitted for dependencies created via the REST endpoints,
+    so polling Timeline alone misses everything `add_relation` writes.
+
+    Returns `[]` for repos where the endpoints don't exist (404/410)
+    or the caller lacks permission (403) — non-fatal so other relation
+    kinds keep flowing.
+    """
+    out: list[Relation] = []
+    for endpoint, kind in (
+        ("blocked_by", "blocked_by"),
+        ("blocking", "blocks"),
+    ):
+        r = client.get(
+            f"{_repo_path(project)}/issues/{ticket_id}/dependencies/{endpoint}",
+            params={"per_page": 100},
+        )
+        if r.status_code in (403, 404, 410):
+            continue
+        _check(r)
+        for issue_raw in r.json() or []:
+            if not issue_raw.get("number"):
+                continue
+            out.append(
+                _map_relation_from_sub_issue(issue_raw, project, kind),
+            )
+    return out
+
+
 # ---------- core relation collector ----------------------------------------
 
 
@@ -810,6 +847,13 @@ def _fetch_relations(
         _check(sub_r)
         for sub in sub_r.json() or []:
             relations.append(_map_relation_from_sub_issue(sub, project, "child"))
+
+    # blocks / blocked_by via Issue Dependencies REST (api 2026-03-10) —
+    # authoritative source. Timeline events for these are no longer
+    # emitted for dependencies created via the REST endpoints, so the
+    # later timeline scan alone misses everything write-side
+    # `add_relation(kind="blocks"/"blocked_by")` persists.
+    relations.extend(_fetch_dependencies(client, project, ticket_id))
 
     # outgoing scan: closes / mentions / duplicate_of
     self_body = issue_payload.get("body") or ""

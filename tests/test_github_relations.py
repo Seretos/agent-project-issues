@@ -103,6 +103,10 @@ def test_no_relations(monkeypatch: pytest.MonkeyPatch) -> None:
             return _json([])
         if path == "/repos/acme/backend/issues/42/timeline":
             return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -136,6 +140,10 @@ def test_parent_only(monkeypatch: pytest.MonkeyPatch) -> None:
         if path == "/repos/acme/backend/issues/42/sub_issues":
             return _json([])
         if path == "/repos/acme/backend/issues/42/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
@@ -173,6 +181,10 @@ def test_child_only(monkeypatch: pytest.MonkeyPatch) -> None:
         if path == "/repos/acme/backend/issues/42/sub_issues":
             return _json([child_a, child_b])
         if path == "/repos/acme/backend/issues/42/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
@@ -218,6 +230,10 @@ def test_pr_closes_via_connected(monkeypatch: pytest.MonkeyPatch) -> None:
             return _json([])
         if path == "/repos/acme/backend/issues/42/timeline":
             return _json(timeline)
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -257,6 +273,10 @@ def test_duplicate_via_marked_as_duplicate(monkeypatch: pytest.MonkeyPatch) -> N
             return _json([])
         if path == "/repos/acme/backend/issues/42/timeline":
             return _json(timeline)
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -295,6 +315,10 @@ def test_cross_repo_cross_reference(monkeypatch: pytest.MonkeyPatch) -> None:
             return _json([])
         if path == "/repos/acme/backend/issues/42/timeline":
             return _json(timeline)
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -331,6 +355,10 @@ def test_truncation_flag_when_link_next(monkeypatch: pytest.MonkeyPatch) -> None
                     )
                 },
             )
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -354,6 +382,10 @@ def test_sub_issues_404_falls_back_to_empty(monkeypatch: pytest.MonkeyPatch) -> 
         if path == "/repos/acme/backend/issues/42/sub_issues":
             return _json({"message": "Not Found"}, status_code=404)
         if path == "/repos/acme/backend/issues/42/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
@@ -414,6 +446,10 @@ def test_outgoing_mentions_from_body(monkeypatch: pytest.MonkeyPatch) -> None:
             return _json([])
         if path == "/repos/acme/backend/issues/3/timeline":
             return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
@@ -442,6 +478,10 @@ def test_outgoing_closes_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
         if path == "/repos/acme/backend/issues/5/sub_issues":
             return _json([])
         if path == "/repos/acme/backend/issues/5/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
@@ -475,6 +515,10 @@ def test_duplicate_of_from_own_state(monkeypatch: pytest.MonkeyPatch) -> None:
         if path == "/repos/acme/backend/issues/4/sub_issues":
             return _json([])
         if path == "/repos/acme/backend/issues/4/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
@@ -514,6 +558,10 @@ def test_duplicated_by_relabel_from_cross_ref(monkeypatch: pytest.MonkeyPatch) -
             return _json([])
         if path == "/repos/acme/backend/issues/1/timeline":
             return _json(timeline)
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
@@ -560,6 +608,10 @@ def test_closed_by_relabel_from_merged_pr(monkeypatch: pytest.MonkeyPatch) -> No
             return _json([])
         if path == "/repos/acme/backend/issues/2/timeline":
             return _json(timeline)
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
@@ -571,6 +623,138 @@ def test_closed_by_relabel_from_merged_pr(monkeypatch: pytest.MonkeyPatch) -> No
     by_kind = {(r.kind, r.ticket_id) for r in relations}
     assert ("closed_by", "#5") in by_kind
     assert ("mentioned_by", "#5") not in by_kind
+
+
+def test_blocks_blocked_by_via_dependencies_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #41 read↔write symmetry: dependencies persisted via the
+    REST API (`POST /issues/{n}/dependencies/blocked_by`) MUST surface
+    on `get_ticket.relations` as typed `blocks` / `blocked_by` kinds.
+
+    Reproduces the tester's smoke-test finding (commit 2a4c9eb): the
+    write side persisted to the Dependencies API but the read side
+    only saw timeline events, which the new API no longer emits.
+    """
+    blocker = {
+        "number": 3,
+        "title": "Blocker",
+        "state": "open",
+        "html_url": "https://github.com/acme/backend/issues/3",
+        "repository": {"full_name": "acme/backend"},
+    }
+    blocked = {
+        "number": 9,
+        "title": "Downstream",
+        "state": "open",
+        "html_url": "https://github.com/acme/backend/issues/9",
+        "repository": {"full_name": "acme/backend"},
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/2":
+            return _json(_issue_payload(2))
+        if path == "/repos/acme/backend/issues/2/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/dependencies/blocked_by":
+            return _json([blocker])
+        if path == "/repos/acme/backend/issues/2/dependencies/blocking":
+            return _json([blocked])
+        if path == "/repos/acme/backend/issues/2/timeline":
+            # Authoritative source is the REST API — timeline empty.
+            return _json([])
+        if "/dependencies/" in path:
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="2"
+    )
+    by_kind = {(r.kind, r.ticket_id) for r in relations}
+    assert ("blocked_by", "#3") in by_kind
+    assert ("blocks", "#9") in by_kind
+
+
+def test_dependencies_api_404_does_not_break(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older GitHub installations don't have the Dependencies endpoints
+    — 404 must be tolerated, other relation kinds keep flowing."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/2":
+            return _json(_issue_payload(2))
+        if path == "/repos/acme/backend/issues/2/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/sub_issues":
+            return _json([])
+        if path.startswith(
+            "/repos/acme/backend/issues/2/dependencies/"
+        ):
+            return _json({}, status_code=404)
+        if path == "/repos/acme/backend/issues/2/timeline":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="2"
+    )
+    # Empty is fine — no crash is the contract.
+    assert relations == []
+
+
+def test_blocks_blocked_by_dedupe_across_dependencies_and_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a dependency surfaces on BOTH the REST API and a legacy
+    timeline event, the deduper collapses to a single Relation."""
+
+    blocker = {
+        "number": 3,
+        "title": "Blocker",
+        "state": "open",
+        "html_url": "https://github.com/acme/backend/issues/3",
+        "repository": {"full_name": "acme/backend"},
+    }
+    timeline = [
+        {"event": "blocked_by_added", "blocked_by_issue": blocker},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/issues/2":
+            return _json(_issue_payload(2))
+        if path == "/repos/acme/backend/issues/2/comments":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/sub_issues":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/dependencies/blocked_by":
+            return _json([blocker])
+        if path == "/repos/acme/backend/issues/2/dependencies/blocking":
+            return _json([])
+        if path == "/repos/acme/backend/issues/2/timeline":
+            return _json(timeline)
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    _, _, relations, _ = provider.get_ticket(
+        _project(), token="t", ticket_id="2"
+    )
+    blocked_by = [r for r in relations if r.kind == "blocked_by"]
+    assert len(blocked_by) == 1
+    assert blocked_by[0].ticket_id == "#3"
 
 
 def test_blocks_blocked_by_events(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -597,6 +781,10 @@ def test_blocks_blocked_by_events(monkeypatch: pytest.MonkeyPatch) -> None:
             return _json([])
         if path == "/repos/acme/backend/issues/2/timeline":
             return _json(timeline)
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
+            return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
     monkeypatch.setenv("PROJECT_ISSUES_MENTIONS_SCAN_DEPTH", "0")
@@ -621,6 +809,10 @@ def test_mentions_scan_depth_body_only(monkeypatch: pytest.MonkeyPatch) -> None:
         if path == "/repos/acme/backend/issues/9/sub_issues":
             return _json([])
         if path == "/repos/acme/backend/issues/9/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 
@@ -654,6 +846,10 @@ def test_self_reference_is_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
         if path == "/repos/acme/backend/issues/42/sub_issues":
             return _json([])
         if path == "/repos/acme/backend/issues/42/timeline":
+            return _json([])
+        if "/dependencies/" in path:
+            # Ticket #41 read-path: empty Dependencies API responses
+            # keep these legacy fixtures focused on their original kind.
             return _json([])
         raise AssertionError(f"unexpected request: {req.url}")
 

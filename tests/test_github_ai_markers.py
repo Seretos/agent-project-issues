@@ -446,3 +446,95 @@ def test_update_ticket_proceeds_without_ai_modified_when_label_denied(
     # the marker, no labels diff exists at all.
     assert body.get("title") == "new"
     assert "ai-modified" not in (body.get("labels") or [])
+
+
+# ---------- update_ticket: body marker re-stamp (ticket #44) ----------------
+
+
+def test_update_ticket_stamps_ai_generated_marker_on_ai_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Updating the body of an `ai-generated`-labelled ticket preserves
+    the `#ai-generated` marker on the new body."""
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/issues/5":
+            return _json(_issue_payload(
+                5, labels=[{"name": "ai-generated"}],
+            ))
+        if req.method == "PATCH" and path == "/repos/acme/backend/issues/5":
+            captured["body"] = json.loads(req.content)
+            return _json(_issue_payload(
+                5, labels=[{"name": "ai-generated"}],
+                body=captured["body"]["body"],
+            ))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    provider.update_ticket(
+        _project(), "tok", "5", body="new content",
+    )
+    assert captured["body"]["body"] == "#ai-generated\n\nnew content"
+
+
+def test_update_ticket_stamps_ai_modified_marker_on_human_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Updating the body of a human-authored ticket stamps `#ai-modified`."""
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/issues/5":
+            return _json(_issue_payload(5, labels=[]))
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-modified"}, status_code=201)
+        if req.method == "PATCH" and path == "/repos/acme/backend/issues/5":
+            captured["body"] = json.loads(req.content)
+            return _json(_issue_payload(
+                5, labels=[{"name": "ai-modified"}],
+                body=captured["body"]["body"],
+            ))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    provider.update_ticket(
+        _project(), "tok", "5", body="new content",
+    )
+    assert captured["body"]["body"] == "#ai-modified\n\nnew content"
+    assert "ai-modified" in captured["body"]["labels"]
+
+
+def test_update_ticket_strips_caller_marker_no_stacking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller mistakenly prepends a marker; we strip + re-stamp correctly."""
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/issues/5":
+            return _json(_issue_payload(
+                5, labels=[{"name": "ai-generated"}],
+            ))
+        if req.method == "PATCH" and path == "/repos/acme/backend/issues/5":
+            captured["body"] = json.loads(req.content)
+            return _json(_issue_payload(
+                5, labels=[{"name": "ai-generated"}],
+                body=captured["body"]["body"],
+            ))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    provider.update_ticket(
+        _project(), "tok", "5",
+        body="#ai-modified\n\ncaller-supplied marker",
+    )
+    sent = captured["body"]["body"]
+    assert sent == "#ai-generated\n\ncaller-supplied marker"
+    assert sent.count("#ai-") == 1

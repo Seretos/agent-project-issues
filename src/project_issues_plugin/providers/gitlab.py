@@ -38,8 +38,10 @@ from project_issues_plugin.config import ProjectConfig
 from project_issues_plugin.markers import (
     AI_GENERATED_LABEL,
     AI_MODIFIED_LABEL,
+    apply_body_marker,
     ensure_body_prefix,
     ensure_comment_prefix,
+    has_ai_generated_marker,
 )
 from project_issues_plugin.providers.base import (
     Comment,
@@ -895,18 +897,23 @@ class GitLabProvider(TokenCapabilityProvider):
             current = r0.json()
             current_labels = set(current.get("labels") or [])
 
+            will_be_ai_generated = AI_GENERATED_LABEL in current_labels
+
             payload: dict[str, Any] = {}
             if title is not None:
                 payload["title"] = title
             if body is not None:
-                payload["description"] = body
+                # Ticket #44: re-stamp body marker to match label state.
+                payload["description"] = apply_body_marker(
+                    body, will_be_ai_generated=will_be_ai_generated,
+                )
             if status is not None:
                 payload["state_event"] = _status_to_state_event(status)
 
             add_set = set(labels_add or [])
             remove_set = set(labels_remove or [])
             if (
-                AI_GENERATED_LABEL not in current_labels
+                not will_be_ai_generated
                 and AI_MODIFIED_LABEL not in current_labels
             ):
                 add_set.add(AI_MODIFIED_LABEL)
@@ -1059,11 +1066,14 @@ class GitLabProvider(TokenCapabilityProvider):
         comment_id: str,
         body: str,
     ) -> Comment:
-        """Edit a note. Re-applies the AI-comment prefix.
+        """Edit a note, re-stamping the AI-marker.
+
+        Marker policy (ticket #44): same as `GitHubProvider.update_comment`
+        — if the existing note carries `#ai-generated`, the edit
+        preserves that marker; otherwise it stamps `#ai-modified`.
 
         Accepts the same composite-key form as `get_comment`.
         """
-        prefixed = ensure_comment_prefix(body)
         path = _project_path(project)
         if "/" not in comment_id:
             raise GitLabError(
@@ -1073,6 +1083,15 @@ class GitLabProvider(TokenCapabilityProvider):
             )
         issue_iid, note_id = comment_id.split("/", 1)
         with _client(project, token) as client:
+            r0 = client.get(
+                f"/projects/{path}/issues/{issue_iid}/notes/{note_id}",
+            )
+            _check(r0)
+            current_body = r0.json().get("body") or ""
+            will_be_ai_generated = has_ai_generated_marker(current_body)
+            prefixed = apply_body_marker(
+                body, will_be_ai_generated=will_be_ai_generated,
+            )
             r = client.put(
                 f"/projects/{path}/issues/{issue_iid}/notes/{note_id}",
                 json={"body": prefixed},
@@ -1226,11 +1245,16 @@ class GitLabProvider(TokenCapabilityProvider):
             current = r0.json()
             current_labels = set(current.get("labels") or [])
 
+            will_be_ai_generated = AI_GENERATED_LABEL in current_labels
+
             payload: dict[str, Any] = {}
             if title is not None:
                 payload["title"] = title
             if body is not None:
-                payload["description"] = body
+                # Ticket #44: re-stamp body marker to match label state.
+                payload["description"] = apply_body_marker(
+                    body, will_be_ai_generated=will_be_ai_generated,
+                )
             if status == "open":
                 payload["state_event"] = "reopen"
             elif status == "closed":
@@ -1241,7 +1265,7 @@ class GitLabProvider(TokenCapabilityProvider):
             add_set = set(labels_add or [])
             remove_set = set(labels_remove or [])
             if (
-                AI_GENERATED_LABEL not in current_labels
+                not will_be_ai_generated
                 and AI_MODIFIED_LABEL not in current_labels
             ):
                 add_set.add(AI_MODIFIED_LABEL)

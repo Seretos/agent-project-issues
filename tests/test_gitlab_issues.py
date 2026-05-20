@@ -587,14 +587,20 @@ def test_get_comment_plain_id_raises(
         GitLabProvider().get_comment(_project(), "t", comment_id="99")
 
 
-def test_update_comment_reapplies_prefix(
+def test_update_comment_stamps_modified_for_human_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Ticket #44: existing human-authored note → edit stamps `#ai-modified`."""
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.method == "PUT":
-            assert "acme%2Fbackend/issues/5/notes/99" in str(req.url)
+        path = req.url.path
+        if req.method == "GET" and "issues/5/notes/99" in path:
+            return _json({
+                "id": 99, "body": "human original",
+                "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z",
+            })
+        if req.method == "PUT" and "issues/5/notes/99" in path:
             captured["body"] = json.loads(req.content.decode())
             return _json({
                 "id": 99, "body": captured["body"]["body"],
@@ -604,5 +610,30 @@ def test_update_comment_reapplies_prefix(
 
     _install_mock(monkeypatch, handler)
     GitLabProvider().update_comment(_project(), "t", "5/99", "new content")
-    assert captured["body"]["body"].startswith("#ai-generated")
-    assert "new content" in captured["body"]["body"]
+    assert captured["body"]["body"] == "#ai-modified\n\nnew content"
+
+
+def test_update_comment_preserves_generated_for_ai_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #44: existing AI-generated note → edit preserves marker."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and "issues/5/notes/99" in path:
+            return _json({
+                "id": 99, "body": "#ai-generated\n\nprev AI body",
+                "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z",
+            })
+        if req.method == "PUT" and "issues/5/notes/99" in path:
+            captured["body"] = json.loads(req.content.decode())
+            return _json({
+                "id": 99, "body": captured["body"]["body"],
+                "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().update_comment(_project(), "t", "5/99", "follow-up")
+    assert captured["body"]["body"] == "#ai-generated\n\nfollow-up"

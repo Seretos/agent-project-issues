@@ -86,11 +86,17 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Update an existing comment's body.
 
-        `ticket_id` is accepted for surface symmetry with `add_comment`
-        but is not used by the underlying request (comment ids are
-        repo-wide). The body is automatically prefixed with
-        `#ai-generated\\n\\n` if it doesn't already carry the marker —
-        do not add that prefix yourself.
+        `ticket_id` is accepted for surface symmetry with `add_comment`.
+        On GitHub it's currently unused (comment ids are repo-wide); on
+        GitLab the parameter is required to address the note.
+
+        The body is rewritten so the first line is exactly one `#ai-*`
+        marker matching the comment's authorship: `#ai-generated` if
+        the existing comment already carries that marker (we wrote it
+        originally), `#ai-modified` otherwise (first AI edit of a
+        human-authored comment). Callers should NOT prepend the marker
+        themselves; if they do, the existing marker line is stripped
+        and the correct one is prepended.
 
         Requires the project's `issues.modify` permission.
         """

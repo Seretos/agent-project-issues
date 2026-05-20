@@ -216,6 +216,14 @@ def register(mcp: FastMCP) -> None:
         is added automatically when the ticket wasn't previously
         `ai-generated`. Do not pass the marker labels yourself.
 
+        When `body` is supplied, it is rewritten so the first line is
+        exactly one `#ai-*` marker matching the ticket's post-update
+        label state: `#ai-generated` for AI-authored tickets,
+        `#ai-modified` for first AI touches on a human-authored ticket.
+        Callers should NOT prepend the marker themselves; if they do,
+        the existing marker line is stripped and the correct one is
+        prepended (no stacking).
+
         **Response shape:** lean by design. The returned `ticket` object
         contains only fields the agent typically needs after an update:
 

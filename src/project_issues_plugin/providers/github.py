@@ -12,6 +12,8 @@ from project_issues_plugin.config import ProjectConfig
 from project_issues_plugin.markers import (
     AI_GENERATED_LABEL,
     AI_MODIFIED_LABEL,
+    apply_body_marker,
+    has_ai_generated_marker,
     LABEL_COLORS,
     LABEL_DESCRIPTIONS,
     ensure_body_prefix,
@@ -1135,11 +1137,9 @@ class GitHubProvider:
             # If this ticket wasn't created by us, mark it as AI-modified.
             # Label application is best-effort (see ticket #15): if the
             # caller can't create or apply the label, proceed without it
-            # rather than blocking the legitimate update. The body is
-            # passed through unchanged on `update_ticket` because the
-            # caller has explicit edit intent — we don't re-stamp an
-            # already-existing body with a marker on every PATCH.
-            if AI_GENERATED_LABEL not in current_labels:
+            # rather than blocking the legitimate update.
+            will_be_ai_generated = AI_GENERATED_LABEL in current_labels
+            if not will_be_ai_generated:
                 if AI_MODIFIED_LABEL not in new_labels:
                     if _ensure_label_best_effort(
                         client, project, AI_MODIFIED_LABEL
@@ -1158,7 +1158,13 @@ class GitHubProvider:
             if title is not None:
                 payload["title"] = title
             if body is not None:
-                payload["body"] = body
+                # Re-stamp the body's `#ai-*` marker so it matches the
+                # resource's label state after this update (ticket #44).
+                # Caller should NOT prepend the marker themselves; if
+                # they do, we strip + re-add the correct one.
+                payload["body"] = apply_body_marker(
+                    body, will_be_ai_generated=will_be_ai_generated,
+                )
             if status is not None:
                 # New provider-native string API (see ticket #7).
                 # Accepted GitHub values:
@@ -1279,19 +1285,31 @@ class GitHubProvider:
         comment_id: str,
         body: str,
     ) -> Comment:
-        """Update a comment's body. Always re-applies the AI-marker prefix.
+        """Update a comment's body, re-stamping the AI-marker.
 
-        Behavior chosen here (matches the plan's "conservative" option):
-        any update we issue runs the new body through `ensure_comment_prefix`,
-        so any AI edit is unambiguously labelled. If the existing comment
-        body didn't carry an `#ai-generated` marker, the prefix is added —
-        this mirrors `update_ticket`, which adds the `ai-modified` label when
-        the ticket wasn't originally AI-created. (A future variant could emit
-        a distinct `#ai-modified` prefix; we keep the single `#ai-generated`
-        marker for now to avoid introducing a new convention mid-plan.)
+        Marker policy (ticket #44):
+          - If the existing comment body carries `#ai-generated`, the
+            edited body is re-stamped with `#ai-generated` (we wrote it
+            originally, this is just another AI edit).
+          - Otherwise the comment was human-authored — the edited body
+            is stamped with `#ai-modified` to mirror the label
+            distinction `update_ticket` makes between `ai-generated` and
+            `ai-modified` resources.
+
+        Comments don't carry labels, so the body marker is the only
+        signal a reader has of authorship — getting it right here is
+        important. Costs one extra GET before the PATCH.
         """
-        prefixed = ensure_comment_prefix(body)
         with _client(token) as client:
+            r0 = client.get(
+                f"{_repo_path(project)}/issues/comments/{comment_id}",
+            )
+            _check(r0)
+            current_body = r0.json().get("body") or ""
+            will_be_ai_generated = has_ai_generated_marker(current_body)
+            prefixed = apply_body_marker(
+                body, will_be_ai_generated=will_be_ai_generated,
+            )
             r = client.patch(
                 f"{_repo_path(project)}/issues/comments/{comment_id}",
                 json={"body": prefixed},
@@ -1506,7 +1524,8 @@ class GitHubProvider:
             # `ai-modified` is best-effort (see ticket #15): if we can't
             # ensure the label exists, proceed without it rather than
             # failing the legitimate update.
-            if AI_GENERATED_LABEL not in current_labels:
+            will_be_ai_generated = AI_GENERATED_LABEL in current_labels
+            if not will_be_ai_generated:
                 if AI_MODIFIED_LABEL not in new_labels:
                     if _ensure_label_best_effort(
                         client, project, AI_MODIFIED_LABEL
@@ -1525,7 +1544,10 @@ class GitHubProvider:
             if title is not None:
                 payload["title"] = title
             if body is not None:
-                payload["body"] = body
+                # Ticket #44: re-stamp body marker to match label state.
+                payload["body"] = apply_body_marker(
+                    body, will_be_ai_generated=will_be_ai_generated,
+                )
             if status is not None:
                 # The tool layer already restricts `status` to open/closed;
                 # accept those here and ignore anything else (the layer

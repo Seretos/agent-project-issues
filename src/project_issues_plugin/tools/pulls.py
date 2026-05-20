@@ -160,6 +160,12 @@ def register(mcp: FastMCP) -> None:
         the current set. The label `ai-modified` is added automatically
         when the PR wasn't previously `ai-generated`.
 
+        When `body` is supplied, it is rewritten so the first line is
+        exactly one `#ai-*` marker matching the PR's post-update label
+        state — `#ai-generated` for AI-authored PRs, `#ai-modified` for
+        the first AI touch of a human-authored PR. Callers should NOT
+        prepend the marker themselves.
+
         Requires the project's `pulls.modify` permission.
         """
         # Tool-layer guard for the disallowed value — keeps the contract

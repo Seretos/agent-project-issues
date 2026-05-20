@@ -136,10 +136,19 @@ def test_get_comment_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
     assert comment.author == "alice"
 
 
-def test_update_comment_adds_ai_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_comment_stamps_modified_for_human_authored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the existing comment carries no AI marker (human-authored),
+    the edit stamps `#ai-modified` — first AI touch (ticket #44)."""
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            return _json(_comment_payload(777, body="human-written original"))
         if (
             req.method == "PATCH"
             and req.url.path == "/repos/acme/backend/issues/comments/777"
@@ -153,15 +162,25 @@ def test_update_comment_adds_ai_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     comment = provider.update_comment(
         _project(), token="t", comment_id="777", body="new content"
     )
-    assert captured["body"] == {"body": "#ai-generated\n\nnew content"}
-    assert comment.body.startswith("#ai-generated\n\n")
+    assert captured["body"] == {"body": "#ai-modified\n\nnew content"}
+    assert comment.body.startswith("#ai-modified\n\n")
 
 
-def test_update_comment_keeps_existing_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A body that already starts with `#ai-generated` must NOT be re-prefixed."""
+def test_update_comment_preserves_generated_for_ai_authored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the existing comment already carries `#ai-generated`, the edit
+    preserves that marker (we wrote it originally — ticket #44)."""
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            return _json(_comment_payload(
+                777, body="#ai-generated\n\nprev AI body",
+            ))
         if (
             req.method == "PATCH"
             and req.url.path == "/repos/acme/backend/issues/comments/777"
@@ -172,15 +191,52 @@ def test_update_comment_keeps_existing_prefix(monkeypatch: pytest.MonkeyPatch) -
 
     _install_mock(monkeypatch, handler)
     provider = GitHubProvider()
-    already = "#ai-generated\n\nfollow-up edit"
     comment = provider.update_comment(
-        _project(), token="t", comment_id="777", body=already
+        _project(), token="t", comment_id="777", body="follow-up edit",
     )
-    # The prefix must appear exactly once.
     sent_body = captured["body"]["body"]
-    assert sent_body == already
+    assert sent_body == "#ai-generated\n\nfollow-up edit"
     assert sent_body.count("#ai-generated") == 1
+    assert sent_body.count("#ai-modified") == 0
     assert comment.body.count("#ai-generated") == 1
+
+
+def test_update_comment_no_marker_stacking_on_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller-supplied marker is stripped and replaced — no stacking."""
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            # Existing comment is AI-generated → we keep that marker.
+            return _json(_comment_payload(
+                777, body="#ai-generated\n\nprev AI body",
+            ))
+        if (
+            req.method == "PATCH"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            captured["body"] = json.loads(req.content)
+            return _json(_comment_payload(777, body=captured["body"]["body"]))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    # Caller mistakenly prepended `#ai-modified` themselves; we must
+    # strip + re-stamp with the correct `#ai-generated`.
+    provider.update_comment(
+        _project(),
+        token="t",
+        comment_id="777",
+        body="#ai-modified\n\ncaller-supplied marker",
+    )
+    sent_body = captured["body"]["body"]
+    assert sent_body == "#ai-generated\n\ncaller-supplied marker"
+    assert sent_body.count("#ai-") == 1
 
 
 # ---------- tool-level tests (permissions, _safe wrapping) ------------------
@@ -246,8 +302,9 @@ def test_update_comment_tool_requires_modify(monkeypatch: pytest.MonkeyPatch) ->
 def test_update_comment_tool_succeeds_with_modify(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With `permissions.modify=True` and a token, the update goes through and
-    the AI-prefix is applied to a previously-non-AI comment."""
+    """With `permissions.modify=True` and a token, the update goes through.
+    The mock GET returns a body without any marker → human-authored →
+    the edit is stamped `#ai-modified` (ticket #44)."""
     project = _project(modify=True)
     tools = _register_tools_with(monkeypatch, project)
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
@@ -255,6 +312,11 @@ def test_update_comment_tool_succeeds_with_modify(
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            return _json(_comment_payload(777, body="human original"))
         if (
             req.method == "PATCH"
             and req.url.path == "/repos/acme/backend/issues/comments/777"
@@ -273,8 +335,8 @@ def test_update_comment_tool_succeeds_with_modify(
     )
     assert "error" not in result, result
     assert result["project_id"] == "acme"
-    assert result["comment"]["body"].startswith("#ai-generated\n\n")
-    assert captured["body"]["body"] == "#ai-generated\n\nupdated text"
+    assert result["comment"]["body"].startswith("#ai-modified\n\n")
+    assert captured["body"]["body"] == "#ai-modified\n\nupdated text"
 
 
 def test_list_comments_tool_does_not_require_token(

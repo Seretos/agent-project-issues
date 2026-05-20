@@ -2,21 +2,31 @@
 
 Provider implementations call these helpers; the agent never sets the
 markers manually.
+
+Body markers come in two flavours, mirroring the label vocabulary:
+  - `#ai-generated\\n\\n` — resource was originally created by us
+  - `#ai-modified\\n\\n`  — resource was originally human-authored and
+                            this write is the first AI touch
+
+A resource carries exactly one marker line. Transitioning from one
+flavour to the other strips the previous marker line before prepending
+the new one — no stacking.
 """
 from __future__ import annotations
+
+import re
 
 AI_GENERATED_LABEL = "ai-generated"
 AI_MODIFIED_LABEL = "ai-modified"
 AI_NOT_PLANNED_LABEL = "ai-closed-not-planned"   # GitLab: stand-in for state_reason
 
-AI_COMMENT_PREFIX = "#ai-generated\n\n"
-# Same literal as AI_COMMENT_PREFIX, kept as a distinct name so callers
-# express intent: ticket / PR bodies get an AI_BODY_PREFIX, comments get
-# an AI_COMMENT_PREFIX. The body prefix is the source of truth for AI
-# attribution; the `ai-generated` LABEL is best-effort decoration that
-# can be silently dropped or refused depending on the caller's GitHub
-# permissions on the target repo (see `providers/github.py`).
-AI_BODY_PREFIX = "#ai-generated\n\n"
+AI_GENERATED_PREFIX = "#ai-generated\n\n"
+AI_MODIFIED_PREFIX = "#ai-modified\n\n"
+
+# Legacy aliases — kept so callers that still import the old names keep
+# working. Prefer `AI_GENERATED_PREFIX` / `AI_MODIFIED_PREFIX` in new code.
+AI_COMMENT_PREFIX = AI_GENERATED_PREFIX
+AI_BODY_PREFIX = AI_GENERATED_PREFIX
 
 LABEL_COLORS = {
     AI_GENERATED_LABEL: "0e8a16",     # green
@@ -30,23 +40,59 @@ LABEL_DESCRIPTIONS = {
     AI_NOT_PLANNED_LABEL: "Closed as 'not planned' by the project-issues AI agent",
 }
 
+# Matches a leading `#ai-<kebab>` marker line (with optional surrounding
+# blank lines). Used to strip any prior marker before re-stamping.
+_AI_MARKER_LINE_RE = re.compile(r"\A\s*#ai-[a-z][a-z0-9-]*\s*\n+")
+
+
+def apply_body_marker(body: str | None, *, will_be_ai_generated: bool) -> str:
+    """Return `body` with exactly one `#ai-*` marker line at the top.
+
+    Strips any existing leading `#ai-<kebab>` marker line and prepends
+    the marker that matches the resource's label state after the
+    pending write:
+      - `will_be_ai_generated=True`  → `#ai-generated\\n\\n`
+      - `will_be_ai_generated=False` → `#ai-modified\\n\\n`
+
+    `None` is treated as an empty body so callers can pipe through
+    optional inputs without a `None`-check. Calling the helper twice
+    in a row produces the same string as calling it once.
+    """
+    text = body or ""
+    # Strip any single existing marker line (idempotent + handles
+    # generated↔modified transitions without stacking).
+    stripped = _AI_MARKER_LINE_RE.sub("", text)
+    prefix = AI_GENERATED_PREFIX if will_be_ai_generated else AI_MODIFIED_PREFIX
+    return prefix + stripped
+
+
+def has_ai_generated_marker(body: str | None) -> bool:
+    """Return True if `body` already starts with the `#ai-generated` marker.
+
+    Used by `update_comment` to decide whether a comment's existing body
+    indicates AI authorship (which preserves the marker on edit) or
+    human authorship (which switches the marker to `#ai-modified`).
+    """
+    if not body:
+        return False
+    return body.lstrip().startswith("#ai-generated")
+
 
 def ensure_comment_prefix(body: str) -> str:
-    """Prepend the AI-comment marker unless the body already starts with it."""
-    if body.lstrip().startswith("#ai-generated"):
-        return body
-    return AI_COMMENT_PREFIX + body
+    """Prepend the AI-generated marker unless already present.
+
+    Backward-compat wrapper — equivalent to
+    `apply_body_marker(body, will_be_ai_generated=True)`. New code on
+    the create-path should call `apply_body_marker` directly.
+    """
+    return apply_body_marker(body, will_be_ai_generated=True)
 
 
 def ensure_body_prefix(body: str | None) -> str:
-    """Prepend the AI body marker unless the body already starts with it.
+    """Prepend the AI-generated marker unless already present.
 
-    Mirrors `ensure_comment_prefix` but for ticket / PR bodies. The helper
-    is idempotent — applying it twice produces the same string as applying
-    it once. `None` is treated as an empty body so callers can pass through
-    optional inputs without a `None`-check.
+    Backward-compat wrapper — equivalent to
+    `apply_body_marker(body, will_be_ai_generated=True)`. New code on
+    the create-path should call `apply_body_marker` directly.
     """
-    text = body or ""
-    if text.lstrip().startswith("#ai-generated"):
-        return text
-    return AI_BODY_PREFIX + text
+    return apply_body_marker(body, will_be_ai_generated=True)

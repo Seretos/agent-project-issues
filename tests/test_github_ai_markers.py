@@ -339,6 +339,139 @@ def test_create_ticket_body_prefix_idempotent(
     )
 
 
+# ---------- create_ticket: optional status (ticket #42) ---------------------
+
+
+def test_create_ticket_default_status_no_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When `status` is omitted, no follow-up PATCH is issued — the
+    ticket lands in `open` state as before."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        seen.append(f"{req.method} {path}")
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-generated"}, status_code=201)
+        if req.method == "POST" and path == "/repos/acme/backend/issues":
+            return _json(_issue_payload(50))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    ticket = provider.create_ticket(
+        _project(), "tok", title="t", body="b", labels=[], assignees=[],
+    )
+    assert ticket.id == "50"
+    # No PATCH should have been issued.
+    assert not any(s.startswith("PATCH ") for s in seen)
+
+
+def test_create_ticket_with_closed_not_planned_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`status="closed:not_planned"` issues a follow-up PATCH with
+    `state="closed"` and `state_reason="not_planned"`."""
+    captured: dict[str, dict] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-generated"}, status_code=201)
+        if req.method == "POST" and path == "/repos/acme/backend/issues":
+            return _json(_issue_payload(51))
+        if req.method == "PATCH" and path == "/repos/acme/backend/issues/51":
+            captured["patch"] = json.loads(req.content)
+            return _json(_issue_payload(51, state="closed", state_reason="not_planned"))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    ticket = provider.create_ticket(
+        _project(), "tok", title="t", body="b",
+        labels=[], assignees=[], status="closed:not_planned",
+    )
+    assert ticket.id == "51"
+    assert captured["patch"] == {"state": "closed", "state_reason": "not_planned"}
+
+
+def test_create_ticket_with_closed_completed_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`status="closed:completed"` issues a follow-up PATCH with
+    `state="closed"` and `state_reason="completed"`."""
+    captured: dict[str, dict] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-generated"}, status_code=201)
+        if req.method == "POST" and path == "/repos/acme/backend/issues":
+            return _json(_issue_payload(52))
+        if req.method == "PATCH" and path == "/repos/acme/backend/issues/52":
+            captured["patch"] = json.loads(req.content)
+            return _json(_issue_payload(52, state="closed", state_reason="completed"))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    provider.create_ticket(
+        _project(), "tok", title="t", body="b",
+        labels=[], assignees=[], status="closed:completed",
+    )
+    assert captured["patch"] == {"state": "closed", "state_reason": "completed"}
+
+
+def test_create_ticket_with_status_open_skips_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit `status="open"` matches GitHub's default — no PATCH."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        seen.append(f"{req.method} {path}")
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-generated"}, status_code=201)
+        if req.method == "POST" and path == "/repos/acme/backend/issues":
+            return _json(_issue_payload(53))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    provider.create_ticket(
+        _project(), "tok", title="t", body="b",
+        labels=[], assignees=[], status="open",
+    )
+    assert not any(s.startswith("PATCH ") for s in seen)
+
+
+def test_create_ticket_rejects_unknown_status_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid status raises ValueError *before* POST commits an issue —
+    same error type and hint as update_ticket."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        raise AssertionError("HTTP call should not happen on invalid status")
+
+    _install_mock(monkeypatch, handler)
+    provider = GitHubProvider()
+    with pytest.raises(ValueError) as exc_info:
+        provider.create_ticket(
+            _project(), "tok", title="t", body="b",
+            labels=[], assignees=[], status="garbage",
+        )
+    msg = str(exc_info.value)
+    assert "garbage" in msg
+    assert "list_ticket_statuses" in msg
+    # No HTTP call should have been made.
+    assert seen == []
+
+
 # ---------- create_pr integration -------------------------------------------
 
 

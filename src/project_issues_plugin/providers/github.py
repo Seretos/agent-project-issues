@@ -180,6 +180,37 @@ def _map_pr(raw: dict) -> PullRequest:
     )
 
 
+def _split_github_status(
+    status: Status | None,
+) -> tuple[str | None, str | None]:
+    """Return (state, state_reason) tuple for a provider-native status.
+
+    Accepted values:
+      - None              → (None, None)            (no state change)
+      - "open"            → ("open", None)
+      - "closed"          → ("closed", "completed") (legacy alias)
+      - "closed:completed"→ ("closed", "completed")
+      - "closed:not_planned" → ("closed", "not_planned")
+
+    Anything else raises ValueError with the same hint as the failure
+    message in `update_ticket` so agents can re-discover the
+    state-space via `list_ticket_statuses`.
+    """
+    if status is None:
+        return None, None
+    if status == "open":
+        return "open", None
+    if status in ("closed", "closed:completed"):
+        return "closed", "completed"
+    if status == "closed:not_planned":
+        return "closed", "not_planned"
+    raise ValueError(
+        f"unsupported status {status!r} for GitHub — "
+        f"use list_ticket_statuses to discover valid values. "
+        f"Accepted: open, closed, closed:completed, closed:not_planned."
+    )
+
+
 def _issue_state(raw: dict) -> str:
     """Translate a GitHub issue/PR payload to one of "open"/"closed"/"merged"/""."""
     state = raw.get("state")
@@ -1060,6 +1091,8 @@ class GitHubProvider:
         body: str,
         labels: list[str],
         assignees: list[str],
+        *,
+        status: Status | None = None,
     ) -> Ticket:
         """Create an issue with the `ai-generated` AI-attribution marker.
 
@@ -1072,10 +1105,19 @@ class GitHubProvider:
             from the POST payload so the issue is still created. Mode A
             (silent label-drop in the response despite a successful POST)
             is detected after the call and logged.
+
+        Optional `status` (ticket #42) accepts the same vocabulary as
+        `update_ticket.status`. The GitHub `POST /issues` endpoint
+        always creates in `open` state, so non-`open` requests are
+        landed via a follow-up PATCH inside this method — the agent
+        sees one logical call.
         """
         # Deduplicate while preserving order, ensure ai-generated is present.
         merged = list(dict.fromkeys([*labels, AI_GENERATED_LABEL]))
         prefixed_body = ensure_body_prefix(body)
+        # Validate `status` up-front so an invalid value rejects before
+        # the POST commits an issue we'd then have to delete or close.
+        patch_state, patch_state_reason = _split_github_status(status)
         with _client(token) as client:
             label_ok = _ensure_label_best_effort(
                 client, project, AI_GENERATED_LABEL
@@ -1105,6 +1147,18 @@ class GitHubProvider:
                     raw.get("number"), project.owner, project.repo,
                     AI_GENERATED_LABEL,
                 )
+            # Follow-up PATCH for non-`open` initial status.
+            if patch_state is not None and patch_state != "open":
+                patch_payload: dict[str, Any] = {"state": patch_state}
+                if patch_state_reason is not None:
+                    patch_payload["state_reason"] = patch_state_reason
+                number = raw.get("number")
+                pr = client.patch(
+                    f"{_repo_path(project)}/issues/{number}",
+                    json=patch_payload,
+                )
+                _check(pr)
+                raw = pr.json()
             return _map_issue(raw)
 
     def update_ticket(
@@ -1167,29 +1221,15 @@ class GitHubProvider:
                 )
             if status is not None:
                 # New provider-native string API (see ticket #7).
-                # Accepted GitHub values:
-                #   - "open"
-                #   - "closed"                  (same as "closed:completed")
-                #   - "closed:completed"
-                #   - "closed:not_planned"
-                # The legacy 3-value enum is no longer accepted — agents
-                # must call `list_ticket_statuses` to discover valid
-                # values and use the `hints` to choose a target.
-                if status == "open":
-                    payload["state"] = "open"
-                elif status in ("closed", "closed:completed"):
-                    payload["state"] = "closed"
-                    payload["state_reason"] = "completed"
-                elif status == "closed:not_planned":
-                    payload["state"] = "closed"
-                    payload["state_reason"] = "not_planned"
-                else:
-                    raise ValueError(
-                        f"unsupported status {status!r} for GitHub — "
-                        f"use list_ticket_statuses to discover valid "
-                        f"values. Accepted: open, closed, "
-                        f"closed:completed, closed:not_planned."
-                    )
+                # Accepted values: open / closed / closed:completed /
+                # closed:not_planned. Legacy 3-value enum no longer
+                # accepted — see `_split_github_status` for the error
+                # message agents see on unknown values.
+                state, state_reason = _split_github_status(status)
+                if state is not None:
+                    payload["state"] = state
+                if state_reason is not None:
+                    payload["state_reason"] = state_reason
             if new_labels != current_labels:
                 payload["labels"] = sorted(new_labels)
             if new_assignees != current_assignees:

@@ -331,6 +331,123 @@ def test_create_ticket_resolves_assignee_usernames_to_ids(
     assert captured["body"]["assignee_ids"] == [1, 2]
 
 
+def test_create_ticket_with_closed_status_issues_put_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #42: `status="closed"` on GitLab issues a follow-up PUT
+    with `state_event=close` (GitLab `POST /issues` always creates open)."""
+    seen: list[str] = []
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "GET" and req.url.path == "/api/v4/users":
+            return _json([])
+        if req.method == "POST" and req.url.path.endswith("/issues"):
+            return _json(_issue_payload(60, state="opened"))
+        if req.method == "PUT" and req.url.path.endswith("/issues/60"):
+            captured["put"] = json.loads(req.content.decode())
+            return _json(_issue_payload(60, state="closed"))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    ticket = GitLabProvider().create_ticket(
+        _project(), "t", title="t", body="b",
+        labels=[], assignees=[], status="closed",
+    )
+    assert ticket.id == "60"
+    assert captured["put"] == {"state_event": "close"}
+
+
+def test_create_ticket_with_closed_not_planned_status_maps_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitLab has no state_reason — `closed:not_planned` collapses to
+    `state_event=close` (semantically declined via label, see markers.py)."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/api/v4/users":
+            return _json([])
+        if req.method == "POST" and req.url.path.endswith("/issues"):
+            return _json(_issue_payload(61))
+        if req.method == "PUT" and req.url.path.endswith("/issues/61"):
+            captured["put"] = json.loads(req.content.decode())
+            return _json(_issue_payload(61, state="closed"))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().create_ticket(
+        _project(), "t", title="t", body="b",
+        labels=[], assignees=[], status="closed:not_planned",
+    )
+    assert captured["put"] == {"state_event": "close"}
+
+
+def test_create_ticket_status_open_skips_put(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit `status="open"` matches GitLab's default — no PUT issued."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "GET" and req.url.path == "/api/v4/users":
+            return _json([])
+        if req.method == "POST" and req.url.path.endswith("/issues"):
+            return _json(_issue_payload(62))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().create_ticket(
+        _project(), "t", title="t", body="b",
+        labels=[], assignees=[], status="open",
+    )
+    assert not any(s.startswith("PUT ") for s in seen)
+
+
+def test_create_ticket_default_status_skips_put(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitted `status` — no follow-up PUT."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "GET" and req.url.path == "/api/v4/users":
+            return _json([])
+        if req.method == "POST" and req.url.path.endswith("/issues"):
+            return _json(_issue_payload(63))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().create_ticket(
+        _project(), "t", title="t", body="b", labels=[], assignees=[],
+    )
+    assert not any(s.startswith("PUT ") for s in seen)
+
+
+def test_create_ticket_rejects_unknown_status_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid status raises ValueError before POST — no issue created."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        raise AssertionError("HTTP call should not happen on invalid status")
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(ValueError) as exc_info:
+        GitLabProvider().create_ticket(
+            _project(), "t", title="t", body="b",
+            labels=[], assignees=[], status="garbage",
+        )
+    msg = str(exc_info.value)
+    assert "garbage" in msg
+    assert seen == []
+
+
 def test_create_ticket_drops_unknown_assignees(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

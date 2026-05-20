@@ -821,6 +821,8 @@ class GitLabProvider(TokenCapabilityProvider):
         body: str,
         labels: list[str],
         assignees: list[str],
+        *,
+        status: Status | None = None,
     ) -> Ticket:
         """Create a GitLab issue with the AI-generated marker.
 
@@ -835,7 +837,19 @@ class GitLabProvider(TokenCapabilityProvider):
         Assignees are passed as usernames; GitLab requires user IDs on
         the POST. We resolve usernames → IDs via `/users?username=` so
         the caller doesn't have to.
+
+        Optional `status` (ticket #42) accepts the same vocabulary as
+        `update_ticket.status`. The GitLab `POST /issues` endpoint
+        creates in `opened` state; non-`open` requests are landed via
+        a follow-up PUT with `state_event=close`. Validation is
+        performed up-front (`_status_to_state_event`) so an invalid
+        value rejects before the POST.
         """
+        # Validate `status` up-front. Pass None through; raise on
+        # unknown values before POST commits an issue.
+        state_event: str | None = None
+        if status is not None:
+            state_event = _status_to_state_event(status)
         merged_labels = list(dict.fromkeys([*labels, AI_GENERATED_LABEL]))
         prefixed_body = ensure_body_prefix(body)
         path = _project_path(project)
@@ -851,7 +865,19 @@ class GitLabProvider(TokenCapabilityProvider):
                 payload["assignee_ids"] = assignee_ids
             r = client.post(f"/projects/{path}/issues", json=payload)
             _check(r)
-            return _map_issue(r.json())
+            raw = r.json()
+            # Follow-up PUT for non-`open` initial status (state_event
+            # is only `close` here — `reopen` is a no-op on a freshly
+            # created issue).
+            if state_event == "close":
+                iid = raw.get("iid")
+                pu = client.put(
+                    f"/projects/{path}/issues/{iid}",
+                    json={"state_event": "close"},
+                )
+                _check(pu)
+                raw = pu.json()
+            return _map_issue(raw)
 
     def update_ticket(
         self,

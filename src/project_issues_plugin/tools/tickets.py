@@ -158,6 +158,7 @@ def register(mcp: FastMCP) -> None:
         body: str,
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
+        status: str | None = None,
     ) -> dict:
         """Create a new ticket.
 
@@ -167,8 +168,19 @@ def register(mcp: FastMCP) -> None:
         actions stay one-shot.
 
         The label `ai-generated` is added automatically by the server.
-        Do not pass it yourself. Requires the project's `issues.create`
-        permission.
+        Do not pass it yourself.
+
+        `status` is optional. When omitted, the ticket lands in the
+        project's `hints.default_open` state (the normal case). When
+        supplied, it must be a value from the provider's state-space —
+        the same vocabulary `update_ticket.status` accepts. Use this
+        when importing already-resolved tickets or filing documentation
+        tickets that should be born closed, instead of a two-step
+        create-then-close that emits a spurious `opened → closed` pair
+        in the timeline. Unknown values raise the same error type as
+        `update_ticket` with a hint to call `list_ticket_statuses`.
+
+        Requires the project's `issues.create` permission.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -177,6 +189,7 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             ticket = provider.create_ticket(
                 project, token, title, body, labels or [], assignees or [],
+                status=status,
             )
             return {"project_id": project.id, "ticket": asdict(ticket)}
         return _safe(go)

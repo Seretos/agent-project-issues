@@ -445,6 +445,11 @@ def test_get_pr_surfaces_review_comments(
     assert rcs[1]["in_reply_to"] == "11"
     assert rcs[0]["path"] == "src/foo.py"
     assert rcs[0]["line"] == 42
+    # Cross-provider discussion_id semantics: top-of-thread's anchor is
+    # its own id; a reply's anchor is the parent (same on both providers,
+    # different internal meaning).
+    assert rcs[0]["discussion_id"] == "11"
+    assert rcs[1]["discussion_id"] == "11"
 
 
 def test_add_pr_review_comment_new_thread(
@@ -481,6 +486,8 @@ def test_add_pr_review_comment_new_thread(
     assert posted["side"] == "RIGHT"
     assert posted["body"].startswith("#ai-generated\n\n")
     assert result["review_comment"]["id"] == "99"
+    # Top-of-thread → discussion_id == own id (no `in_reply_to_id` set).
+    assert result["review_comment"]["discussion_id"] == "99"
 
 
 def test_add_pr_review_comment_reply(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -510,6 +517,8 @@ def test_add_pr_review_comment_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     assert posted["in_reply_to"] == 99
     assert "path" not in posted and "line" not in posted
     assert result["review_comment"]["in_reply_to"] == "99"
+    # Reply → discussion_id == parent anchor (= `in_reply_to_id`).
+    assert result["review_comment"]["discussion_id"] == "99"
 
 
 def test_add_pr_review_comment_rejects_mixed_modes(

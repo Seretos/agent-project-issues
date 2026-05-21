@@ -138,13 +138,19 @@ def test_get_pr_returns_pr_and_filtered_comments(
                  "author": {"username": "a"}, "created_at": "2024-01-01T00:00:00Z"},
                 {"id": 2, "body": "approved", "system": True,
                  "author": {"username": "a"}, "created_at": "2024-01-01T00:01:00Z"},
+                # Positional (diff-anchored) note — must be filtered out
+                # so it doesn't double-surface alongside review_comments.
+                {"id": 3, "body": "nit", "system": False,
+                 "author": {"username": "a"}, "created_at": "2024-01-01T00:02:00Z",
+                 "position": {"new_path": "src/foo.py", "new_line": 1}},
             ])
         return _json({}, status_code=404)
 
     _install_mock(monkeypatch, handler)
     pr, comments = GitLabProvider().get_pr(_project(), "t", "5")
     assert pr.id == "5"
-    assert len(comments) == 1  # system note filtered
+    # system note + positional note both filtered → only the plain comment.
+    assert len(comments) == 1
     assert comments[0].body == "comment"
 
 
@@ -171,7 +177,10 @@ def test_create_pr_applies_markers_and_branches(
         draft=True, labels=["enhancement"],
     )
     assert pr.id == "7"
-    assert captured["body"]["title"] == "New MR"
+    # Title carries the canonical Draft: prefix in addition to draft=True
+    # (some GitLab setups silently drop the param — prefix is the
+    # reliable signal).
+    assert captured["body"]["title"] == "Draft: New MR"
     assert captured["body"]["source_branch"] == "feat/x"
     assert captured["body"]["target_branch"] == "main"
     assert captured["body"]["draft"] is True
@@ -444,6 +453,10 @@ def test_list_pr_review_comments_flattens_positional_discussions(
     assert rcs[0].in_reply_to is None
     assert rcs[1].in_reply_to == "disc-A"
     assert rcs[0].path == "src/foo.py"
+    # Both notes share the discussion anchor — caller passes this to
+    # `in_reply_to` to reply (fix for #43 live-verify reply-blocked bug).
+    assert rcs[0].discussion_id == "disc-A"
+    assert rcs[1].discussion_id == "disc-A"
 
 
 def test_add_pr_review_comment_new_thread_posts_position(
@@ -487,6 +500,9 @@ def test_add_pr_review_comment_new_thread_posts_position(
     assert pos["base_sha"] == "b1"
     assert pos["start_sha"] == "s1"
     assert rc.id == "99"
+    # Discussion id surfaced so the caller can immediately reply
+    # without a second round-trip (fix for #43 live-verify bug).
+    assert rc.discussion_id == "disc-new"
 
 
 def test_add_pr_review_comment_reply_posts_to_discussion(
@@ -515,8 +531,68 @@ def test_add_pr_review_comment_reply_posts_to_discussion(
     )
     assert rc.id == "100"
     assert rc.in_reply_to == "disc-A"
+    # The reply stays anchored to the same discussion the caller joined.
+    assert rc.discussion_id == "disc-A"
     # Sanity: no merge-request GET (reply mode skips diff_refs fetch).
     assert all("/merge_requests/5" not in p or "/discussions/" in p for p in seen)
+
+
+def test_create_then_reply_round_trip_uses_surfaced_discussion_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh new-thread call exposes discussion_id; using it as
+    in_reply_to lets the next call reach `/discussions/{id}/notes`
+    without any extra read. This is the exact flow that was broken on
+    GitLab live (#43 comment 4511603938)."""
+    seen: list[tuple[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        seen.append((req.method, req.url.path))
+        if req.method == "GET" and url.endswith("merge_requests/5"):
+            return _json(
+                _mr_payload(
+                    5,
+                    diff_refs={"base_sha": "b", "start_sha": "s", "head_sha": "h"},
+                )
+            )
+        if req.method == "POST" and url.endswith("merge_requests/5/discussions"):
+            return _json({
+                "id": "disc-real-id",
+                "notes": [{
+                    "id": 10, "body": "starter",
+                    "author": {"username": "alice"}, "created_at": "t",
+                    "web_url": "url",
+                }],
+            })
+        if (
+            req.method == "POST"
+            and "/discussions/disc-real-id/notes" in req.url.path
+        ):
+            return _json({
+                "id": 11, "body": "reply",
+                "author": {"username": "alice"}, "created_at": "t",
+                "web_url": "url",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    provider = GitLabProvider()
+    starter = provider.add_pr_review_comment(
+        _project(), "t", "5",
+        body="starter", path="src/foo.py", line=1, commit_sha="h",
+    )
+    assert starter.discussion_id == "disc-real-id"
+    reply = provider.add_pr_review_comment(
+        _project(), "t", "5",
+        body="reply", in_reply_to=starter.discussion_id,
+    )
+    assert reply.discussion_id == "disc-real-id"
+    # Sanity: the reply POST went to the right discussion path.
+    assert any(
+        m == "POST" and p.endswith("/discussions/disc-real-id/notes")
+        for m, p in seen
+    )
 
 
 # ---------- submit_pr_review (ticket #43 C) --------------------------------

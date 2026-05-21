@@ -126,6 +126,14 @@ def _map_comment(raw: dict) -> Comment:
 def _map_review_comment(raw: dict) -> ReviewComment:
     """Translate a GitHub `/pulls/{n}/comments` item into `ReviewComment`."""
     in_reply_to = raw.get("in_reply_to_id")
+    # discussion_id = thread anchor (= what caller passes to in_reply_to
+    # when replying). On GitHub there is no separate discussion entity:
+    # the top-of-thread note's id IS the anchor. Reply notes carry
+    # `in_reply_to_id` pointing at that anchor; first notes are their
+    # own anchor.
+    discussion_id = (
+        str(in_reply_to) if in_reply_to is not None else str(raw.get("id", ""))
+    )
     return ReviewComment(
         id=str(raw.get("id", "")),
         author=(raw.get("user") or {}).get("login", ""),
@@ -139,6 +147,7 @@ def _map_review_comment(raw: dict) -> ReviewComment:
         created_at=raw.get("created_at") or "",
         updated_at=raw.get("updated_at") or "",
         url=raw.get("html_url") or "",
+        discussion_id=discussion_id,
     )
 
 

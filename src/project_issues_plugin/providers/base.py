@@ -221,6 +221,13 @@ class ReviewComment:
         reply to, or `None` for new threads. On GitHub this is the
         parent comment id; on GitLab it is the discussion id (so
         multiple notes in the same discussion share the same value).
+      - `discussion_id`: the thread anchor — the value to pass as
+        `in_reply_to` when replying. Provider-uniform semantic: every
+        note in the same thread carries the same `discussion_id`,
+        regardless of provider. On GitHub the value is the top-of-thread
+        note id (`in_reply_to_id` for replies, own `id` for the first
+        note); on GitLab it is the actual discussion id from the
+        `/discussions` endpoint.
     """
 
     id: str
@@ -235,6 +242,7 @@ class ReviewComment:
     created_at: str = ""
     updated_at: str = ""
     url: str = ""
+    discussion_id: str | None = None
 
 
 ReviewState = Literal["approve", "request_changes", "comment"]

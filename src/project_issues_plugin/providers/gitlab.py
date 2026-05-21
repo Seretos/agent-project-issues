@@ -1453,9 +1453,14 @@ class GitLabProvider(TokenCapabilityProvider):
                 params={"per_page": 100, "sort": "asc", "order_by": "created_at"},
             )
             _check(c)
+            # Positional (diff-anchored) notes are surfaced via
+            # `list_pr_review_comments` as `ReviewComment`. Keep this
+            # list to true discussion-only notes — mirrors GitHub where
+            # the issue-comments and review-comments endpoints are
+            # physically separate.
             comments = [
                 _map_note(it, project) for it in c.json()
-                if not it.get("system", False)
+                if not it.get("system", False) and not it.get("position")
             ]
         return pr, comments
 
@@ -1475,9 +1480,11 @@ class GitLabProvider(TokenCapabilityProvider):
         """Create a merge request with the AI-generated marker.
 
         Body prefix + `ai-generated` label applied. `draft` translates
-        to the GitLab `draft` param (supported 14.x+). Older GitLab
-        instances ignored the param and required a `Draft: ` title
-        prefix; we don't synthesize that prefix here.
+        to the GitLab `draft` param (supported 14.x+) AND mirrored as
+        a `Draft: ` title prefix. The `draft` param is silently ignored
+        on some GitLab setups (observed during ticket #43 live-verify);
+        the title prefix is the canonical signal GitLab itself uses
+        for `detailed_merge_status="draft_status"`, so it always sticks.
         """
         merged_labels = list(dict.fromkeys([*(labels or []), AI_GENERATED_LABEL]))
         prefixed_body = ensure_body_prefix(body)
@@ -1495,6 +1502,9 @@ class GitLabProvider(TokenCapabilityProvider):
             }
             if draft:
                 payload["draft"] = True
+                payload["title"] = _apply_draft_prefix(
+                    payload["title"], draft=True,
+                )
             if merged_labels:
                 payload["labels"] = ",".join(merged_labels)
             if assignee_ids:
@@ -1690,6 +1700,7 @@ class GitLabProvider(TokenCapabilityProvider):
                         created_at=note.get("created_at") or "",
                         updated_at=note.get("updated_at") or "",
                         url=note.get("web_url") or "",
+                        discussion_id=discussion_id,
                     ))
             return out
 
@@ -1739,6 +1750,8 @@ class GitLabProvider(TokenCapabilityProvider):
                     created_at=note_raw.get("created_at") or "",
                     updated_at=note_raw.get("updated_at") or "",
                     url=note_raw.get("web_url") or "",
+                    # Thread anchor is the discussion the reply joined.
+                    discussion_id=in_reply_to,
                 )
 
             # New thread — GitLab needs base_sha and start_sha alongside
@@ -1766,6 +1779,11 @@ class GitLabProvider(TokenCapabilityProvider):
             _check(r)
             disc_raw = r.json()
             note_raw = (disc_raw.get("notes") or [{}])[0]
+            # disc_raw["id"] is the discussion anchor — surface it so
+            # callers can reply via `in_reply_to=<discussion_id>` without
+            # a second GET. Without this the discussion id is unreachable
+            # on a freshly-created thread (live-verify bug from #43).
+            discussion_id = str(disc_raw.get("id", ""))
             return ReviewComment(
                 id=str(note_raw.get("id", "")),
                 author=(note_raw.get("author") or {}).get("username", ""),
@@ -1778,6 +1796,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 created_at=note_raw.get("created_at") or "",
                 updated_at=note_raw.get("updated_at") or "",
                 url=note_raw.get("web_url") or "",
+                discussion_id=discussion_id or None,
             )
 
     def submit_pr_review(

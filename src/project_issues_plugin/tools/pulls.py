@@ -267,8 +267,14 @@ def register(mcp: FastMCP) -> None:
         Two modes — exactly one set of arguments must be provided:
           - **New thread**: pass `path`, `line`, and `commit_sha`. Leave
             `in_reply_to` unset.
-          - **Reply**: pass `in_reply_to=<parent comment id (GitHub) /
-            discussion id (GitLab)>`. Leave the positional args unset.
+          - **Reply**: pass `in_reply_to=<discussion_id>`. Leave the
+            positional args unset. Read `discussion_id` off any
+            `review_comment` you got from `get_pr` (or off the return
+            value of a fresh `add_pr_review_comment` new-thread call);
+            it's provider-uniform — same shape and same usage on
+            GitHub and GitLab. (Internally GitHub uses the top-of-thread
+            note id and GitLab uses the actual discussion id, but the
+            field hides that split.)
 
         `side` is `"RIGHT"` (default) for the post-change side of the
         diff or `"LEFT"` for the pre-change side. GitLab ignores it and

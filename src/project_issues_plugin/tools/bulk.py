@@ -21,6 +21,7 @@ from project_issues_plugin.config import ProjectConfig, load_projects, resolve_t
 from project_issues_plugin.providers.base import TicketFilters
 from project_issues_plugin.providers.github import GitHubError
 from project_issues_plugin.tools._providers import _provider_for
+from project_issues_plugin.tools._slicing import apply_body_knobs
 
 
 def _resolve_local(project_id: str, projects: list[ProjectConfig]) -> ProjectConfig:
@@ -40,7 +41,9 @@ def register(mcp: FastMCP) -> None:
         assignee: str | None = None,
         author: str | None = None,
         search: str | None = None,
-        limit_per_project: int = 30,
+        limit_per_project: int = 10,
+        omit_body: bool = False,
+        body_max_chars: int | None = None,
     ) -> dict:
         """List tickets across multiple projects in a single call.
 
@@ -53,6 +56,17 @@ def register(mcp: FastMCP) -> None:
         `search`) and `limit_per_project` are applied per-project with
         the same semantics as `list_tickets`. `limit_per_project` caps
         the result count for each project independently.
+
+        Default `limit_per_project` is `10` (ticket #50) — the fan-out
+        shape multiplies the body-row cost, so this is the conservative
+        default. Bump it explicitly when you need more.
+
+        Token-cheap knobs (ticket #50):
+          - `omit_body=True`: drop the `body` field from every row
+            across every project. Recommended when enumerating titles
+            / labels to decide which tickets to drill into.
+          - `body_max_chars=N`: truncate each row's body to N chars
+            and add `body_truncated: bool` per row.
 
         The call is partial-failure tolerant: when one project errors
         (missing token, permission denied, API failure, unknown id), the
@@ -91,6 +105,11 @@ def register(mcp: FastMCP) -> None:
                 token = resolve_token(project)
                 tickets = provider.list_tickets(project, token, filters)
                 ticket_dicts = [asdict(t) for t in tickets]
+                ticket_dicts = apply_body_knobs(
+                    ticket_dicts,
+                    omit_body=omit_body,
+                    body_max_chars=body_max_chars,
+                )
                 results[pid] = {"tickets": ticket_dicts, "error": None}
                 total_tickets += len(ticket_dicts)
             except (LookupError, PermissionError, NotImplementedError, GitHubError) as exc:

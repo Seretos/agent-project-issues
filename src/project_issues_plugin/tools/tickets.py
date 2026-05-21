@@ -24,6 +24,10 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _safe,
 )
+from project_issues_plugin.tools._slicing import (
+    apply_body_knobs,
+    apply_order,
+)
 
 # TTL cache for `list_ticket_statuses`. Status workflows are static for
 # GitHub/GitLab and only change on ADO when a project admin edits the
@@ -55,6 +59,8 @@ def register(mcp: FastMCP) -> None:
         updated_before: str | None = None,
         sort_by: Literal["created", "updated", "comments"] = "created",
         sort_order: Literal["asc", "desc"] = "desc",
+        omit_body: bool = False,
+        body_max_chars: int | None = None,
     ) -> dict:
         """List tickets in a project. Default: open tickets, limit 30.
 
@@ -72,6 +78,15 @@ def register(mcp: FastMCP) -> None:
           - `sort_by`: `"created"` (default), `"updated"`, or `"comments"`.
           - `sort_order`: `"desc"` (default) or `"asc"`.
           - `limit`: capped at the provider's max page size (100).
+
+        Token-cheap knobs (ticket #50):
+          - `omit_body=True`: drop the `body` field from every row.
+            Use this when discovering ticket ids / titles / labels
+            before deciding which ones to `get_ticket` — the response
+            is ~10x smaller for bodies in the 2-10 KB range.
+          - `body_max_chars=N`: truncate each row's body to N chars
+            and add `body_truncated: bool` so you can tell the body
+            is a prefix.
 
         Routing caveat: when any of `not_labels`, `author`,
         `created_*`, `updated_*`, or `search` is set, the provider
@@ -102,9 +117,13 @@ def register(mcp: FastMCP) -> None:
                     sort_order=sort_order,
                 ),
             )
+            rows = [asdict(t) for t in tickets]
+            rows = apply_body_knobs(
+                rows, omit_body=omit_body, body_max_chars=body_max_chars,
+            )
             return {
                 "project_id": project.id,
-                "tickets": [asdict(t) for t in tickets],
+                "tickets": rows,
             }
         return _safe(go)
 
@@ -113,6 +132,10 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         ticket_id: str,
         include_relations: bool = True,
+        include_comments: bool = True,
+        comments_limit: int | None = None,
+        comments_order: Literal["asc", "desc"] = "asc",
+        comments_body_max_chars: int | None = None,
     ) -> dict:
         """Get a ticket's full details, including all comments and relations.
 
@@ -135,6 +158,19 @@ def register(mcp: FastMCP) -> None:
         `0` = body only, `N` = first N comments).
         Set `include_relations=False` to save two API calls per request
         when relation context is not needed.
+
+        Comment-slicing knobs (ticket #50):
+          - `include_comments=False`: skip the `comments` list entirely
+            (returns `[]`). Use when you only need the ticket header.
+          - `comments_limit=N`: cap the returned comments to N. Combined
+            with `comments_order="desc"` gives the last N comments.
+            `comments_limit=0` is an alias for `include_comments=False`.
+          - `comments_order="asc"|"desc"`: reverse the comments list.
+            `desc` returns newest-first; pair with `comments_limit=N`
+            for the "give me the most recent N" recipe.
+          - `comments_body_max_chars=N`: truncate each comment body to
+            N chars and add `body_truncated: bool`. Highest-leverage
+            saving for dense threads.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -144,10 +180,24 @@ def register(mcp: FastMCP) -> None:
             ticket, comments, relations, truncated = provider.get_ticket(
                 project, token, normalized_id, include_relations=include_relations,
             )
+            # Apply the comment-slicing knobs.
+            drop_comments = (not include_comments) or comments_limit == 0
+            if drop_comments:
+                comment_rows: list[dict] = []
+            else:
+                ordered = apply_order(comments, comments_order)
+                if comments_limit is not None and comments_limit > 0:
+                    ordered = ordered[:comments_limit]
+                comment_rows = [asdict(c) for c in ordered]
+                comment_rows = apply_body_knobs(
+                    comment_rows,
+                    omit_body=False,
+                    body_max_chars=comments_body_max_chars,
+                )
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
-                "comments": [asdict(c) for c in comments],
+                "comments": comment_rows,
                 "relations": [asdict(rel) for rel in relations],
                 "relations_truncated": truncated,
             }

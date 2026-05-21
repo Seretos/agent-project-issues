@@ -31,6 +31,10 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _safe,
 )
+from project_issues_plugin.tools._slicing import (
+    apply_body_knobs,
+    apply_order,
+)
 
 
 def register(mcp: FastMCP) -> None:
@@ -44,6 +48,8 @@ def register(mcp: FastMCP) -> None:
         base: str | None = None,
         search: str | None = None,
         limit: int = 30,
+        omit_body: bool = False,
+        body_max_chars: int | None = None,
     ) -> dict:
         """List pull requests in a project. Default: open PRs, limit 30.
 
@@ -55,6 +61,11 @@ def register(mcp: FastMCP) -> None:
           - `base`: filter by target branch.
           - `search`: free-text query (GitHub search syntax, scoped to PRs).
           - `limit`: capped at the provider's max page size (100).
+
+        Token-cheap knobs (ticket #50):
+          - `omit_body=True`: drop the `body` field from every row.
+          - `body_max_chars=N`: truncate each row's body to N chars
+            and add `body_truncated: bool`.
 
         Routing caveat: when `labels`, `assignee`, or `search` are set
         the provider switches from the cheap `/repos/.../pulls` endpoint
@@ -78,14 +89,25 @@ def register(mcp: FastMCP) -> None:
                     limit=limit,
                 ),
             )
+            rows = [asdict(pr) for pr in prs]
+            rows = apply_body_knobs(
+                rows, omit_body=omit_body, body_max_chars=body_max_chars,
+            )
             return {
                 "project_id": project.id,
-                "pull_requests": [asdict(pr) for pr in prs],
+                "pull_requests": rows,
             }
         return _safe(go)
 
     @mcp.tool()
-    def get_pr(project_id: str, pr_id: str) -> dict:
+    def get_pr(
+        project_id: str,
+        pr_id: str,
+        include_comments: bool = True,
+        comments_limit: int | None = None,
+        comments_order: Literal["asc", "desc"] = "asc",
+        comments_body_max_chars: int | None = None,
+    ) -> dict:
         """Get a pull request's details, discussion, and inline review comments.
 
         The response carries three lists:
@@ -98,6 +120,14 @@ def register(mcp: FastMCP) -> None:
             comments (`/pulls/{n}/comments` on GitHub, positional MR
             discussion notes on GitLab). Each carries `path`, `line`,
             `commit_sha`, and an `in_reply_to` for threaded replies.
+
+        Comment-slicing knobs (ticket #50) — apply to the discussion
+        `comments` list, not the inline `review_comments`:
+          - `include_comments=False`: returns `comments: []` and skips
+            the per-comment body fetch entirely.
+          - `comments_limit=N`: cap to N (0 == include_comments=False).
+          - `comments_order="asc"|"desc"`: reverse the list.
+          - `comments_body_max_chars=N`: truncate each comment body.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -108,10 +138,23 @@ def register(mcp: FastMCP) -> None:
             review_comments = provider.list_pr_review_comments(
                 project, token, normalized_pr,
             )
+            drop_comments = (not include_comments) or comments_limit == 0
+            if drop_comments:
+                comment_rows: list[dict] = []
+            else:
+                ordered = apply_order(comments, comments_order)
+                if comments_limit is not None and comments_limit > 0:
+                    ordered = ordered[:comments_limit]
+                comment_rows = [asdict(c) for c in ordered]
+                comment_rows = apply_body_knobs(
+                    comment_rows,
+                    omit_body=False,
+                    body_max_chars=comments_body_max_chars,
+                )
             return {
                 "project_id": project.id,
                 "pull_request": asdict(pr),
-                "comments": [asdict(c) for c in comments],
+                "comments": comment_rows,
                 "review_comments": [asdict(c) for c in review_comments],
             }
         return _safe(go)

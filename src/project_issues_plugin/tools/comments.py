@@ -32,7 +32,7 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _safe,
 )
-from project_issues_plugin.tools._slicing import apply_order
+from project_issues_plugin.tools._slicing import apply_body_knobs, apply_order
 
 
 def register(mcp: FastMCP) -> None:
@@ -44,6 +44,8 @@ def register(mcp: FastMCP) -> None:
         order: Literal["asc", "desc"] = "asc",
         since: str | None = None,
         page: int = 1,
+        omit_body: bool = False,
+        body_max_chars: int | None = None,
     ) -> dict:
         """List comments on a ticket. Default: oldest-first, limit 30 (cap 100).
 
@@ -64,6 +66,11 @@ def register(mcp: FastMCP) -> None:
             provider's pagination header (GitHub `Link rel=next`,
             GitLab `X-Next-Page`).
 
+        Token-cheap knobs (ticket #50):
+          - `omit_body=True`: drop the `body` field from every row.
+          - `body_max_chars=N`: truncate each comment body to N chars
+            and add `body_truncated: bool` per row.
+
         Read-only: requires a token only if the repo is private.
         """
         def go() -> dict:
@@ -76,10 +83,14 @@ def register(mcp: FastMCP) -> None:
                 limit=limit, since=since, page=page,
             )
             ordered = apply_order(comments, order)
+            rows = [asdict(c) for c in ordered]
+            rows = apply_body_knobs(
+                rows, omit_body=omit_body, body_max_chars=body_max_chars,
+            )
             return {
                 "project_id": project.id,
                 "ticket_id": normalized_id,
-                "comments": [asdict(c) for c in ordered],
+                "comments": rows,
                 "page": page,
                 "has_more": has_more,
             }

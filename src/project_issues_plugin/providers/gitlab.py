@@ -887,7 +887,10 @@ def _fetch_relations(
                 kind=kind,
                 ref=target_project,
                 title=link.get("title", "") or "",
-                url=link.get("web_url", "") or "",
+                # Canonicalise so relations[*].url uses the same
+                # /-/issues/N form as ticket / comment URLs
+                # (ticket #49 F4 side-finding from test-agent live-verify).
+                url=_canonical_url(link.get("web_url", "") or "", project),
                 state="opened" if link.get("state") == "opened" else (
                     "closed" if link.get("state") == "closed" else ""
                 ),
@@ -904,7 +907,7 @@ def _fetch_relations(
                 kind="closed_by",
                 ref=f"#{mr_iid}",
                 title=mr.get("title", "") or "",
-                url=mr.get("web_url", "") or "",
+                url=_canonical_url(mr.get("web_url", "") or "", project),
                 state=mr.get("state", "") or "",
                 is_pull_request=True,
             ))

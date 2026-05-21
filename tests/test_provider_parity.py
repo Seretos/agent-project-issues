@@ -160,6 +160,62 @@ def test_canonical_url_noop_when_path_already_lowercase():
     assert _canonical_url(url, p) == url
 
 
+def test_gitlab_relations_url_canonicalised(monkeypatch):
+    """Side-finding on #49 F4 from test-agent live-verify:
+    `relations[*].url` from the issue-links and closed_by endpoints
+    still showed `/-/work_items/N` because `_fetch_relations` bypassed
+    `_canonical_url`. Both code paths now route through it."""
+    issue_with_link = {
+        "iid": 5, "title": "T", "description": "",
+        "state": "opened", "author": {"username": "a"},
+        "assignees": [], "labels": [],
+        "web_url": "https://gitlab.com/seredos/gitlab-tests/-/issues/5",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z",
+    }
+    link_row = {
+        "iid": 7,
+        "title": "Other",
+        "state": "opened",
+        "link_type": "blocks",
+        "references": {"relative": "#7"},
+        # Same shape as live GitLab — the link's web_url comes back in
+        # the work_items beta family.
+        "web_url": "https://gitlab.com/Seredos/gitlab-tests/-/work_items/7",
+    }
+    closed_by_mr = {
+        "iid": 9,
+        "title": "Auto-close MR",
+        "state": "merged",
+        "web_url": "https://gitlab.com/Seredos/gitlab-tests/-/merge_requests/9",
+    }
+
+    def handler(req):
+        if req.url.path.endswith("/issues/5/notes"):
+            return _resp([])
+        if req.url.path.endswith("/issues/5/links"):
+            return _resp([link_row])
+        if req.url.path.endswith("/issues/5/closed_by"):
+            return _resp([closed_by_mr])
+        if req.url.path.endswith("/issues/5"):
+            return _resp(issue_with_link)
+        return _resp({}, 404)
+
+    _install_gitlab_mock(monkeypatch, handler)
+    _ticket, _comments, relations, _trunc = GitLabProvider().get_ticket(
+        _gitlab_project(), "t", "5", include_relations=True,
+    )
+    by_kind = {r.kind: r for r in relations}
+    # `blocks` relation URL canonicalised: lowercase path AND `/-/issues/`.
+    assert by_kind["blocks"].url == (
+        "https://gitlab.com/seredos/gitlab-tests/-/issues/7"
+    )
+    # `closed_by` MR keeps the merge_requests family but path is lowercased.
+    assert by_kind["closed_by"].url == (
+        "https://gitlab.com/seredos/gitlab-tests/-/merge_requests/9"
+    )
+
+
 def test_gitlab_map_issue_canonicalises_ticket_url(monkeypatch):
     """End-to-end: a get_ticket response returns a canonicalised URL."""
     issue = {

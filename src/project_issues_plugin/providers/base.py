@@ -145,6 +145,28 @@ class PullRequest:
 
     `id` is the PR number as a string (mirrors `Ticket.id` style).
     `mergeable` is `None` when GitHub has not yet computed mergeability.
+
+    Provider-specific fields are nullable on the other provider:
+
+    Shared:
+      - `merge_commit_sha`: the SHA of the merge commit once merged.
+
+    GitHub-only (always `None` on GitLab payloads):
+      - `mergeable_state`: GitHub's qualitative state — `clean`, `dirty`,
+        `behind`, `unstable`, `blocked`, `draft`, `unknown`.
+      - `review_decision`: `APPROVED` / `REVIEW_REQUIRED` /
+        `CHANGES_REQUESTED`. Sourced from GraphQL only; the REST `_map_pr`
+        path leaves it `None`.
+      - `auto_merge`: GitHub's auto-merge configuration block (or `None`
+        when auto-merge is not enabled).
+
+    GitLab-only (always `None` on GitHub payloads):
+      - `detailed_merge_status`: GitLab's qualitative state — `mergeable`,
+        `broken_status`, `ci_must_pass`, `discussions_not_resolved`, etc.
+      - `pipeline_status`: head-pipeline status (`success`, `failed`,
+        `running`, ...). `None` when no pipeline is attached.
+      - `approvals_required` / `approvals_received`: GitLab approval
+        counts (Premium+); both `None` on free tier.
     """
 
     id: str
@@ -165,6 +187,79 @@ class PullRequest:
     url: str
     created_at: str
     updated_at: str
+    mergeable_state: str | None = None
+    merge_commit_sha: str | None = None
+    review_decision: str | None = None
+    auto_merge: dict | None = None
+    detailed_merge_status: str | None = None
+    pipeline_status: str | None = None
+    approvals_required: int | None = None
+    approvals_received: int | None = None
+
+
+@dataclass
+class ReviewComment:
+    """An inline (code-review) comment on a pull-request diff.
+
+    Distinct from `Comment`, which is the issue-style discussion
+    comment. Review comments are anchored to a file path and a line in
+    the diff and are organised into threads (`in_reply_to`).
+
+    Field semantics:
+      - `path`: file path the comment is attached to. `None` only for
+        legacy GitLab notes that lost their position metadata.
+      - `line`: line number on the post-change ("RIGHT") side of the
+        diff. `None` when the position is unresolvable (e.g. outdated
+        comment whose anchor moved out of the latest diff).
+      - `original_line`: the line as of `original_commit_sha`. GitHub
+        only; GitLab leaves it `None`.
+      - `side`: `"LEFT"` for a deletion-side anchor, `"RIGHT"` for the
+        addition side. `None` for GitLab (uses `old_line`/`new_line`
+        directly).
+      - `commit_sha`: the diff base the comment was anchored against.
+      - `in_reply_to`: the id of the comment / discussion this is a
+        reply to, or `None` for new threads. On GitHub this is the
+        parent comment id; on GitLab it is the discussion id (so
+        multiple notes in the same discussion share the same value).
+    """
+
+    id: str
+    author: str
+    body: str
+    path: str | None
+    line: int | None
+    original_line: int | None = None
+    side: str | None = None
+    commit_sha: str = ""
+    in_reply_to: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    url: str = ""
+
+
+ReviewState = Literal["approve", "request_changes", "comment"]
+
+
+@dataclass
+class Review:
+    """A pull-request review submission.
+
+    `state` is normalized to provider-agnostic lower-case values:
+    `"approve"`, `"request_changes"`, `"comment"`. GitHub's enum maps
+    directly; GitLab's discrete endpoints (`approve` / `unapprove` +
+    note) are synthesised into the same surface.
+
+    `commit_sha` is set only when the provider pins reviews to a
+    specific commit (GitHub). GitLab leaves it `None`.
+    """
+
+    id: str
+    state: ReviewState
+    author: str
+    body: str
+    url: str
+    submitted_at: str
+    commit_sha: str | None = None
 
 
 @dataclass

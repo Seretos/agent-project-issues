@@ -53,6 +53,8 @@ from project_issues_plugin.providers.base import (
     PullRequest,
     Relation,
     RelationKindUnsupported,
+    Review,
+    ReviewComment,
     Status,
     StatusSpec,
     Ticket,
@@ -301,6 +303,8 @@ def _map_mr(raw: dict) -> PullRequest:
         # but we don't surface that to keep the shape uniform.
         "sha": "",
     }
+    head_pipeline = raw.get("head_pipeline") or raw.get("pipeline") or {}
+    pipeline_status = head_pipeline.get("status") if head_pipeline else None
     return PullRequest(
         id=str(raw["iid"]),
         number=int(raw["iid"]),
@@ -322,6 +326,11 @@ def _map_mr(raw: dict) -> PullRequest:
         url=raw.get("web_url") or "",
         created_at=raw.get("created_at") or "",
         updated_at=raw.get("updated_at") or "",
+        merge_commit_sha=raw.get("merge_commit_sha"),
+        detailed_merge_status=raw.get("detailed_merge_status"),
+        pipeline_status=pipeline_status,
+        approvals_required=raw.get("approvals_required"),
+        approvals_received=raw.get("approvals_received"),
     )
 
 
@@ -602,6 +611,24 @@ def _status_to_state_event(status: Status) -> str:
         f"unsupported status {status!r} for GitLab — accepted: "
         f"open, closed, closed:completed, closed:not_planned"
     )
+
+
+_DRAFT_PREFIX_RE = re.compile(
+    r"^\s*(?:Draft:\s*|WIP:\s*|\[Draft\]\s*|\[WIP\]\s*|\(Draft\)\s*)",
+    re.IGNORECASE,
+)
+
+
+def _apply_draft_prefix(title: str, draft: bool) -> str:
+    """Add/remove GitLab's `Draft: ` title prefix.
+
+    GitLab signals draft state via a title prefix rather than a flag.
+    Modern GitLab canonicalises to `Draft: `; legacy values (`WIP: `,
+    `[Draft]`, `[WIP]`, `(Draft)`) are stripped on the way out so the
+    surface stays clean regardless of historic state.
+    """
+    stripped = _DRAFT_PREFIX_RE.sub("", title)
+    return f"Draft: {stripped}" if draft else stripped
 
 
 def _resolve_assignee_ids(
@@ -1443,6 +1470,7 @@ class GitLabProvider(TokenCapabilityProvider):
         draft: bool = False,
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
+        requested_reviewers: list[str] | None = None,
     ) -> PullRequest:
         """Create a merge request with the AI-generated marker.
 
@@ -1456,6 +1484,9 @@ class GitLabProvider(TokenCapabilityProvider):
         path = _project_path(project)
         with _client(project, token) as client:
             assignee_ids = _resolve_assignee_ids(client, assignees or [])
+            reviewer_ids = _resolve_assignee_ids(
+                client, requested_reviewers or [],
+            )
             payload: dict[str, Any] = {
                 "title": title,
                 "description": prefixed_body,
@@ -1468,6 +1499,8 @@ class GitLabProvider(TokenCapabilityProvider):
                 payload["labels"] = ",".join(merged_labels)
             if assignee_ids:
                 payload["assignee_ids"] = assignee_ids
+            if reviewer_ids:
+                payload["reviewer_ids"] = reviewer_ids
             r = client.post(f"/projects/{path}/merge_requests", json=payload)
             _check(r)
             return _map_mr(r.json())
@@ -1486,12 +1519,20 @@ class GitLabProvider(TokenCapabilityProvider):
         labels_remove: list[str] | None = None,
         assignees_add: list[str] | None = None,
         assignees_remove: list[str] | None = None,
+        reviewers_add: list[str] | None = None,
+        reviewers_remove: list[str] | None = None,
+        draft: bool | None = None,
     ) -> PullRequest:
-        """Update an MR's metadata, status, base branch, labels, assignees.
+        """Update an MR's metadata, status, base branch, labels, assignees, reviewers.
 
         `status` accepts only `"open"` / `"closed"`. Use `merge_pr` to
         merge — `status="merged"` is rejected. Reopening a merged MR is
         not possible in GitLab; the API rejects the call.
+
+        `draft` toggles draft state via title-prefix manipulation, which
+        is how GitLab models drafts. Any combination of explicit `title`
+        change + `draft` flip is supported: the prefix is applied to
+        whichever title ends up being sent.
 
         `ai-modified` is added when the MR wasn't tagged `ai-generated`
         — mirrors `update_ticket`.
@@ -1513,6 +1554,9 @@ class GitLabProvider(TokenCapabilityProvider):
             payload: dict[str, Any] = {}
             if title is not None:
                 payload["title"] = title
+            if draft is not None:
+                base_title = payload.get("title", current.get("title", ""))
+                payload["title"] = _apply_draft_prefix(base_title, draft)
             if body is not None:
                 # Ticket #44: re-stamp body marker to match label state.
                 payload["description"] = apply_body_marker(
@@ -1551,6 +1595,20 @@ class GitLabProvider(TokenCapabilityProvider):
                     client, sorted(final_usernames),
                 )
 
+            if reviewers_add or reviewers_remove:
+                current_reviewers = {
+                    r.get("username", "")
+                    for r in (current.get("reviewers") or [])
+                }
+                final_reviewer_names = set(current_reviewers)
+                if reviewers_add:
+                    final_reviewer_names.update(reviewers_add)
+                if reviewers_remove:
+                    final_reviewer_names.difference_update(reviewers_remove)
+                payload["reviewer_ids"] = _resolve_assignee_ids(
+                    client, sorted(final_reviewer_names),
+                )
+
             if not payload:
                 return _map_mr(current)
             r = client.put(
@@ -1576,6 +1634,263 @@ class GitLabProvider(TokenCapabilityProvider):
             )
             _check(r)
             return _map_note(r.json(), project)
+
+    def list_pr_review_comments(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+    ) -> list[ReviewComment]:
+        """List inline diff-anchored notes on an MR.
+
+        Fetches `GET /projects/:id/merge_requests/:iid/discussions` and
+        flattens it to one `ReviewComment` per note. Diff notes have a
+        `position` object; non-positional notes (the regular discussion
+        thread) are skipped so this surface stays focused on inline
+        code-review comments.
+
+        Threading: the first note in a discussion has `in_reply_to=None`;
+        replies share the same `discussion.id` and carry it as their
+        `in_reply_to` value. This mirrors the GitHub model where replies
+        carry the parent comment id.
+        """
+        path = _project_path(project)
+        with _client(project, token) as client:
+            r = client.get(
+                f"/projects/{path}/merge_requests/{pr_id}/discussions",
+                params={"per_page": 100},
+            )
+            _check(r)
+            out: list[ReviewComment] = []
+            for disc in r.json():
+                notes = disc.get("notes") or []
+                if not notes:
+                    continue
+                # Only surface diff-anchored discussions — the first
+                # note's position tells us whether this thread lives on
+                # the diff or is a plain MR conversation.
+                first_position = notes[0].get("position")
+                if not first_position:
+                    continue
+                discussion_id = str(disc.get("id", ""))
+                for idx, note in enumerate(notes):
+                    pos = note.get("position") or first_position or {}
+                    out.append(ReviewComment(
+                        id=str(note.get("id", "")),
+                        author=(note.get("author") or {}).get("username", ""),
+                        body=note.get("body") or "",
+                        path=pos.get("new_path") or pos.get("old_path"),
+                        line=pos.get("new_line"),
+                        original_line=pos.get("old_line"),
+                        side=None,
+                        commit_sha=pos.get("head_sha")
+                        or pos.get("base_sha")
+                        or "",
+                        in_reply_to=None if idx == 0 else discussion_id,
+                        created_at=note.get("created_at") or "",
+                        updated_at=note.get("updated_at") or "",
+                        url=note.get("web_url") or "",
+                    ))
+            return out
+
+    def add_pr_review_comment(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        body: str,
+        path: str | None = None,
+        line: int | None = None,
+        side: str = "RIGHT",
+        commit_sha: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> ReviewComment:
+        """Add an inline review comment.
+
+        Routing:
+          - **Reply** (`in_reply_to=<discussion_id>`): POST
+            `.../discussions/{discussion_id}/notes` with the body only.
+          - **New thread**: POST `.../discussions` with a `position`
+            object carrying `base_sha` (read from the MR), `start_sha`
+            (same), `head_sha` (= `commit_sha`), `new_path`/`old_path`
+            (= `path`), `new_line` (= `line`), and `position_type=text`.
+
+        New-thread mode requires `path`, `line`, and `commit_sha` to be
+        set; the caller (tool layer) validates that.
+        """
+        prefixed = ensure_comment_prefix(body)
+        repo_path = _project_path(project)
+        with _client(project, token) as client:
+            if in_reply_to is not None:
+                r = client.post(
+                    f"/projects/{repo_path}/merge_requests/{pr_id}"
+                    f"/discussions/{in_reply_to}/notes",
+                    json={"body": prefixed},
+                )
+                _check(r)
+                note_raw = r.json()
+                return ReviewComment(
+                    id=str(note_raw.get("id", "")),
+                    author=(note_raw.get("author") or {}).get("username", ""),
+                    body=note_raw.get("body") or "",
+                    path=None,
+                    line=None,
+                    in_reply_to=in_reply_to,
+                    created_at=note_raw.get("created_at") or "",
+                    updated_at=note_raw.get("updated_at") or "",
+                    url=note_raw.get("web_url") or "",
+                )
+
+            # New thread — GitLab needs base_sha and start_sha alongside
+            # head_sha; fetch them from the MR's diff_refs.
+            mr_r = client.get(
+                f"/projects/{repo_path}/merge_requests/{pr_id}",
+            )
+            _check(mr_r)
+            diff_refs = mr_r.json().get("diff_refs") or {}
+            base_sha = diff_refs.get("base_sha") or commit_sha
+            start_sha = diff_refs.get("start_sha") or commit_sha
+            position = {
+                "base_sha": base_sha,
+                "start_sha": start_sha,
+                "head_sha": commit_sha,
+                "position_type": "text",
+                "new_path": path,
+                "old_path": path,
+                "new_line": line,
+            }
+            r = client.post(
+                f"/projects/{repo_path}/merge_requests/{pr_id}/discussions",
+                json={"body": prefixed, "position": position},
+            )
+            _check(r)
+            disc_raw = r.json()
+            note_raw = (disc_raw.get("notes") or [{}])[0]
+            return ReviewComment(
+                id=str(note_raw.get("id", "")),
+                author=(note_raw.get("author") or {}).get("username", ""),
+                body=note_raw.get("body") or "",
+                path=path,
+                line=line,
+                side=None,
+                commit_sha=commit_sha or "",
+                in_reply_to=None,
+                created_at=note_raw.get("created_at") or "",
+                updated_at=note_raw.get("updated_at") or "",
+                url=note_raw.get("web_url") or "",
+            )
+
+    def submit_pr_review(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        state: str,
+        body: str | None = None,
+        commit_sha: str | None = None,
+    ) -> Review:
+        """Submit an MR review.
+
+        GitLab models review state via separate endpoints rather than
+        an enum, so we translate `state` into the matching call:
+
+          - `"approve"`         → POST `.../approve` (no body required).
+            If `body` is provided, it is posted as a note as well so
+            the rationale survives.
+          - `"comment"`         → POST `.../notes` (body required).
+          - `"request_changes"` → POST `.../unapprove` (best-effort —
+            ignored if the user wasn't approved) followed by
+            POST `.../notes`. Body is required so the request is
+            actionable.
+
+        `commit_sha` is accepted for surface symmetry with GitHub but
+        not used; GitLab MR reviews aren't pinned to a commit.
+        """
+        if state not in ("approve", "request_changes", "comment"):
+            raise ValueError(
+                f"unsupported review state {state!r} — accepted: "
+                f"['approve', 'comment', 'request_changes']"
+            )
+        if state in ("comment", "request_changes") and not body:
+            raise ValueError(
+                f"a review body is required when state={state!r}"
+            )
+        path = _project_path(project)
+        with _client(project, token) as client:
+            if state == "approve":
+                r = client.post(
+                    f"/projects/{path}/merge_requests/{pr_id}/approve",
+                )
+                _check(r)
+                note_raw: dict | None = None
+                if body:
+                    prefixed = ensure_comment_prefix(body)
+                    rn = client.post(
+                        f"/projects/{path}/merge_requests/{pr_id}/notes",
+                        json={"body": prefixed},
+                    )
+                    _check(rn)
+                    note_raw = rn.json()
+                mr_raw = r.json()
+                return Review(
+                    id=str((note_raw or {}).get("id") or mr_raw.get("iid", "")),
+                    state="approve",
+                    author=((note_raw or {}).get("author") or {}).get(
+                        "username", ""
+                    )
+                    or (mr_raw.get("user") or {}).get("username", ""),
+                    body=(note_raw or {}).get("body", "") if note_raw else "",
+                    url=(note_raw or {}).get("web_url")
+                    or mr_raw.get("web_url")
+                    or "",
+                    submitted_at=(note_raw or {}).get("created_at")
+                    or mr_raw.get("updated_at")
+                    or "",
+                    commit_sha=None,
+                )
+
+            if state == "request_changes":
+                # Best-effort unapprove (404 means we weren't approved
+                # — fine to ignore; any other error must propagate).
+                ru = client.post(
+                    f"/projects/{path}/merge_requests/{pr_id}/unapprove",
+                )
+                if ru.status_code not in (200, 201, 204, 404, 409):
+                    _check(ru)
+                prefixed = ensure_comment_prefix(body or "")
+                rn = client.post(
+                    f"/projects/{path}/merge_requests/{pr_id}/notes",
+                    json={"body": prefixed},
+                )
+                _check(rn)
+                note_raw = rn.json()
+                return Review(
+                    id=str(note_raw.get("id", "")),
+                    state="request_changes",
+                    author=(note_raw.get("author") or {}).get("username", ""),
+                    body=note_raw.get("body", ""),
+                    url=note_raw.get("web_url") or "",
+                    submitted_at=note_raw.get("created_at") or "",
+                    commit_sha=None,
+                )
+
+            # state == "comment"
+            prefixed = ensure_comment_prefix(body or "")
+            rn = client.post(
+                f"/projects/{path}/merge_requests/{pr_id}/notes",
+                json={"body": prefixed},
+            )
+            _check(rn)
+            note_raw = rn.json()
+            return Review(
+                id=str(note_raw.get("id", "")),
+                state="comment",
+                author=(note_raw.get("author") or {}).get("username", ""),
+                body=note_raw.get("body", ""),
+                url=note_raw.get("web_url") or "",
+                submitted_at=note_raw.get("created_at") or "",
+                commit_sha=None,
+            )
 
     def merge_pr(
         self,

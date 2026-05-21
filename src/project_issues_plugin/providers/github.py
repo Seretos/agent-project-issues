@@ -29,6 +29,8 @@ from project_issues_plugin.providers.base import (
     PullRequest,
     Relation,
     RelationKindUnsupported,
+    Review,
+    ReviewComment,
     Status,
     StatusSpec,
     Ticket,
@@ -121,6 +123,25 @@ def _map_comment(raw: dict) -> Comment:
     )
 
 
+def _map_review_comment(raw: dict) -> ReviewComment:
+    """Translate a GitHub `/pulls/{n}/comments` item into `ReviewComment`."""
+    in_reply_to = raw.get("in_reply_to_id")
+    return ReviewComment(
+        id=str(raw.get("id", "")),
+        author=(raw.get("user") or {}).get("login", ""),
+        body=raw.get("body") or "",
+        path=raw.get("path"),
+        line=raw.get("line"),
+        original_line=raw.get("original_line"),
+        side=raw.get("side"),
+        commit_sha=raw.get("commit_id") or raw.get("original_commit_id") or "",
+        in_reply_to=str(in_reply_to) if in_reply_to is not None else None,
+        created_at=raw.get("created_at") or "",
+        updated_at=raw.get("updated_at") or "",
+        url=raw.get("html_url") or "",
+    )
+
+
 def _map_pr(raw: dict) -> PullRequest:
     """Translate a GitHub pull-request payload into a `PullRequest`.
 
@@ -179,6 +200,9 @@ def _map_pr(raw: dict) -> PullRequest:
         url=raw.get("html_url") or "",
         created_at=raw.get("created_at") or "",
         updated_at=raw.get("updated_at") or "",
+        mergeable_state=raw.get("mergeable_state"),
+        merge_commit_sha=raw.get("merge_commit_sha"),
+        auto_merge=raw.get("auto_merge"),
     )
 
 
@@ -609,6 +633,41 @@ def _ref_to_relation(
         state="",
         is_pull_request=False,
     )
+
+
+# ---------- GraphQL helpers ------------------------------------------------
+
+
+_CONVERT_DRAFT_MUTATION = (
+    "mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id})"
+    "{pullRequest{id isDraft}}}"
+)
+_MARK_READY_MUTATION = (
+    "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
+    "{pullRequest{id isDraft}}}"
+)
+
+
+def _set_pr_draft_via_graphql(
+    client: httpx.Client, node_id: str, draft: bool,
+) -> None:
+    """Toggle a PR's draft state via GraphQL.
+
+    GitHub's REST `PATCH /pulls/{n}` does not accept a `draft` field —
+    the only way to flip the state programmatically is the GraphQL
+    `convertPullRequestToDraft` / `markPullRequestReadyForReview`
+    mutations. We POST to `/graphql` on the same client so the test
+    `_client` monkeypatch covers this path too.
+    """
+    query = _CONVERT_DRAFT_MUTATION if draft else _MARK_READY_MUTATION
+    r = client.post(
+        "/graphql",
+        json={"query": query, "variables": {"id": node_id}},
+    )
+    _check(r)
+    body = r.json()
+    if body.get("errors"):
+        raise GitHubError(400, f"GraphQL error toggling draft: {body['errors']}")
 
 
 # ---------- GraphQL fallback for `parent` ---------------------------------
@@ -1673,6 +1732,7 @@ class GitHubProvider:
         draft: bool = False,
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
+        requested_reviewers: list[str] | None = None,
     ) -> PullRequest:
         """Create a pull request, applying the AI-generated marker.
 
@@ -1684,9 +1744,9 @@ class GitHubProvider:
         restricted to caller-supplied labels). Mode A silent-drop on the
         labels POST is detected and logged.
 
-        Labels and assignees are applied in follow-up
-        `POST /issues/{n}/...` calls because the `POST /pulls` endpoint
-        doesn't accept them inline.
+        Labels, assignees, and reviewer requests are applied in
+        follow-up calls because the `POST /pulls` endpoint doesn't
+        accept them inline.
         """
         merged_labels = list(dict.fromkeys([*(labels or []), AI_GENERATED_LABEL]))
         prefixed_body = ensure_body_prefix(body)
@@ -1744,6 +1804,15 @@ class GitHubProvider:
                 # The /assignees endpoint returns the issue payload with
                 # the updated assignee list; mirror it.
                 pr_raw["assignees"] = a_resp.json().get("assignees") or []
+            if requested_reviewers:
+                rv_resp = client.post(
+                    f"{_repo_path(project)}/pulls/{pr_number}/requested_reviewers",
+                    json={"reviewers": requested_reviewers},
+                )
+                _check(rv_resp)
+                pr_raw["requested_reviewers"] = (
+                    rv_resp.json().get("requested_reviewers") or []
+                )
             return _map_pr(pr_raw)
 
     def update_pr(
@@ -1760,11 +1829,23 @@ class GitHubProvider:
         labels_remove: list[str] | None = None,
         assignees_add: list[str] | None = None,
         assignees_remove: list[str] | None = None,
+        reviewers_add: list[str] | None = None,
+        reviewers_remove: list[str] | None = None,
+        draft: bool | None = None,
     ) -> PullRequest:
-        """Update a PR's title/body/state/base, plus label/assignee deltas.
+        """Update a PR's title/body/state/base, plus label/assignee/reviewer deltas.
 
         `status` accepts `"open"` or `"closed"` only. To merge a PR call
         `merge_pr` — `status="merged"` is rejected by the tool layer.
+
+        Reviewer requests use a separate endpoint from assignees
+        (`POST/DELETE /pulls/{n}/requested_reviewers`) — GitHub
+        models the two concepts independently because reviewers carry
+        per-user review state.
+
+        `draft` toggles the PR's draft state. GitHub's REST PATCH does
+        not accept a draft flag; we issue the corresponding GraphQL
+        mutation when the value differs from the current state.
 
         Applies the `ai-modified` label (mirroring `update_ticket`) when
         the PR wasn't originally created by us.
@@ -1856,6 +1937,50 @@ class GitHubProvider:
                 _check(r_final)
                 current = r_final.json()
 
+            if reviewers_add or reviewers_remove:
+                # Reviewer add/remove live on `/pulls/{n}/requested_reviewers`,
+                # distinct from the issues-shared assignees endpoint.
+                current_reviewers = {
+                    r["login"]
+                    for r in (current.get("requested_reviewers") or [])
+                }
+                new_reviewers = set(current_reviewers)
+                if reviewers_add:
+                    new_reviewers.update(reviewers_add)
+                if reviewers_remove:
+                    new_reviewers.difference_update(reviewers_remove)
+                to_add = new_reviewers - current_reviewers
+                to_remove = current_reviewers - new_reviewers
+                if to_add:
+                    rv_resp = client.post(
+                        f"{_repo_path(project)}/pulls/{pr_id}/requested_reviewers",
+                        json={"reviewers": sorted(to_add)},
+                    )
+                    _check(rv_resp)
+                if to_remove:
+                    rv_resp = client.request(
+                        "DELETE",
+                        f"{_repo_path(project)}/pulls/{pr_id}/requested_reviewers",
+                        json={"reviewers": sorted(to_remove)},
+                    )
+                    _check(rv_resp)
+                r_final = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
+                _check(r_final)
+                current = r_final.json()
+
+            if draft is not None and bool(current.get("draft", False)) != draft:
+                node_id = current.get("node_id")
+                if not node_id:
+                    raise GitHubError(
+                        500,
+                        f"PR #{pr_id} payload missing 'node_id'; "
+                        "cannot toggle draft state via GraphQL",
+                    )
+                _set_pr_draft_via_graphql(client, node_id, draft)
+                r_final = client.get(f"{_repo_path(project)}/pulls/{pr_id}")
+                _check(r_final)
+                current = r_final.json()
+
             return _map_pr(current)
 
     def add_pr_comment(
@@ -1878,6 +2003,130 @@ class GitHubProvider:
             )
             _check(r)
             return _map_comment(r.json())
+
+    def list_pr_review_comments(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+    ) -> list[ReviewComment]:
+        """List inline code-review comments on a PR.
+
+        Hits `GET /repos/{o}/{r}/pulls/{n}/comments` — distinct from the
+        issue-style `/issues/{n}/comments` endpoint surfaced via
+        `get_pr().comments`. Result is paginated; we cap at 100 per page
+        (the GitHub maximum). Reviewers typically don't stack hundreds
+        of inline comments, so the single-page take is acceptable.
+        """
+        with _client(token) as client:
+            r = client.get(
+                f"{_repo_path(project)}/pulls/{pr_id}/comments",
+                params={"per_page": 100},
+            )
+            _check(r)
+            return [_map_review_comment(it) for it in r.json()]
+
+    def add_pr_review_comment(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        body: str,
+        path: str | None = None,
+        line: int | None = None,
+        side: str = "RIGHT",
+        commit_sha: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> ReviewComment:
+        """Add an inline code-review comment.
+
+        Two modes:
+          - **New thread**: `path`, `line`, and `commit_sha` are
+            required; `in_reply_to` must be `None`.
+          - **Reply**: only `in_reply_to` (parent comment id) and
+            `body`; positional fields must be `None`.
+
+        Mode is validated at the tool layer; this method trusts its
+        inputs and routes them to the matching POST shape.
+        """
+        prefixed = ensure_comment_prefix(body)
+        if in_reply_to is not None:
+            payload: dict[str, Any] = {
+                "body": prefixed,
+                "in_reply_to": int(in_reply_to),
+            }
+        else:
+            payload = {
+                "body": prefixed,
+                "path": path,
+                "line": line,
+                "side": side,
+                "commit_id": commit_sha,
+            }
+        with _client(token) as client:
+            r = client.post(
+                f"{_repo_path(project)}/pulls/{pr_id}/comments",
+                json=payload,
+            )
+            _check(r)
+            return _map_review_comment(r.json())
+
+    def submit_pr_review(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        pr_id: str,
+        state: str,
+        body: str | None = None,
+        commit_sha: str | None = None,
+    ) -> Review:
+        """Submit a PR review via `POST /pulls/{n}/reviews`.
+
+        `state` is one of `"approve"`, `"request_changes"`, `"comment"`
+        (normalized values, lower-case). They map to GitHub's `event`
+        enum (`APPROVE` / `REQUEST_CHANGES` / `COMMENT`).
+
+        GitHub requires a non-empty body for `REQUEST_CHANGES` and
+        `COMMENT`; we surface that as a `ValueError` to fail fast
+        without round-tripping. The body is marker-prefixed via
+        `ensure_comment_prefix` when present.
+        """
+        event_map = {
+            "approve": "APPROVE",
+            "request_changes": "REQUEST_CHANGES",
+            "comment": "COMMENT",
+        }
+        event = event_map.get(state)
+        if event is None:
+            raise ValueError(
+                f"unsupported review state {state!r} — accepted: "
+                f"{sorted(event_map)}"
+            )
+        if event in ("REQUEST_CHANGES", "COMMENT") and not body:
+            raise ValueError(
+                f"a review body is required when state={state!r}"
+            )
+        payload: dict[str, Any] = {"event": event}
+        if body:
+            payload["body"] = ensure_comment_prefix(body)
+        if commit_sha:
+            payload["commit_id"] = commit_sha
+        with _client(token) as client:
+            r = client.post(
+                f"{_repo_path(project)}/pulls/{pr_id}/reviews",
+                json=payload,
+            )
+            _check(r)
+            raw = r.json()
+        return Review(
+            id=str(raw.get("id", "")),
+            state=state,  # type: ignore[arg-type]
+            author=(raw.get("user") or {}).get("login", ""),
+            body=raw.get("body") or "",
+            url=raw.get("html_url") or "",
+            submitted_at=raw.get("submitted_at") or "",
+            commit_sha=raw.get("commit_id"),
+        )
 
     def merge_pr(
         self,

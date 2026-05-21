@@ -387,3 +387,396 @@ def test_merge_pr_commit_message_routed_per_strategy(
     GitLabProvider().merge_pr(p, "t", "5", strategy="squash", commit_message="m2")
     assert captured["bodies"][0]["merge_commit_message"] == "m1"
     assert captured["bodies"][1]["squash_commit_message"] == "m2"
+
+
+# ---------- inline review comments (ticket #43 D) --------------------------
+
+
+def test_list_pr_review_comments_flattens_positional_discussions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only diff-anchored discussions become ReviewComment items."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path.endswith("merge_requests/5/discussions")
+        ):
+            return _json([
+                {
+                    "id": "disc-A",
+                    "notes": [
+                        {
+                            "id": 1, "body": "nit",
+                            "author": {"username": "alice"},
+                            "position": {
+                                "new_path": "src/foo.py", "new_line": 42,
+                                "old_path": "src/foo.py", "old_line": 40,
+                                "head_sha": "h1", "base_sha": "b1",
+                            },
+                            "created_at": "t",
+                        },
+                        {
+                            "id": 2, "body": "agreed",
+                            "author": {"username": "bob"},
+                            "position": None,
+                            "created_at": "t",
+                        },
+                    ],
+                },
+                {
+                    "id": "disc-B",
+                    "notes": [
+                        {
+                            "id": 3, "body": "general thought",
+                            "author": {"username": "alice"},
+                            "position": None,
+                            "created_at": "t",
+                        },
+                    ],
+                },
+            ])
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    rcs = GitLabProvider().list_pr_review_comments(_project(), "t", "5")
+    assert [rc.id for rc in rcs] == ["1", "2"]
+    assert rcs[0].in_reply_to is None
+    assert rcs[1].in_reply_to == "disc-A"
+    assert rcs[0].path == "src/foo.py"
+
+
+def test_add_pr_review_comment_new_thread_posts_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New-thread mode POSTs `/discussions` with a position object."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if req.method == "GET" and url.endswith("merge_requests/5"):
+            return _json(
+                _mr_payload(
+                    5,
+                    diff_refs={"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"},
+                )
+            )
+        if req.method == "POST" and url.endswith("merge_requests/5/discussions"):
+            captured["body"] = json.loads(req.content.decode())
+            return _json({
+                "id": "disc-new",
+                "notes": [{
+                    "id": 99, "body": captured["body"]["body"],
+                    "author": {"username": "alice"},
+                    "created_at": "t",
+                    "web_url": "url",
+                }],
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    rc = GitLabProvider().add_pr_review_comment(
+        _project(), "t", "5",
+        body="rename", path="src/foo.py", line=42, commit_sha="h1",
+    )
+    assert captured["body"]["body"].startswith("#ai-generated\n\n")
+    pos = captured["body"]["position"]
+    assert pos["new_path"] == "src/foo.py"
+    assert pos["new_line"] == 42
+    assert pos["head_sha"] == "h1"
+    assert pos["base_sha"] == "b1"
+    assert pos["start_sha"] == "s1"
+    assert rc.id == "99"
+
+
+def test_add_pr_review_comment_reply_posts_to_discussion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reply mode POSTs `/discussions/{id}/notes`."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if (
+            req.method == "POST"
+            and "/discussions/disc-A/notes" in req.url.path
+        ):
+            return _json({
+                "id": 100, "body": "agreed",
+                "author": {"username": "alice"},
+                "created_at": "t", "web_url": "url",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    rc = GitLabProvider().add_pr_review_comment(
+        _project(), "t", "5",
+        body="agreed", in_reply_to="disc-A",
+    )
+    assert rc.id == "100"
+    assert rc.in_reply_to == "disc-A"
+    # Sanity: no merge-request GET (reply mode skips diff_refs fetch).
+    assert all("/merge_requests/5" not in p or "/discussions/" in p for p in seen)
+
+
+# ---------- submit_pr_review (ticket #43 C) --------------------------------
+
+
+def test_submit_pr_review_approve_no_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Approve without body hits only `/approve`."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "POST" and req.url.path.endswith("/approve"):
+            return _json({"iid": 5, "web_url": "u", "updated_at": "t"})
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    review = GitLabProvider().submit_pr_review(
+        _project(), "t", "5", state="approve",
+    )
+    assert review.state == "approve"
+    assert all("notes" not in p for p in seen)
+
+
+def test_submit_pr_review_approve_with_body_posts_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approve with body hits `/approve` then `/notes`."""
+    seen: list[str] = []
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "POST" and req.url.path.endswith("/approve"):
+            return _json({"iid": 5, "web_url": "u", "updated_at": "t"})
+        if req.method == "POST" and req.url.path.endswith("/notes"):
+            captured["body"] = json.loads(req.content.decode())
+            return _json({
+                "id": 9, "body": captured["body"]["body"],
+                "author": {"username": "alice"},
+                "web_url": "url",
+                "created_at": "2024-01-01T00:00:00Z",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    review = GitLabProvider().submit_pr_review(
+        _project(), "t", "5", state="approve", body="lgtm",
+    )
+    assert review.state == "approve"
+    assert captured["body"]["body"].startswith("#ai-generated\n\n")
+
+
+def test_submit_pr_review_request_changes_unapproves_then_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """request_changes hits `/unapprove` then `/notes`."""
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "POST" and req.url.path.endswith("/unapprove"):
+            return _json({})
+        if req.method == "POST" and req.url.path.endswith("/notes"):
+            return _json({
+                "id": 9, "body": "please fix",
+                "author": {"username": "alice"},
+                "web_url": "url",
+                "created_at": "2024-01-01T00:00:00Z",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    review = GitLabProvider().submit_pr_review(
+        _project(), "t", "5", state="request_changes", body="please fix",
+    )
+    assert review.state == "request_changes"
+    assert any("/unapprove" in p for p in seen)
+    assert any("/notes" in p for p in seen)
+
+
+def test_submit_pr_review_comment_only_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        if req.method == "POST" and req.url.path.endswith("/notes"):
+            return _json({
+                "id": 9, "body": "fyi",
+                "author": {"username": "alice"},
+                "web_url": "url",
+                "created_at": "2024-01-01T00:00:00Z",
+            })
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().submit_pr_review(
+        _project(), "t", "5", state="comment", body="fyi",
+    )
+    assert all("/approve" not in p and "/unapprove" not in p for p in seen)
+
+
+# ---------- reviewers on write surface (ticket #43 B) ----------------------
+
+
+def test_create_pr_passes_reviewer_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_pr resolves usernames to ids and sends `reviewer_ids`."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if req.method == "GET" and req.url.path == "/api/v4/users":
+            name = req.url.params.get("username")
+            uid = {"bob": 11, "carol": 22}.get(name)
+            return _json([{"id": uid, "username": name}] if uid else [])
+        if req.method == "POST" and "merge_requests" in url:
+            captured["body"] = json.loads(req.content.decode())
+            return _json(
+                _mr_payload(8, reviewers=[{"username": "bob"}, {"username": "carol"}])
+            )
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().create_pr(
+        _project(), "t",
+        title="T", body="b", head="feat/x", base="main",
+        requested_reviewers=["bob", "carol"],
+    )
+    assert captured["body"]["reviewer_ids"] == [11, 22]
+
+
+def test_update_pr_reviewers_replace_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reviewer diff is replace-all via a single PUT with `reviewer_ids`."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if req.method == "GET" and url.endswith("merge_requests/5"):
+            return _json(
+                _mr_payload(5, reviewers=[{"username": "alice"}, {"username": "bob"}])
+            )
+        if req.method == "GET" and req.url.path == "/api/v4/users":
+            name = req.url.params.get("username")
+            uid = {"bob": 11, "carol": 22}.get(name)
+            return _json([{"id": uid, "username": name}] if uid else [])
+        if req.method == "PUT" and "merge_requests/5" in url:
+            captured["body"] = json.loads(req.content.decode())
+            return _json(_mr_payload(5))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().update_pr(
+        _project(), "t", "5",
+        reviewers_add=["carol"],
+        reviewers_remove=["alice"],
+    )
+    # alice removed, bob preserved, carol added → final: [bob, carol] → [11, 22]
+    assert captured["body"]["reviewer_ids"] == [11, 22]
+
+
+# ---------- draft toggle (ticket #43 A) -------------------------------------
+
+
+def test_update_pr_draft_true_adds_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """draft=True on a ready MR sets `Draft: ` title prefix."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if req.method == "GET" and url.endswith("merge_requests/5"):
+            return _json(_mr_payload(5, title="Add feature X"))
+        if req.method == "PUT" and "merge_requests/5" in url:
+            captured["body"] = json.loads(req.content)
+            return _json(_mr_payload(5, title=captured["body"]["title"]))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().update_pr(_project(), "t", "5", draft=True)
+    assert captured["body"]["title"] == "Draft: Add feature X"
+
+
+def test_update_pr_draft_false_strips_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """draft=False strips legacy prefixes (Draft:/WIP:/[Draft])."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if req.method == "GET" and url.endswith("merge_requests/5"):
+            return _json(_mr_payload(5, title="WIP: Add feature X"))
+        if req.method == "PUT" and "merge_requests/5" in url:
+            captured["body"] = json.loads(req.content)
+            return _json(_mr_payload(5, title=captured["body"]["title"]))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().update_pr(_project(), "t", "5", draft=False)
+    assert captured["body"]["title"] == "Add feature X"
+
+
+def test_update_pr_draft_combined_with_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit title plus draft=True yields a freshly-prefixed title."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if req.method == "GET" and url.endswith("merge_requests/5"):
+            return _json(_mr_payload(5, title="WIP: Old title"))
+        if req.method == "PUT" and "merge_requests/5" in url:
+            captured["body"] = json.loads(req.content)
+            return _json(_mr_payload(5, title=captured["body"]["title"]))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    GitLabProvider().update_pr(
+        _project(), "t", "5", title="New title", draft=True,
+    )
+    assert captured["body"]["title"] == "Draft: New title"
+
+
+# ---------- response-shape inventory (ticket #43 G) -------------------------
+
+
+def test_get_pr_surfaces_gitlab_specific_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_map_mr` propagates detailed_merge_status, pipeline_status, approvals,
+    and merge_commit_sha. GitHub-only fields stay `None`."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if url.endswith("merge_requests/5"):
+            return _json(
+                _mr_payload(
+                    5,
+                    detailed_merge_status="ci_must_pass",
+                    head_pipeline={"status": "running"},
+                    approvals_required=2,
+                    approvals_received=1,
+                    merge_commit_sha="deadbeef",
+                )
+            )
+        if "merge_requests/5/notes" in url:
+            return _json([])
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    pr, _ = GitLabProvider().get_pr(_project(), "t", "5")
+    assert pr.detailed_merge_status == "ci_must_pass"
+    assert pr.pipeline_status == "running"
+    assert pr.approvals_required == 2
+    assert pr.approvals_received == 1
+    assert pr.merge_commit_sha == "deadbeef"
+    # GitHub-only fields stay None on a GitLab payload.
+    assert pr.mergeable_state is None
+    assert pr.auto_merge is None
+    assert pr.review_decision is None

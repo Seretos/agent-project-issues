@@ -392,3 +392,498 @@ def test_add_pr_comment_succeeds_with_modify(monkeypatch: pytest.MonkeyPatch) ->
     assert "error" not in result, result
     assert captured["body"]["body"] == "#ai-generated\n\nLGTM"
     assert result["comment"]["body"].startswith("#ai-generated\n\n")
+
+
+# ---------- inline review comments (ticket #43 D) ---------------------------
+
+
+def _review_comment_payload(rcid: int, **overrides) -> dict:
+    base = {
+        "id": rcid,
+        "user": {"login": "alice"},
+        "body": "nit: rename this",
+        "path": "src/foo.py",
+        "line": 42,
+        "original_line": 40,
+        "side": "RIGHT",
+        "commit_id": "deadbeef",
+        "html_url": (
+            f"https://github.com/acme/backend/pull/7#discussion_r{rcid}"
+        ),
+        "created_at": "2024-01-04T00:00:00Z",
+        "updated_at": "2024-01-04T00:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_get_pr_surfaces_review_comments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`get_pr` returns an extra `review_comments` array of inline notes."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7":
+            return _json(_pr_payload(7))
+        if req.method == "GET" and path == "/repos/acme/backend/issues/7/comments":
+            return _json([])
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7/comments":
+            return _json([
+                _review_comment_payload(11),
+                _review_comment_payload(12, in_reply_to_id=11, body="agreed"),
+            ])
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pr"](project_id="acme", pr_id="7")
+    assert "error" not in result, result
+    rcs = result["review_comments"]
+    assert [c["id"] for c in rcs] == ["11", "12"]
+    assert rcs[0]["in_reply_to"] is None
+    assert rcs[1]["in_reply_to"] == "11"
+    assert rcs[0]["path"] == "src/foo.py"
+    assert rcs[0]["line"] == 42
+
+
+def test_add_pr_review_comment_new_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New-thread mode POSTs path/line/commit_id with the body."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "POST"
+            and req.url.path == "/repos/acme/backend/pulls/7/comments"
+        ):
+            captured["body"] = json.loads(req.content)
+            return _json(_review_comment_payload(99))
+        raise AssertionError(f"unexpected: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["add_pr_review_comment"](
+        project_id="acme",
+        pr_id="7",
+        body="rename this",
+        path="src/foo.py",
+        line=42,
+        commit_sha="deadbeef",
+    )
+    assert "error" not in result, result
+    posted = captured["body"]
+    assert posted["path"] == "src/foo.py"
+    assert posted["line"] == 42
+    assert posted["commit_id"] == "deadbeef"
+    assert posted["side"] == "RIGHT"
+    assert posted["body"].startswith("#ai-generated\n\n")
+    assert result["review_comment"]["id"] == "99"
+
+
+def test_add_pr_review_comment_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reply mode POSTs body+in_reply_to with no positional metadata."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "POST"
+            and req.url.path == "/repos/acme/backend/pulls/7/comments"
+        ):
+            captured["body"] = json.loads(req.content)
+            return _json(_review_comment_payload(100, in_reply_to_id=99))
+        raise AssertionError(f"unexpected: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["add_pr_review_comment"](
+        project_id="acme",
+        pr_id="7",
+        body="agreed",
+        in_reply_to="99",
+    )
+    assert "error" not in result, result
+    posted = captured["body"]
+    assert posted["in_reply_to"] == 99
+    assert "path" not in posted and "line" not in posted
+    assert result["review_comment"]["in_reply_to"] == "99"
+
+
+def test_add_pr_review_comment_rejects_mixed_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing both positional args and in_reply_to is rejected by the tool."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["add_pr_review_comment"](
+        project_id="acme",
+        pr_id="7",
+        body="confused",
+        path="src/foo.py",
+        line=1,
+        commit_sha="x",
+        in_reply_to="99",
+    )
+    assert "error" in result
+    assert "either" in result["error"].lower()
+
+
+def test_add_pr_review_comment_rejects_incomplete_new_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new thread missing line is rejected."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["add_pr_review_comment"](
+        project_id="acme", pr_id="7", body="x",
+        path="src/foo.py", commit_sha="x",
+    )
+    assert "error" in result
+    assert "line" in result["error"]
+
+
+# ---------- submit_pr_review (ticket #43 C) ---------------------------------
+
+
+def _review_payload(rid: int, state: str = "APPROVED", body: str = "") -> dict:
+    return {
+        "id": rid,
+        "user": {"login": "alice"},
+        "state": state,
+        "body": body,
+        "html_url": f"https://github.com/acme/backend/pull/7#pullrequestreview-{rid}",
+        "submitted_at": "2024-01-03T00:00:00Z",
+        "commit_id": "deadbeef",
+    }
+
+
+def test_submit_pr_review_approve(monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "POST"
+            and req.url.path == "/repos/acme/backend/pulls/7/reviews"
+        ):
+            captured["body"] = json.loads(req.content)
+            return _json(_review_payload(101, state="APPROVED", body="lgtm!"))
+        raise AssertionError(f"unexpected: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["submit_pr_review"](
+        project_id="acme", pr_id="7", state="approve", body="lgtm!",
+    )
+    assert "error" not in result, result
+    assert captured["body"]["event"] == "APPROVE"
+    assert captured["body"]["body"].startswith("#ai-generated\n\n")
+    assert result["review"]["state"] == "approve"
+
+
+def test_submit_pr_review_request_changes_requires_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["submit_pr_review"](
+        project_id="acme", pr_id="7", state="request_changes",
+    )
+    assert "error" in result
+    assert "body" in result["error"].lower()
+
+
+def test_submit_pr_review_passes_commit_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "POST"
+            and req.url.path == "/repos/acme/backend/pulls/7/reviews"
+        ):
+            captured["body"] = json.loads(req.content)
+            return _json(
+                _review_payload(102, state="COMMENTED", body="comment")
+            )
+        raise AssertionError(f"unexpected: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["submit_pr_review"](
+        project_id="acme", pr_id="7", state="comment",
+        body="comment", commit_sha="abc123",
+    )
+    assert "error" not in result, result
+    assert captured["body"]["commit_id"] == "abc123"
+    assert captured["body"]["event"] == "COMMENT"
+
+
+# ---------- reviewers on write surface (ticket #43 B) -----------------------
+
+
+def test_create_pr_requests_reviewers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`create_pr(requested_reviewers=[...])` POSTs to /requested_reviewers."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_create=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-generated"}, status_code=201)
+        if req.method == "POST" and path == "/repos/acme/backend/pulls":
+            return _json(_pr_payload(11, title="t"))
+        if (
+            req.method == "POST"
+            and path == "/repos/acme/backend/issues/11/labels"
+        ):
+            body = json.loads(req.content)
+            return _json([{"name": n} for n in body["labels"]])
+        if (
+            req.method == "POST"
+            and path == "/repos/acme/backend/pulls/11/requested_reviewers"
+        ):
+            captured["reviewers"] = json.loads(req.content)["reviewers"]
+            return _json(
+                _pr_payload(
+                    11,
+                    requested_reviewers=[{"login": n} for n in captured["reviewers"]],
+                )
+            )
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["create_pr"](
+        project_id="acme",
+        title="t", body="b", head="feat/x", base="main",
+        requested_reviewers=["bob", "carol"],
+    )
+    assert "error" not in result, result
+    assert captured["reviewers"] == ["bob", "carol"]
+    assert result["pull_request"]["requested_reviewers"] == ["bob", "carol"]
+
+
+def test_update_pr_reviewers_add_and_remove(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed add/remove issues both POST and DELETE on /requested_reviewers."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    posts: list[list[str]] = []
+    deletes: list[list[str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7":
+            return _json(
+                _pr_payload(
+                    7,
+                    requested_reviewers=[{"login": "alice"}, {"login": "bob"}],
+                )
+            )
+        if (
+            req.method == "POST"
+            and path == "/repos/acme/backend/pulls/7/requested_reviewers"
+        ):
+            posts.append(json.loads(req.content)["reviewers"])
+            return _json(_pr_payload(7))
+        if (
+            req.method == "DELETE"
+            and path == "/repos/acme/backend/pulls/7/requested_reviewers"
+        ):
+            deletes.append(json.loads(req.content)["reviewers"])
+            return _json(_pr_payload(7))
+        if (
+            req.method == "PUT"
+            and path == "/repos/acme/backend/issues/7/labels"
+        ):
+            return _json([{"name": "ai-modified"}])
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-modified"}, status_code=201)
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["update_pr"](
+        project_id="acme",
+        pr_id="7",
+        reviewers_add=["carol"],
+        reviewers_remove=["alice"],
+    )
+    assert "error" not in result, result
+    assert posts == [["carol"]]
+    assert deletes == [["alice"]]
+
+
+# ---------- draft toggle on update_pr (ticket #43 A) ------------------------
+
+
+def test_update_pr_draft_true_calls_graphql_convert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flipping a ready PR to draft issues `convertPullRequestToDraft`."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    graphql_payload: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7":
+            return _json(
+                _pr_payload(7, draft=False, node_id="PR_kwDO_node")
+            )
+        if req.method == "POST" and path == "/graphql":
+            graphql_payload["body"] = json.loads(req.content)
+            return _json({"data": {"convertPullRequestToDraft": {
+                "pullRequest": {"id": "PR_kwDO_node", "isDraft": True}
+            }}})
+        if (
+            req.method == "PUT"
+            and path == "/repos/acme/backend/issues/7/labels"
+        ):
+            body = json.loads(req.content)
+            return _json([{"name": n} for n in body["labels"]])
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-modified"}, status_code=201)
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["update_pr"](project_id="acme", pr_id="7", draft=True)
+    assert "error" not in result, result
+    query = graphql_payload["body"]["query"]
+    assert "convertPullRequestToDraft" in query
+    assert graphql_payload["body"]["variables"]["id"] == "PR_kwDO_node"
+
+
+def test_update_pr_draft_false_calls_graphql_mark_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flipping a draft PR to ready issues `markPullRequestReadyForReview`."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    graphql_payload: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7":
+            return _json(
+                _pr_payload(7, draft=True, node_id="PR_kwDO_x")
+            )
+        if req.method == "POST" and path == "/graphql":
+            graphql_payload["body"] = json.loads(req.content)
+            return _json({"data": {"markPullRequestReadyForReview": {
+                "pullRequest": {"id": "PR_kwDO_x", "isDraft": False}
+            }}})
+        if (
+            req.method == "PUT"
+            and path == "/repos/acme/backend/issues/7/labels"
+        ):
+            return _json([{"name": "ai-modified"}])
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-modified"}, status_code=201)
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["update_pr"](project_id="acme", pr_id="7", draft=False)
+    assert "error" not in result, result
+    assert "markPullRequestReadyForReview" in graphql_payload["body"]["query"]
+
+
+def test_update_pr_draft_noop_when_state_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No GraphQL call is issued when draft value already matches current."""
+    tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    seen: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(f"{req.method} {req.url.path}")
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7":
+            return _json(_pr_payload(7, draft=True, node_id="x"))
+        if (
+            req.method == "PUT"
+            and path == "/repos/acme/backend/issues/7/labels"
+        ):
+            return _json([{"name": "ai-modified"}])
+        if req.method == "POST" and path == "/repos/acme/backend/labels":
+            return _json({"name": "ai-modified"}, status_code=201)
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["update_pr"](project_id="acme", pr_id="7", draft=True)
+    assert "error" not in result, result
+    assert "POST /graphql" not in seen
+
+
+# ---------- response-shape inventory (ticket #43 G) -------------------------
+
+
+def test_get_pr_surfaces_github_specific_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`get_pr` propagates mergeable_state / merge_commit_sha / auto_merge.
+
+    Ticket #43 (item G) extended the `PullRequest` dataclass with
+    GitHub-specific qualitative state. GitLab-only fields stay `None` on
+    a GitHub payload.
+    """
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/repos/acme/backend/pulls/7":
+            return _json(
+                _pr_payload(
+                    7,
+                    mergeable_state="clean",
+                    merge_commit_sha="abc123def",
+                    auto_merge={"enabled_by": {"login": "alice"}},
+                )
+            )
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/7/comments"
+        ):
+            return _json([])
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/pulls/7/comments"
+        ):
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pr"](project_id="acme", pr_id="7")
+    assert "error" not in result, result
+    pr = result["pull_request"]
+    assert pr["mergeable_state"] == "clean"
+    assert pr["merge_commit_sha"] == "abc123def"
+    assert pr["auto_merge"] == {"enabled_by": {"login": "alice"}}
+    # GitLab-only fields stay None on a GitHub payload.
+    assert pr["detailed_merge_status"] is None
+    assert pr["pipeline_status"] is None
+    assert pr["approvals_required"] is None
+    assert pr["approvals_received"] is None
+    # review_decision is sourced from GraphQL — REST mapping leaves None.
+    assert pr["review_decision"] is None

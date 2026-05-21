@@ -125,6 +125,27 @@ def _normalize_target(project: ProjectConfig, raw):
     return _refs.normalize_target(raw, project)
 
 
+def _rewrap_404(exc, *, project_id: str, kind: str, ident: str):
+    """Rewrap a provider 404 to include project + id context.
+
+    Ticket #48 finding 6: bare `"GitHub 404: Not Found"` is hostile to
+    agents because it doesn't say which lookup failed. Wrappers around
+    `get_ticket` / `get_comment` / `get_pr` catch the raw 404, run it
+    through this helper, and re-raise with the context the agent needs
+    to fix the call (or report it to the user).
+
+    For non-404 errors the original exception is returned unchanged so
+    callers can `raise _rewrap_404(exc, ...)` unconditionally.
+    """
+    if not hasattr(exc, "status") or exc.status != 404:
+        return exc
+    provider_name = type(exc).__name__.replace("Error", "")
+    return type(exc)(
+        404,
+        f"{kind} '{project_id}#{ident}' not found ({provider_name} 404)",
+    )
+
+
 # --------- error translation -------------------------------------------------
 
 
@@ -160,5 +181,6 @@ __all__ = [
     "_require_pulls_merge",
     "_normalize_id",
     "_normalize_target",
+    "_rewrap_404",
     "_safe",
 ]

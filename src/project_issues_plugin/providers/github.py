@@ -64,6 +64,39 @@ def _client(token: str | None) -> httpx.Client:
     return httpx.Client(base_url=API_BASE, headers=headers, timeout=30.0)
 
 
+def _format_github_validation_errors(errs: list) -> str:
+    """Turn GitHub's `errors: [...]` array into a human-readable summary.
+
+    Ticket #48 finding 10: previously the array was Python-`repr`'d
+    into the error string (single-quoted keys, not valid JSON, awkward
+    for agents). This formatter produces a compact one-line summary
+    that's still informative.
+
+    Each item generally looks like:
+        {"resource": "Issue", "field": "assignees", "code": "invalid",
+         "value": "ghost"}
+    or carries a free-form `message` field.
+    """
+    parts: list[str] = []
+    for err in errs:
+        if not isinstance(err, dict):
+            parts.append(str(err))
+            continue
+        message = err.get("message")
+        if message:
+            parts.append(str(message))
+            continue
+        field = err.get("field") or "?"
+        resource = err.get("resource") or "?"
+        code = err.get("code") or "?"
+        value = err.get("value")
+        if value is not None:
+            parts.append(f"{resource}.{field}={value!r} ({code})")
+        else:
+            parts.append(f"{resource}.{field} ({code})")
+    return "; ".join(parts) if parts else "validation failed"
+
+
 def _check(resp: httpx.Response) -> None:
     if resp.is_success:
         return
@@ -72,7 +105,7 @@ def _check(resp: httpx.Response) -> None:
         msg = payload.get("message") or resp.reason_phrase
         errs = payload.get("errors")
         if errs:
-            msg = f"{msg}: {errs}"
+            msg = f"{msg}: {_format_github_validation_errors(errs)}"
     except Exception:
         msg = resp.reason_phrase or "request failed"
     if resp.status_code == 403 and resp.headers.get("x-ratelimit-remaining") == "0":

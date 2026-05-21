@@ -24,12 +24,15 @@ from mcp.server.fastmcp import FastMCP
 # `tools.comments.load_projects` keep working. The runtime call path goes
 # through `tools/_providers.py::_resolve` which reads via the config module.
 from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
+from project_issues_plugin.providers.github import GitHubError
+from project_issues_plugin.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
     _require_issues_modify,
     _require_token,
     _resolve,
+    _rewrap_404,
     _safe,
 )
 from project_issues_plugin.tools._slicing import apply_body_knobs, apply_order
@@ -87,13 +90,17 @@ def register(mcp: FastMCP) -> None:
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
             )
-            return {
+            applied_limit = min(max(1, limit), 100)
+            result: dict = {
                 "project_id": project.id,
                 "ticket_id": normalized_id,
                 "comments": rows,
                 "page": page,
                 "has_more": has_more,
             }
+            if applied_limit != limit:
+                result["applied_limit"] = applied_limit
+            return result
         return _safe(go)
 
     @mcp.tool()
@@ -119,9 +126,15 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_ticket = _normalize_id(project, ticket_id)
-            comment = provider.get_comment(
-                project, token, comment_id, ticket_id=normalized_ticket,
-            )
+            try:
+                comment = provider.get_comment(
+                    project, token, comment_id, ticket_id=normalized_ticket,
+                )
+            except (GitHubError, GitLabError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="comment",
+                    ident=comment_id,
+                )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)
 

@@ -15,6 +15,8 @@ from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.config import resolve_token
 from project_issues_plugin.providers.base import TicketFilters
+from project_issues_plugin.providers.github import GitHubError
+from project_issues_plugin.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
@@ -22,6 +24,7 @@ from project_issues_plugin.tools._providers import (
     _require_issues_modify,
     _require_token,
     _resolve,
+    _rewrap_404,
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
@@ -121,10 +124,17 @@ def register(mcp: FastMCP) -> None:
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
             )
-            return {
+            # Echo `applied_limit` only when the provider's cap kicked in
+            # (ticket #48 finding 11). Silent provider-side clamping was
+            # invisible — now the caller can see they hit the 100-row cap.
+            applied_limit = min(max(1, limit), 100)
+            payload: dict[str, Any] = {
                 "project_id": project.id,
                 "tickets": rows,
             }
+            if applied_limit != limit:
+                payload["applied_limit"] = applied_limit
+            return payload
         return _safe(go)
 
     @mcp.tool()
@@ -177,9 +187,16 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_id = _normalize_id(project, ticket_id)
-            ticket, comments, relations, truncated = provider.get_ticket(
-                project, token, normalized_id, include_relations=include_relations,
-            )
+            try:
+                ticket, comments, relations, truncated = provider.get_ticket(
+                    project, token, normalized_id,
+                    include_relations=include_relations,
+                )
+            except (GitHubError, GitLabError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="ticket",
+                    ident=normalized_id,
+                )
             # Apply the comment-slicing knobs.
             drop_comments = (not include_comments) or comments_limit == 0
             if drop_comments:
@@ -245,6 +262,12 @@ def register(mcp: FastMCP) -> None:
             )
             return {"project_id": project.id, "ticket": asdict(ticket)}
         return _safe(go)
+
+    _UPDATE_TICKET_FIELDS = (
+        "title", "body", "status",
+        "labels_add", "labels_remove",
+        "assignees_add", "assignees_remove",
+    )
 
     @mcp.tool()
     def update_ticket(
@@ -314,6 +337,27 @@ def register(mcp: FastMCP) -> None:
 
         Requires the project's `issues.modify` permission.
         """
+        # Reject empty calls explicitly (ticket #48 finding 4 / #49 finding 4).
+        # `labels_add=[]` etc. are treated as "no action" — only non-empty
+        # collections and non-None scalars count.
+        actionable = (
+            title is not None
+            or body is not None
+            or status is not None
+            or labels_add
+            or labels_remove
+            or assignees_add
+            or assignees_remove
+        )
+        if not actionable:
+            return {
+                "error": (
+                    "no update fields supplied; pass at least one of "
+                    "title/body/status/labels_add/labels_remove/"
+                    "assignees_add/assignees_remove."
+                )
+            }
+
         def go() -> dict:
             project = _resolve(project_id)
             _require_issues_modify(project)

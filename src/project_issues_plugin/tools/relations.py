@@ -17,6 +17,8 @@ from dataclasses import asdict
 from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.providers.base import WRITABLE_RELATION_KINDS
+from project_issues_plugin.providers.github import GitHubProvider
+from project_issues_plugin.providers.gitlab import GitLabProvider
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _normalize_target,
@@ -122,9 +124,26 @@ def register(mcp: FastMCP) -> None:
     def list_relation_kinds() -> dict:
         """List all relation kinds the write-side tools accept.
 
-        The set of kinds is provider-agnostic; whether a given kind is
-        supported on a specific provider is reported in the error
-        payload of `add_relation` (`supported_kinds` field) when the
-        provider rejects it.
+        Response shape:
+        ```
+        {
+          "kinds": [kind, ...],
+          "provider_support": {
+            "github": [kind, ...],
+            "gitlab": [kind, ...],
+          }
+        }
+        ```
+
+        `kinds` is the universal write-side vocabulary. `provider_support`
+        (ticket #48 finding 5) tells the agent which kinds each provider
+        actually accepts before it ever calls `add_relation` — no need
+        to learn provider quirks via failed calls.
         """
-        return {"kinds": list(WRITABLE_RELATION_KINDS)}
+        return {
+            "kinds": list(WRITABLE_RELATION_KINDS),
+            "provider_support": {
+                "github": list(GitHubProvider._SUPPORTED_RELATION_KINDS),
+                "gitlab": list(GitLabProvider._SUPPORTED_RELATION_KINDS),
+            },
+        }

@@ -21,6 +21,8 @@ from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
 from project_issues_plugin.providers.base import PRFilters
+from project_issues_plugin.providers.github import GitHubError
+from project_issues_plugin.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
@@ -29,6 +31,7 @@ from project_issues_plugin.tools._providers import (
     _require_pulls_modify,
     _require_token,
     _resolve,
+    _rewrap_404,
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
@@ -93,10 +96,20 @@ def register(mcp: FastMCP) -> None:
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
             )
-            return {
+            applied_limit = min(max(1, limit), 100)
+            payload: dict = {
                 "project_id": project.id,
+                # `prs` is the canonical key (matches the tool name);
+                # `pull_requests` is the legacy alias retained for back-
+                # compat (ticket #48 finding 8). Both reference the same
+                # list — feel free to delete the `pull_requests` key in
+                # your own code, or migrate to `prs` and ignore the alias.
+                "prs": rows,
                 "pull_requests": rows,
             }
+            if applied_limit != limit:
+                payload["applied_limit"] = applied_limit
+            return payload
         return _safe(go)
 
     @mcp.tool()
@@ -134,10 +147,16 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_pr = _normalize_id(project, pr_id)
-            pr, comments = provider.get_pr(project, token, normalized_pr)
-            review_comments = provider.list_pr_review_comments(
-                project, token, normalized_pr,
-            )
+            try:
+                pr, comments = provider.get_pr(project, token, normalized_pr)
+                review_comments = provider.list_pr_review_comments(
+                    project, token, normalized_pr,
+                )
+            except (GitHubError, GitLabError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="pr",
+                    ident=normalized_pr,
+                )
             drop_comments = (not include_comments) or comments_limit == 0
             if drop_comments:
                 comment_rows: list[dict] = []
@@ -205,7 +224,10 @@ def register(mcp: FastMCP) -> None:
         pr_id: str,
         title: str | None = None,
         body: str | None = None,
-        status: Literal["open", "closed"] | None = None,
+        # Plain `str` (not Literal) so the tool-layer guard below can
+        # produce the merge_pr hint instead of pydantic's generic
+        # literal_error wall-of-text (ticket #48 finding 9).
+        status: str | None = None,
         base: str | None = None,
         labels_add: list[str] | None = None,
         labels_remove: list[str] | None = None,

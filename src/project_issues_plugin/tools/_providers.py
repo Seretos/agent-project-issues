@@ -14,6 +14,7 @@ match the nested `Permissions` model:
 from __future__ import annotations
 
 from project_issues_plugin import config as _cfg_mod
+from project_issues_plugin import refs as _refs
 from project_issues_plugin.config import ProjectConfig, resolve_token
 from project_issues_plugin.providers.github import GitHubError, GitHubProvider
 from project_issues_plugin.providers.gitlab import GitLabError, GitLabProvider
@@ -105,6 +106,25 @@ def _require_pulls_merge(project: ProjectConfig) -> None:
         )
 
 
+# --------- id normalisation (ticket #46) -------------------------------------
+
+
+def _normalize_id(project: ProjectConfig, raw):
+    """Normalise a ticket / PR id input before dispatching to the provider.
+
+    Delegates to `refs.normalize_id`; kept as a tool-layer wrapper so
+    individual tool modules don't import `refs` directly. Raises
+    `ValueError` for unparseable input — `_safe` translates that to
+    `{"error": ...}`.
+    """
+    return _refs.normalize_id(raw, project)
+
+
+def _normalize_target(project: ProjectConfig, raw):
+    """Same as `_normalize_id` but tolerant of cross-repo relation targets."""
+    return _refs.normalize_target(raw, project)
+
+
 # --------- error translation -------------------------------------------------
 
 
@@ -112,7 +132,7 @@ def _safe(call):
     """Execute `call()` and translate known errors to a dict with `error`."""
     try:
         return call()
-    except (LookupError, PermissionError, NotImplementedError) as exc:
+    except (LookupError, PermissionError, NotImplementedError, ValueError) as exc:
         return {"error": str(exc)}
     except GitHubError as exc:
         return {"error": str(exc)}
@@ -130,5 +150,7 @@ __all__ = [
     "_require_pulls_create",
     "_require_pulls_modify",
     "_require_pulls_merge",
+    "_normalize_id",
+    "_normalize_target",
     "_safe",
 ]

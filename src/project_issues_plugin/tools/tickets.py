@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from project_issues_plugin.config import resolve_token
 from project_issues_plugin.providers.base import TicketFilters
 from project_issues_plugin.tools._providers import (
+    _normalize_id,
     _provider_for,
     _require_issues_create,
     _require_issues_modify,
@@ -139,8 +140,9 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
+            normalized_id = _normalize_id(project, ticket_id)
             ticket, comments, relations, truncated = provider.get_ticket(
-                project, token, ticket_id, include_relations=include_relations,
+                project, token, normalized_id, include_relations=include_relations,
             )
             return {
                 "project_id": project.id,
@@ -267,8 +269,9 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_id = _normalize_id(project, ticket_id)
             ticket = provider.update_ticket(
-                project, token, ticket_id,
+                project, token, normalized_id,
                 title=title, body=body, status=status,
                 labels_add=labels_add, labels_remove=labels_remove,
                 assignees_add=assignees_add, assignees_remove=assignees_remove,
@@ -350,6 +353,7 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            comment = provider.add_comment(project, token, ticket_id, body)
+            normalized_id = _normalize_id(project, ticket_id)
+            comment = provider.add_comment(project, token, normalized_id, body)
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

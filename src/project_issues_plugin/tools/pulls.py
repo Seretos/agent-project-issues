@@ -22,6 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
 from project_issues_plugin.providers.base import PRFilters
 from project_issues_plugin.tools._providers import (
+    _normalize_id,
     _provider_for,
     _require_pulls_create,
     _require_pulls_merge,
@@ -102,9 +103,10 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            pr, comments = provider.get_pr(project, token, pr_id)
+            normalized_pr = _normalize_id(project, pr_id)
+            pr, comments = provider.get_pr(project, token, normalized_pr)
             review_comments = provider.list_pr_review_comments(
-                project, token, pr_id,
+                project, token, normalized_pr,
             )
             return {
                 "project_id": project.id,
@@ -217,8 +219,9 @@ def register(mcp: FastMCP) -> None:
             _require_pulls_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_pr = _normalize_id(project, pr_id)
             pr = provider.update_pr(
-                project, token, pr_id,
+                project, token, normalized_pr,
                 title=title, body=body, status=status, base=base,
                 labels_add=labels_add, labels_remove=labels_remove,
                 assignees_add=assignees_add, assignees_remove=assignees_remove,
@@ -243,7 +246,8 @@ def register(mcp: FastMCP) -> None:
             _require_pulls_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            comment = provider.add_pr_comment(project, token, pr_id, body)
+            normalized_pr = _normalize_id(project, pr_id)
+            comment = provider.add_pr_comment(project, token, normalized_pr, body)
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)
 
@@ -307,8 +311,9 @@ def register(mcp: FastMCP) -> None:
             _require_pulls_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_pr = _normalize_id(project, pr_id)
             rc = provider.add_pr_review_comment(
-                project, token, pr_id,
+                project, token, normalized_pr,
                 body=body,
                 path=path, line=line, side=side,
                 commit_sha=commit_sha, in_reply_to=in_reply_to,
@@ -355,8 +360,9 @@ def register(mcp: FastMCP) -> None:
             _require_pulls_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_pr = _normalize_id(project, pr_id)
             review = provider.submit_pr_review(
-                project, token, pr_id,
+                project, token, normalized_pr,
                 state=state, body=body, commit_sha=commit_sha,
             )
             return {"project_id": project.id, "review": asdict(review)}
@@ -386,8 +392,9 @@ def register(mcp: FastMCP) -> None:
             _require_pulls_merge(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_pr = _normalize_id(project, pr_id)
             pr = provider.merge_pr(
-                project, token, pr_id,
+                project, token, normalized_pr,
                 merge_method=merge_method,
                 commit_title=commit_title,
                 commit_message=commit_message,

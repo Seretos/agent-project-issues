@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 # through `tools/_providers.py::_resolve` which reads via the config module.
 from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
 from project_issues_plugin.tools._providers import (
+    _normalize_id,
     _provider_for,
     _require_issues_modify,
     _require_token,
@@ -47,10 +48,13 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            comments = provider.list_comments(project, token, ticket_id, limit=limit)
+            normalized_id = _normalize_id(project, ticket_id)
+            comments = provider.list_comments(
+                project, token, normalized_id, limit=limit,
+            )
             return {
                 "project_id": project.id,
-                "ticket_id": ticket_id,
+                "ticket_id": normalized_id,
                 "comments": [asdict(c) for c in comments],
             }
         return _safe(go)
@@ -77,8 +81,9 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
+            normalized_ticket = _normalize_id(project, ticket_id)
             comment = provider.get_comment(
-                project, token, comment_id, ticket_id=ticket_id,
+                project, token, comment_id, ticket_id=normalized_ticket,
             )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)
@@ -111,8 +116,9 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_ticket = _normalize_id(project, ticket_id)
             comment = provider.update_comment(
-                project, token, comment_id, body, ticket_id=ticket_id,
+                project, token, comment_id, body, ticket_id=normalized_ticket,
             )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

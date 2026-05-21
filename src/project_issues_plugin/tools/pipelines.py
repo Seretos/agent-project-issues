@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.config import resolve_token
 from project_issues_plugin.tools._providers import (
+    _normalize_id,
     _provider_for,
     _resolve,
     _safe,
@@ -119,8 +120,9 @@ def register(mcp: FastMCP) -> None:
                     )
             else:
                 # ticket mode
+                normalized_ticket = _normalize_id(project, ticket_id)
                 runs, resolved_refs = provider.list_runs_for_ticket(
-                    project, token, ticket_id, status=status, limit=limit  # type: ignore[arg-type]
+                    project, token, normalized_ticket, status=status, limit=limit  # type: ignore[arg-type]
                 )
                 addressed_by = "ticket"
                 if not resolved_refs:

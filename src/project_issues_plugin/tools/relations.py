@@ -18,6 +18,8 @@ from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.providers.base import WRITABLE_RELATION_KINDS
 from project_issues_plugin.tools._providers import (
+    _normalize_id,
+    _normalize_target,
     _provider_for,
     _require_issues_modify,
     _require_token,
@@ -68,8 +70,10 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_ticket = _normalize_id(project, ticket_id)
+            normalized_target = _normalize_target(project, target)
             relation = provider.add_relation(
-                project, token, ticket_id, kind, target,
+                project, token, normalized_ticket, kind, normalized_target,
             )
             return {
                 "project_id": project.id,
@@ -103,8 +107,10 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            normalized_ticket = _normalize_id(project, ticket_id)
+            normalized_target = _normalize_target(project, target)
             result = provider.remove_relation(
-                project, token, ticket_id, kind, target,
+                project, token, normalized_ticket, kind, normalized_target,
             )
             return {
                 "project_id": project.id,

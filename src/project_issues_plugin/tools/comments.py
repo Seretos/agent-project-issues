@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 # `tools.comments.load_projects` keep working. The runtime call path goes
 # through `tools/_providers.py::_resolve` which reads via the config module.
 from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
+from project_issues_plugin.providers.azuredevops import AzureDevOpsError
 from project_issues_plugin.providers.github import GitHubError
 from project_issues_plugin.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
@@ -136,7 +137,7 @@ def register(mcp: FastMCP) -> None:
                 comment = provider.get_comment(
                     project, token, comment_id, ticket_id=normalized_ticket,
                 )
-            except (GitHubError, GitLabError) as exc:
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
                     exc, project_id=project.id, kind="comment",
                     ident=comment_id,

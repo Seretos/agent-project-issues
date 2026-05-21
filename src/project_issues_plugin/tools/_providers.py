@@ -16,6 +16,10 @@ from __future__ import annotations
 from project_issues_plugin import config as _cfg_mod
 from project_issues_plugin import refs as _refs
 from project_issues_plugin.config import ProjectConfig, resolve_token
+from project_issues_plugin.providers.azuredevops import (
+    AzureDevOpsError,
+    AzureDevOpsProvider,
+)
 from project_issues_plugin.providers.github import GitHubError, GitHubProvider
 from project_issues_plugin.providers.gitlab import GitLabError, GitLabProvider
 
@@ -23,6 +27,7 @@ from project_issues_plugin.providers.gitlab import GitLabError, GitLabProvider
 _PROVIDERS = {
     "github": GitHubProvider(),
     "gitlab": GitLabProvider(),
+    "azuredevops": AzureDevOpsProvider(),
 }
 
 
@@ -166,6 +171,8 @@ def _safe(call):
     except GitHubError as exc:
         return {"error": str(exc)}
     except GitLabError as exc:
+        return {"error": str(exc)}
+    except AzureDevOpsError as exc:
         return {"error": str(exc)}
 
 

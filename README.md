@@ -1,6 +1,6 @@
 # agent-project-issues
 
-Let your AI coding agent read and write **GitHub/GitLab issues** safely. MCP tools for listing/creating/updating tickets and adding comments, with automatic safety markers (`ai-generated` / `ai-modified` labels, `#ai-generated` comment prefix). Per-project permissions and read-only auto-discovery from the local git remote when no config exists.
+Let your AI coding agent read and write **GitHub / GitLab / Azure DevOps issues** safely. MCP tools for listing/creating/updating tickets and adding comments, with automatic safety markers (`ai-generated` / `ai-modified` labels, `#ai-generated` comment prefix). Per-project permissions and read-only auto-discovery from the local git remote when no config exists.
 
 ## Quick install
 
@@ -81,6 +81,45 @@ GitLab differences worth knowing:
 - **Comment ids** — GitLab notes are scoped per issue/MR, unlike GitHub's repo-wide comment ids. `get_comment` / `update_comment` accept the composite form `"<issue_iid>/<note_id>"` (e.g. `"5/99"`); a bare note id surfaces a clear error.
 - **Pipelines** — `list_pipeline_runs(ticket_id=...)` walks the issue's related MRs and aggregates their pipelines. `get_pipeline_run(include_failure_context=true)` fetches the failing jobs' traces (last ~4KB tail) but does not surface GitHub-style structured annotations — GitLab has no equivalent surface, so `annotations: []` on every failing job.
 
+#### Azure DevOps — work items, PRs, threads
+
+```yaml
+version: 1
+
+projects:
+  - id: acme-ado-web
+    description: Frontend repo in the acme ADO project
+    provider: azuredevops
+    # organization/project/repository — three segments, all required.
+    # Work items live at organization/project; PRs at the full path.
+    path: acme/frontend-stack/web
+    # base_url is optional; defaults to https://dev.azure.com.
+    # Set for Azure DevOps Server (on-prem) installations.
+    # base_url: https://devops.acme.internal
+    token_env: AZURE_DEVOPS_TOKEN_ACME
+    # Optional: which work-item type does `create_ticket` create?
+    # default_work_item_type: Bug
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: true
+        modify: true
+        merge: false
+```
+
+Azure DevOps differences worth knowing:
+
+- **Path scope** — work items are scoped to `organization/project`, pull requests to the full `organization/project/repository`. Two YAML entries that share an `organization/project` prefix see the **same** work-item backlog and differ only in which repository their PR operations target.
+- **Auth** — PAT via HTTP Basic with empty username (`":{PAT}"`). The provider can't enumerate PAT scopes through the REST API, so `permissions:` in YAML is the source of truth for what's allowed.
+- **Status state-space** — each Azure DevOps project picks a *process template* (Basic, Agile, Scrum, CMMI, or a custom one) that defines its own states (`To Do`/`Doing`/`Done` for Basic, `New`/`Active`/`Resolved`/`Closed`/`Removed` for Agile, etc.). `list_ticket_statuses` discovers the live state-space for the default work-item type — call it before `update_ticket(status=...)` if you're not sure which strings are valid.
+- **Work-item type for `create_ticket`** — set `default_work_item_type` in YAML to pin (`Bug`, `Issue`, `User Story`, …). When unset the provider auto-picks the first match from `Issue → Bug → User Story → Product Backlog Item → Requirement` against the project's actual types.
+- **Bodies + comments are HTML on the wire** — the provider converts to/from markdown automatically so the agent sees the same shape as on GitHub/GitLab. The `#ai-generated` marker line is preserved across the round-trip.
+- **PR comments** — Azure DevOps has no flat "issue comments" vs "review comments" split. Everything is a *thread* hanging off the PR. Threads without `threadContext` surface as `Comment`s (top-level discussion); threads with `threadContext` surface as `ReviewComment`s (diff-anchored). Replies post into the existing thread's id (`in_reply_to`).
+- **Relations** — `parent` / `child` map to `Hierarchy-Reverse` / `Hierarchy-Forward`, `blocks` / `blocked_by` to `Dependency-Forward` / `-Reverse`, `duplicate_of` to `Duplicate-Forward`, `relates_to` to `Related`. Cross-project relation writes are rejected (parity with GitHub/GitLab).
+- **Pipelines** — `list_pipeline_runs` reads from the classic Build REST surface (`/_apis/build/builds`). `list_runs_for_ticket` walks the work-item's `ArtifactLink` relations to find associated builds. Failure context is the last ~120 lines of the failing job's log; like GitLab, no structured Check-Run annotations.
+
 ### Where the loader looks for the config
 
 The resolver walks **git project boundaries** outward from the CWD:
@@ -125,10 +164,11 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 |---------------|--------|----------|---------------|-------------|
 | `id`          | string | required | —             | Stable, opaque identifier the agent uses to refer to the project. Reserved value `_auto` is rejected — it's only emitted by git-remote auto-discovery. |
 | `description` | string | optional | `""`          | Human-readable description, shown by `list_projects`. |
-| `provider`    | enum   | required | —             | `"github"` or `"gitlab"`. |
-| `path`        | string | required | —             | Provider-native repo path. GitHub: `"owner/repo"`. GitLab: full namespace, e.g. `"group/sub/project"`. |
-| `base_url`    | string | optional | provider host | Self-hosted GitLab base URL (e.g. `https://gitlab.example.com`). Ignored for GitHub. |
-| `token_env`   | string | optional | provider default | Name of the env var holding the API token for this project (e.g. `"GITHUB_TOKEN_ACME"`). When omitted the loader falls back to `GITHUB_TOKEN` / `GITLAB_TOKEN`. |
+| `provider`    | enum   | required | —             | `"github"`, `"gitlab"`, or `"azuredevops"`. |
+| `path`        | string | required | —             | Provider-native repo path. GitHub: `"owner/repo"`. GitLab: full namespace, e.g. `"group/sub/project"`. Azure DevOps: `"organization/project/repository"`. |
+| `base_url`    | string | optional | provider host | Self-hosted base URL — GitLab (`https://gitlab.example.com`) or Azure DevOps Server (`https://devops.example.com`). Ignored for GitHub. |
+| `token_env`   | string | optional | provider default | Name of the env var holding the API token for this project (e.g. `"GITHUB_TOKEN_ACME"`). When omitted the loader falls back to `GITHUB_TOKEN` / `GITLAB_TOKEN` / `AZURE_DEVOPS_TOKEN`. |
+| `default_work_item_type` | string | optional | discovered | Azure DevOps only. Which work-item type `create_ticket` creates (e.g. `"Bug"`). When omitted the provider auto-picks the first match from `Issue → Bug → User Story → Product Backlog Item → Requirement`. |
 | `permissions` | object | optional | all-false     | Permission flags (see below). Defaults make the project read-only. |
 
 **`permissions`:**

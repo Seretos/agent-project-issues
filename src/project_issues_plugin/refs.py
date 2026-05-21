@@ -93,9 +93,96 @@ class GitLabRefParser:
         return ident
 
 
+class AzureDevOpsRefParser:
+    """Parses Azure DevOps work-item and pull-request URLs.
+
+    Recognised shapes (host = `dev.azure.com` or `<org>.visualstudio.com`):
+      - `/{org}/{project}/_workitems/edit/{id}`
+      - `/{org}/{project}/_git/{repo}/pullrequest/{id}`
+
+    The legacy `<org>.visualstudio.com` host omits the leading `/{org}`
+    segment because the org is encoded in the subdomain — we normalise
+    that into the modern form before comparing.
+    """
+
+    def parse_url(self, url: str, project: ProjectConfig) -> str | None:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            return None
+        host = parts.netloc.lower()
+        segs = [s for s in parts.path.split("/") if s]
+        if host == "dev.azure.com":
+            if len(segs) < 3:
+                return None
+            org, proj, kind = segs[0], segs[1], segs[2]
+        elif host.endswith(".visualstudio.com"):
+            if len(segs) < 2:
+                return None
+            org = host.split(".", 1)[0]
+            proj, kind = segs[0], segs[1]
+            segs = [org, *segs]
+        else:
+            return None
+
+        # Work item: /{org}/{project}/_workitems/edit/{id}
+        if kind == "_workitems":
+            if len(segs) < 5 or segs[3] != "edit":
+                return None
+            ident = segs[4]
+            if not ident.isdigit():
+                return None
+            self._guard_project_scope(project, org, proj, repo=None)
+            return ident
+
+        # Pull request: /{org}/{project}/_git/{repo}/pullrequest/{id}
+        if kind == "_git":
+            if len(segs) < 6 or segs[4] != "pullrequest":
+                return None
+            repo, ident = segs[3], segs[5]
+            if not ident.isdigit():
+                return None
+            self._guard_project_scope(project, org, proj, repo=repo)
+            return ident
+
+        return None
+
+    @staticmethod
+    def _guard_project_scope(
+        project: ProjectConfig,
+        org: str,
+        proj: str,
+        repo: str | None,
+    ) -> None:
+        """Reject URLs that point at a different ADO project/repo than the
+        configured one. Work-item URLs only check org+project (since work
+        items are project-scoped); PR URLs additionally check the repo.
+        """
+        cfg_org, cfg_proj, cfg_repo = (
+            project.organization,
+            project.ado_project,
+            project.repository,
+        )
+        if cfg_org and org.lower() != cfg_org.lower():
+            raise ValueError(
+                f"id URL points to organization '{org}', but project_id "
+                f"'{project.id}' is configured for '{cfg_org}'."
+            )
+        if cfg_proj and proj.lower() != cfg_proj.lower():
+            raise ValueError(
+                f"id URL points to project '{proj}', but project_id "
+                f"'{project.id}' is configured for '{cfg_proj}'."
+            )
+        if repo is not None and cfg_repo and repo.lower() != cfg_repo.lower():
+            raise ValueError(
+                f"id URL points to repository '{repo}', but project_id "
+                f"'{project.id}' is configured for '{cfg_repo}'."
+            )
+
+
 _PARSERS: dict[str, _RefParser] = {
     "github": GitHubRefParser(),
     "gitlab": GitLabRefParser(),
+    "azuredevops": AzureDevOpsRefParser(),
 }
 
 
@@ -178,6 +265,7 @@ def normalize_target(raw: str | int | None, project: ProjectConfig) -> str | Non
 
 
 __all__ = [
+    "AzureDevOpsRefParser",
     "GitHubRefParser",
     "GitLabRefParser",
     "normalize_id",

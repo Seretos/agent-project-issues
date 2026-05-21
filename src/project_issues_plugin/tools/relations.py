@@ -16,6 +16,9 @@ from dataclasses import asdict
 
 from mcp.server.fastmcp import FastMCP
 
+from project_issues_plugin.providers.azuredevops import (
+    SUPPORTED_RELATION_KINDS as _AZURE_SUPPORTED_RELATION_KINDS,
+)
 from project_issues_plugin.providers.base import WRITABLE_RELATION_KINDS
 from project_issues_plugin.providers.github import GitHubProvider
 from project_issues_plugin.providers.gitlab import GitLabProvider
@@ -129,8 +132,9 @@ def register(mcp: FastMCP) -> None:
         {
           "kinds": [kind, ...],
           "provider_support": {
-            "github": [kind, ...],
-            "gitlab": [kind, ...],
+            "github":      [kind, ...],
+            "gitlab":      [kind, ...],
+            "azuredevops": [kind, ...],
           }
         }
         ```
@@ -145,5 +149,6 @@ def register(mcp: FastMCP) -> None:
             "provider_support": {
                 "github": list(GitHubProvider._SUPPORTED_RELATION_KINDS),
                 "gitlab": list(GitLabProvider._SUPPORTED_RELATION_KINDS),
+                "azuredevops": list(_AZURE_SUPPORTED_RELATION_KINDS),
             },
         }

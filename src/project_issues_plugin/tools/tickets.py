@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.config import resolve_token
 from project_issues_plugin.providers.base import TicketFilters
+from project_issues_plugin.providers.azuredevops import AzureDevOpsError
 from project_issues_plugin.providers.github import GitHubError
 from project_issues_plugin.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
@@ -153,8 +154,8 @@ def register(mcp: FastMCP) -> None:
         includes a `relations` list describing typed links to other
         tickets / PRs. Relation kinds: `parent`, `child`, `closes`,
         `closed_by`, `duplicate_of`, `duplicated_by`, `mentions`,
-        `mentioned_by`, `blocks`, `blocked_by` (GitHub) plus
-        `relates_to` (GitLab, reserved). Each relation carries
+        `mentioned_by`, `blocks`, `blocked_by` (GitHub + Azure DevOps),
+        plus `relates_to` (GitLab + Azure DevOps). Each relation carries
         `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo),
         best-effort `title`, `url`, `state`
         (`"open"`/`"closed"`/`"merged"`/`""`), and `is_pull_request`.
@@ -192,7 +193,7 @@ def register(mcp: FastMCP) -> None:
                     project, token, normalized_id,
                     include_relations=include_relations,
                 )
-            except (GitHubError, GitLabError) as exc:
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
@@ -287,8 +288,11 @@ def register(mcp: FastMCP) -> None:
         the accepted values are `open`, `closed`, `closed:completed`,
         and `closed:not_planned` (where the `state:state_reason`
         suffix carries GitHub's "done as planned" vs "not planned"
-        distinction). For ADO/Jira the value flows through verbatim
-        (e.g. `Resolved`, `Removed`, `Done`).
+        distinction). For Azure DevOps the value is whatever the
+        project's process template defines (Basic: `To Do`/`Doing`/`Done`;
+        Agile: `New`/`Active`/`Resolved`/`Closed`/`Removed`; Scrum: ...).
+        Call `list_ticket_statuses(project_id)` to enumerate the valid
+        values for the current project.
 
         Agents that don't know the provider's state-space should call
         `list_ticket_statuses(project_id)` first and read
@@ -392,7 +396,7 @@ def register(mcp: FastMCP) -> None:
         ```
         {
           "project_id": str,
-          "provider": "github" | "gitlab" | ...,
+          "provider": "github" | "gitlab" | "azuredevops",
           "values":      [str, ...],          # all valid `status` strings
           "transitions": {str: [str, ...]},   # legal next values per status
           "hints": {

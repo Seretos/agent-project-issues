@@ -39,3 +39,29 @@ projects:
     token_env: GITLAB_TOKEN_EXAMPLE
     # All permissions default to false — the project is read-only when
     # the `permissions:` block is omitted entirely.
+
+  - id: acme-ado-frontend
+    description: Frontend repo in the acme Azure DevOps project
+    provider: azuredevops
+    # `path` is `organization/project/repository`. Work items are scoped
+    # to `organization/project` (so two YAML entries with the same
+    # `organization/project` prefix share their work-item view);
+    # pull-requests are scoped to the full three-part path.
+    path: acme/frontend-stack/web
+    # base_url is optional; defaults to https://dev.azure.com.
+    # Set this for Azure DevOps Server (on-prem) installations.
+    # base_url: https://devops.acme.internal
+    token_env: AZURE_DEVOPS_TOKEN_ACME
+    # Optional: which work-item type does `create_ticket` create?
+    # When unset the provider discovers a sensible default once per
+    # project (Issue → Bug → User Story → Product Backlog Item →
+    # Requirement) — covers Basic/Agile/Scrum/CMMI templates.
+    # default_work_item_type: Bug
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: true
+        modify: true
+        merge: false

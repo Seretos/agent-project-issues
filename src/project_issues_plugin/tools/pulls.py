@@ -20,6 +20,7 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
+from project_issues_plugin.providers.azuredevops import AzureDevOpsError
 from project_issues_plugin.providers.base import PRFilters
 from project_issues_plugin.providers.github import GitHubError
 from project_issues_plugin.providers.gitlab import GitLabError
@@ -152,7 +153,7 @@ def register(mcp: FastMCP) -> None:
                 review_comments = provider.list_pr_review_comments(
                     project, token, normalized_pr,
                 )
-            except (GitHubError, GitLabError) as exc:
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
                     exc, project_id=project.id, kind="pr",
                     ident=normalized_pr,

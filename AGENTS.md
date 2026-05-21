@@ -12,6 +12,8 @@ src/project_issues_plugin/      # Python source (src-layout)
   providers/
     base.py                       # provider-agnostic Ticket/Comment dataclasses
     github.py                     # REST v3 implementation
+    gitlab.py                     # GitLab v4 REST implementation
+    azuredevops.py                # Azure DevOps REST 7.1 implementation
   tools/
     _providers.py                 # shared _PROVIDERS / _resolve / _safe / permission gates
     projects.py                   # list_projects / find_projects
@@ -66,7 +68,7 @@ The workflow:
 | `PROJECT_ISSUES_PLUGIN_CWD` | Override the search root for `.seretos/project-issues.yml` and `.git/config`. Highest priority. Set this when a host (e.g. GitHub Copilot CLI) spawns the MCP from somewhere other than the user's working directory. |
 | `CLAUDE_PROJECT_DIR` | Fallback search root if the plugin var is unset. |
 | `PROJECT_ISSUES_PLUGIN_LOG` | Logging level (`DEBUG`/`INFO`/…). Default `INFO`. Goes to stderr. |
-| `GITHUB_TOKEN` / `GITLAB_TOKEN` | Default tokens for `_auto` projects discovered from the git remote. |
+| `GITHUB_TOKEN` / `GITLAB_TOKEN` / `AZURE_DEVOPS_TOKEN` | Default tokens for `_auto` projects discovered from the git remote. |
 | `<token_env>` | Per-project token if `token_env` is set in YAML. The token value itself never leaves the process. |
 
 ## AI-marker conventions
@@ -101,6 +103,12 @@ The provider applies markers automatically; the agent must not pass them in argu
 - GitLab is stubbed — `_PROVIDERS` in `tools/_providers.py` only registers GitHub. Auto-discovery emits gitlab projects but write paths fail with `NotImplementedError`.
 - Permissions are split into nested namespaces (`permissions.issues` / `permissions.pulls`). The legacy flat form (`{create, modify}` / `{create, modify, pr_create, pr_modify}`) and the old TOML format were removed in YAML schema v1 — see `README.md` for the migration cheat-sheet. `permissions.pulls.merge` defaults to false.
 - Permission gating lives in `tools/_providers.py` (`_require_token`, `_require_issues_create`, `_require_issues_modify`, `_require_pulls_create`, `_require_pulls_modify`, `_require_pulls_merge`). New write operations MUST go through these helpers.
+- Azure DevOps provider notes:
+  - `path` is `organization/project/repository`. Work items are scoped to `organization/project`; pull requests are scoped to the full three-part path. Two YAML entries with the same `organization/project` prefix share their work-item view.
+  - Auth is HTTP Basic with empty username + PAT as password. PAT scope determines what `permissions:` should advertise.
+  - Work-item bodies and comments are HTML on the wire; the provider converts to/from markdown via a minimal stdlib converter so the `markers.py` machinery (which expects `#ai-generated\n\n` literally) keeps working.
+  - The optional `default_work_item_type: <name>` field selects which type `create_ticket` creates. When unset, the provider discovers a default once per project (Issue → Bug → User Story → Product Backlog Item → Requirement), covering Basic / Agile / Scrum / CMMI templates.
+  - Process-template states are discovered per project via `/workitemtypes/{type}/states` and cached in-process for one hour. `list_ticket_statuses` consumes that cache.
 - The `dispatch.yml` workflow is a manual recovery tool only.
 
 ## What lives where (for cross-repo reasoning)

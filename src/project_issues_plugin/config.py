@@ -74,7 +74,7 @@ from ruamel.yaml import YAML, YAMLError
 
 log = logging.getLogger("project-issues.config")
 
-Provider = Literal["github", "gitlab"]
+Provider = Literal["github", "gitlab", "azuredevops"]
 Source = Literal["config", "git-remote"]
 
 
@@ -109,6 +109,8 @@ class ProjectConfig(BaseModel):
     `path` is the provider-native repo identifier:
       - GitHub: `"owner/repo"` (e.g. `"Seretos/agent-project-issues"`)
       - GitLab: full namespace path (e.g. `"group/sub/project"`)
+      - Azure DevOps: `"organization/project/repository"` — work items
+        scope to `organization/project`, PRs to the full three-part path.
 
     The legacy split into `owner`/`repo`/`project_path` is gone from
     the YAML schema; for backward compatibility the internal code
@@ -127,6 +129,10 @@ class ProjectConfig(BaseModel):
     token_env: str | None = None
     permissions: Permissions = Field(default_factory=Permissions)
     source: Source = "config"
+    # Azure DevOps only. When unset, the provider discovers a sensible
+    # default once per project (Issue → Bug → User Story → Product
+    # Backlog Item → Requirement). Ignored by github/gitlab.
+    default_work_item_type: str | None = None
 
     @model_validator(mode="after")
     def _check_provider_fields(self) -> "ProjectConfig":
@@ -140,6 +146,17 @@ class ProjectConfig(BaseModel):
                 raise ValueError(
                     f"project '{self.id}': github 'path' must be "
                     f"'owner/repo', got {self.path!r}"
+                )
+        if self.provider == "azuredevops":
+            if self.path.count("/") != 2:
+                raise ValueError(
+                    f"project '{self.id}': azuredevops 'path' must be "
+                    f"'organization/project/repository', got {self.path!r}"
+                )
+            if any(not seg.strip() for seg in self.path.split("/")):
+                raise ValueError(
+                    f"project '{self.id}': azuredevops 'path' has an "
+                    f"empty segment in {self.path!r}"
                 )
         return self
 
@@ -164,6 +181,32 @@ class ProjectConfig(BaseModel):
         """GitLab project path — same as `path` for the gitlab provider."""
         return self.path if self.provider == "gitlab" else None
 
+    # --- Azure DevOps derived properties -------------------------------------
+
+    @property
+    def organization(self) -> str | None:
+        """Azure DevOps organization (first segment of `path`)."""
+        if self.provider != "azuredevops" or not self.path:
+            return None
+        parts = self.path.split("/")
+        return parts[0] if len(parts) == 3 else None
+
+    @property
+    def ado_project(self) -> str | None:
+        """Azure DevOps project name (middle segment of `path`)."""
+        if self.provider != "azuredevops" or not self.path:
+            return None
+        parts = self.path.split("/")
+        return parts[1] if len(parts) == 3 else None
+
+    @property
+    def repository(self) -> str | None:
+        """Azure DevOps repository name (last segment of `path`)."""
+        if self.provider != "azuredevops" or not self.path:
+            return None
+        parts = self.path.split("/")
+        return parts[2] if len(parts) == 3 else None
+
     @property
     def display_path(self) -> str:
         return self.path or ""
@@ -175,6 +218,11 @@ class ProjectConfig(BaseModel):
         if self.provider == "gitlab":
             base = (self.base_url or "https://gitlab.com").rstrip("/")
             return f"{base}/{self.path}"
+        if self.provider == "azuredevops":
+            org, proj, repo = self.organization, self.ado_project, self.repository
+            if org and proj and repo:
+                base = (self.base_url or "https://dev.azure.com").rstrip("/")
+                return f"{base}/{org}/{proj}/_git/{repo}"
         return None
 
 
@@ -313,7 +361,45 @@ def _autodiscover_from_git(start: Path) -> ProjectConfig | None:
             token_env="GITLAB_TOKEN",
             source="git-remote",
         )
-    log.info("auto-discovery skipped — host %s is not github.com or gitlab.com", host)
+    # Azure DevOps remote shapes:
+    #   HTTPS:  https://dev.azure.com/{org}/{project}/_git/{repo}
+    #   HTTPS:  https://{org}@dev.azure.com/{org}/{project}/_git/{repo}
+    #   SSH:    git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
+    # All normalise to canonical "organization/project/repository".
+    ado_path = _normalise_azure_devops_path(host, path)
+    if ado_path:
+        return ProjectConfig(
+            id="_auto",
+            description=f"Auto-discovered from git remote ({url.strip()})",
+            provider="azuredevops",
+            path=ado_path,
+            token_env="AZURE_DEVOPS_TOKEN",
+            source="git-remote",
+        )
+    log.info(
+        "auto-discovery skipped — host %s is not github.com / gitlab.com / "
+        "dev.azure.com",
+        host,
+    )
+    return None
+
+
+def _normalise_azure_devops_path(host: str, path: str) -> str | None:
+    """Convert a host+path parsed from a git remote into the canonical
+    `organization/project/repository` form, or `None` if this doesn't
+    look like an Azure DevOps remote.
+    """
+    segs = [s for s in path.split("/") if s]
+    if host == "dev.azure.com":
+        # /<org>/<project>/_git/<repo>
+        if len(segs) >= 4 and segs[2] == "_git":
+            return f"{segs[0]}/{segs[1]}/{segs[3]}"
+        return None
+    if host == "ssh.dev.azure.com":
+        # v3/<org>/<project>/<repo>
+        if len(segs) >= 4 and segs[0] == "v3":
+            return f"{segs[1]}/{segs[2]}/{segs[3]}"
+        return None
     return None
 
 

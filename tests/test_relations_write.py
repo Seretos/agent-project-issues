@@ -286,10 +286,21 @@ def test_github_add_relation_blocks_swaps_to_blocked_by_on_wire(
 def test_github_remove_relation_blocked_by_deletes_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Happy path: the relation exists, the pre-check finds it, the
+    DELETE proceeds, and the provider reports `removed=True`."""
     seen: list[str] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         seen.append(f"{req.method} {req.url.path}")
+        if (
+            req.method == "GET"
+            and req.url.path
+            == "/repos/acme/backend/issues/5/dependencies/blocked_by"
+        ):
+            # The pre-check (ticket #49 finding 8) GETs the current
+            # dependency list — return one entry whose `id` matches the
+            # target's resolved internal id.
+            return _json([{"id": 10007, "number": 7}])
         if req.method == "GET":
             return _json(_gh_issue(7))
         if (
@@ -305,6 +316,35 @@ def test_github_remove_relation_blocked_by_deletes_dependency(
         _github_project(), "tok", "5", "blocked_by", "#7",
     )
     assert result == {"removed": True}
+
+
+def test_github_remove_relation_blocked_by_404_when_link_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #49 finding 8 / #48 finding 3: the documented contract is
+    that removing a non-existent relation errors instead of silently
+    succeeding. The pre-check now enforces that."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path
+            == "/repos/acme/backend/issues/5/dependencies/blocked_by"
+        ):
+            return _json([])  # no dependencies at all
+        if req.method == "GET":
+            return _json(_gh_issue(7))
+        if req.method == "DELETE":
+            raise AssertionError(
+                "DELETE must not fire when the pre-check fails"
+            )
+        raise AssertionError(f"unexpected {req.method} {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.github import GitHubError
+    with pytest.raises(GitHubError, match="no blocks/blocked_by link"):
+        GitHubProvider().remove_relation(
+            _github_project(), "tok", "5", "blocked_by", "#7",
+        )
 
 
 # ---------- GitHub: duplicate_of (body + state) -----------------------------
@@ -568,7 +608,9 @@ def test_gitlab_add_relation_duplicate_of_edits_body_closes_and_links(
     assert captured_put["body"]["state_event"] == "close"
     desc = captured_put["body"]["description"]
     assert desc.startswith("#ai-generated\n\n")
-    assert "Duplicate of !7" in desc
+    # Ticket #49 finding 2: we always use the issue sigil `#N`, never
+    # the MR sigil `!N`, because the target is an issue.
+    assert "Duplicate of #7" in desc
     assert "src body" in desc
     # And a relates_to issue link was also posted.
     assert captured_post["body"]["link_type"] == "relates_to"

@@ -47,6 +47,7 @@ from project_issues_plugin.markers import (
 from project_issues_plugin.providers.base import (
     Comment,
     FailingJob,
+    normalize_timestamp,
     PipelineFailure,
     PipelineRun,
     PRFilters,
@@ -165,10 +166,50 @@ def _project_path(project: ProjectConfig) -> str:
     return quote(project.path, safe="")
 
 
+_CANONICAL_URL_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("/-/work_items/", "/-/issues/"),
+)
+
+
+def _canonical_url(url: str, project: ProjectConfig) -> str:
+    """Canonicalise a GitLab `web_url` to a stable cross-tool form.
+
+    Two transforms (ticket #49 findings 3 & 4):
+
+      1. Rewrite `/-/work_items/N` → `/-/issues/N`. The Work Items beta
+         URL family doesn't match comment / MR URL stems, so all
+         downstream callers stay on the legacy `/-/issues/` path which
+         the GitLab REST API also targets.
+      2. Lowercase the project path segment (case-insensitive). GitLab
+         returns inconsistent casing between endpoints — sometimes
+         `Seredos/gitlab-tests`, sometimes `seredos/gitlab-tests`. We
+         normalise to lowercase so an agent comparing URLs across
+         tools sees a single canonical form.
+
+    Returns the URL unchanged when `project.path` is empty or `url` is
+    falsy. Anything off-host (no project-path segment match) is left
+    untouched.
+    """
+    if not url or not project.path:
+        return url
+    for src, dst in _CANONICAL_URL_REPLACEMENTS:
+        url = url.replace(src, dst)
+    path_lower = project.path.lower()
+    if project.path != path_lower:
+        # Match `<scheme://host/><path><boundary>` so we don't accidentally
+        # touch a substring that happens to coincide with the path.
+        pattern = re.compile(
+            r"(://[^/]+/)" + re.escape(project.path) + r"(?=/|$|\?|#)",
+            re.IGNORECASE,
+        )
+        url = pattern.sub(rf"\1{path_lower}", url, count=1)
+    return url
+
+
 # ---------- mappers ----------------------------------------------------------
 
 
-def _map_issue(raw: dict) -> Ticket:
+def _map_issue(raw: dict, project: ProjectConfig | None = None) -> Ticket:
     """Translate a GitLab issue payload into a `Ticket`.
 
     Status mapping:
@@ -178,6 +219,10 @@ def _map_issue(raw: dict) -> Ticket:
     GitLab does not have a `state_reason` equivalent; the
     `ai-closed-not-planned` LABEL is the agent-side convention for
     "won't do" semantics (see `markers.py`).
+
+    `project` (optional) lets us canonicalise the returned `url`
+    (lowercase the project path segment, rewrite `/-/work_items/N` to
+    `/-/issues/N` — ticket #49 findings 3 & 4).
     """
     state = raw.get("state", "opened")
     if state in ("opened", "reopened"):
@@ -185,6 +230,9 @@ def _map_issue(raw: dict) -> Ticket:
     else:
         status = "closed"
     author = raw.get("author") or {}
+    url = raw.get("web_url") or ""
+    if project is not None:
+        url = _canonical_url(url, project)
     return Ticket(
         id=str(raw["iid"]),  # IID — project-scoped; matches user-visible URL
         title=raw.get("title") or "",
@@ -195,9 +243,9 @@ def _map_issue(raw: dict) -> Ticket:
             a.get("username", "") for a in (raw.get("assignees") or [])
         ],
         labels=list(raw.get("labels") or []),
-        url=raw.get("web_url") or "",
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or "",
+        url=url,
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or ""),
     )
 
 
@@ -233,12 +281,14 @@ def _map_note(
                 f"{project.web_url}/-/{segment}/{noteable_iid}"
                 f"#note_{note_id}"
             )
+    if project is not None:
+        raw_url = _canonical_url(raw_url, project)
     return Comment(
         id=str(raw["id"]),
         author=author.get("username", ""),
         body=raw.get("body") or "",
         url=raw_url,
-        created_at=raw.get("created_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
     )
 
 
@@ -261,7 +311,7 @@ def _map_mergeable(raw: dict) -> bool | None:
     return None
 
 
-def _map_mr(raw: dict) -> PullRequest:
+def _map_mr(raw: dict, project: ProjectConfig | None = None) -> PullRequest:
     """Translate a GitLab merge-request payload into a `PullRequest`.
 
     Status mapping:
@@ -305,6 +355,9 @@ def _map_mr(raw: dict) -> PullRequest:
     }
     head_pipeline = raw.get("head_pipeline") or raw.get("pipeline") or {}
     pipeline_status = head_pipeline.get("status") if head_pipeline else None
+    mr_url = raw.get("web_url") or ""
+    if project is not None:
+        mr_url = _canonical_url(mr_url, project)
     return PullRequest(
         id=str(raw["iid"]),
         number=int(raw["iid"]),
@@ -323,9 +376,9 @@ def _map_mr(raw: dict) -> PullRequest:
         base=base,
         merged=merged,
         mergeable=_map_mergeable(raw),
-        url=raw.get("web_url") or "",
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or "",
+        url=mr_url,
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or ""),
         merge_commit_sha=raw.get("merge_commit_sha"),
         detailed_merge_status=raw.get("detailed_merge_status"),
         pipeline_status=pipeline_status,
@@ -370,8 +423,8 @@ def _map_pipeline_run(raw: dict) -> PipelineRun:
         status=status,
         conclusion=conclusion,
         url=raw.get("web_url") or "",
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or raw.get("finished_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or raw.get("finished_at") or ""),
         run_attempt=1,
         failure=None,
     )
@@ -501,9 +554,18 @@ def _gitlab_mark_duplicate_of(
     """Mark `source` as duplicate of `target` on GitLab.
 
     No native duplicate-link type exists, so we emulate it with:
-      1. body-edit appending `Duplicate of !N`,
-      2. `state_event=close`,
-      3. a `relates_to` issue link as a structured spur.
+      1. a `relates_to` issue link as a structured spur,
+      2. body-edit appending `Duplicate of #N`,
+      3. `state_event=close`.
+
+    Ordering matters (ticket #49 finding 2): the link write — the
+    operation most likely to fail — happens FIRST. If it raises, the
+    body and state stay untouched (atomic "either succeed or no-op"
+    semantics, matching what an agent reasonably expects after seeing
+    `{"error": ...}`).
+
+    Sigil note: the body-prefix uses `#N` (issue sigil) not `!N` (MR
+    sigil) — fixes finding 2's secondary nit.
 
     The body edit is run through `apply_body_marker` so the
     AI-attribution marker stays consistent.
@@ -516,7 +578,26 @@ def _gitlab_mark_duplicate_of(
     current_labels = set(src.get("labels") or [])
     will_be_ai_generated = AI_GENERATED_LABEL in current_labels
 
-    dup_line = f"Duplicate of !{target_iid}"
+    # Step 1: write the structured link FIRST so any failure surfaces
+    # before we mutate the body / close the issue. If the link already
+    # exists (GitLab 409s), treat as "already linked" — fall through
+    # to body+close which are idempotent on their own.
+    relation: Relation | None = None
+    try:
+        relation = _gitlab_post_issue_link(
+            client, path, source_iid,
+            target_project_path=target_project_path,
+            target_issue_iid=target_iid,
+            link_type="relates_to",
+            relation_kind_for_caller="duplicate_of",
+            project=project,
+        )
+    except GitLabError as exc:
+        if exc.status != 409:
+            raise  # Propagate — body / state stay untouched.
+
+    # Step 2 + 3: body prefix + close.
+    dup_line = f"Duplicate of #{target_iid}"
     body_without_marker = strip_leading_ai_marker(current_body)
     if dup_line not in body_without_marker:
         new_body_core = (
@@ -536,35 +617,23 @@ def _gitlab_mark_duplicate_of(
     pu = client.put(f"/projects/{path}/issues/{source_iid}", json=payload)
     _check(pu)
 
-    # Add the structured relates_to spur. If it already exists, GitLab
-    # 409s — swallow as "already there".
-    try:
-        relation = _gitlab_post_issue_link(
-            client, path, source_iid,
-            target_project_path=target_project_path,
-            target_issue_iid=target_iid,
-            link_type="relates_to",
-            relation_kind_for_caller="duplicate_of",
-            project=project,
-        )
+    if relation is not None:
         return relation
-    except GitLabError as exc:
-        if exc.status != 409:
-            raise
-        # Already linked — synthesise a Relation from the target issue.
-        tg = client.get(
-            f"/projects/{target_project_path}/issues/{target_iid}",
-        )
-        _check(tg)
-        tj = tg.json()
-        return Relation(
-            kind="duplicate_of",
-            ticket_id=f"#{target_iid}",
-            title=tj.get("title") or "",
-            url=tj.get("web_url") or "",
-            state=tj.get("state") or "",
-            is_pull_request=False,
-        )
+    # 409 path: synthesise a Relation from the target issue payload.
+    tg = client.get(
+        f"/projects/{target_project_path}/issues/{target_iid}",
+    )
+    _check(tg)
+    tj = tg.json()
+    target_url = _canonical_url(tj.get("web_url") or "", project)
+    return Relation(
+        kind="duplicate_of",
+        ticket_id=f"#{target_iid}",
+        title=tj.get("title") or "",
+        url=target_url,
+        state=tj.get("state") or "",
+        is_pull_request=False,
+    )
 
 
 def _split_composite_comment_id(
@@ -597,19 +666,21 @@ def _status_to_state_event(status: Status) -> str:
     """Map common status string → GitLab `state_event`.
 
     GitLab issue/MR updates take `state_event=close|reopen`, not
-    `state=closed`. The provider-agnostic status string carries GitHub's
-    `closed:completed` / `closed:not_planned` distinction, but GitLab
-    has no `state_reason`, so both collapse to `close`. Agents wanting
-    "not planned" semantics apply the `ai-closed-not-planned` label
-    (see `markers.py`).
+    `state=closed`. The accepted vocabulary is exactly what
+    `list_statuses` returns for GitLab (`["open", "closed"]`) so the
+    discovery and write surfaces stay in sync (ticket #49 findings 5
+    & 6). GitHub's `closed:completed` / `closed:not_planned` aliases
+    are NO LONGER silently coerced — agents that previously passed
+    them get a clear rejection pointing back to `list_ticket_statuses`.
     """
     if status == "open":
         return "reopen"
-    if status in ("closed", "closed:completed", "closed:not_planned"):
+    if status == "closed":
         return "close"
     raise ValueError(
-        f"unsupported status {status!r} for GitLab — accepted: "
-        f"open, closed, closed:completed, closed:not_planned"
+        f"unsupported status {status!r} for GitLab — "
+        f"use list_ticket_statuses to discover valid values. "
+        f"Accepted: open, closed."
     )
 
 
@@ -638,9 +709,10 @@ def _resolve_assignee_ids(
 
     GitLab issue/MR endpoints accept `assignee_ids` (integer list) but
     not usernames. Resolution uses `/users?username=<name>` which
-    returns a list — we take the first match. Unknown usernames are
-    silently dropped (consistent with GitHub's behaviour of accepting
-    unknown assignees without 4xx-ing the whole update).
+    returns a list — we take the first match. Unknown usernames raise
+    `GitLabError(422, ...)` so the agent learns which name was bad
+    instead of seeing a silent drop (ticket #49 finding 7 — matches
+    GitHub's clear-failure-beats-silent-success principle).
     """
     resolved: list[int] = []
     for name in usernames:
@@ -653,6 +725,12 @@ def _resolve_assignee_ids(
             uid = matches[0].get("id")
             if isinstance(uid, int):
                 resolved.append(uid)
+                continue
+        raise GitLabError(
+            422,
+            f"assignee '{name}' was rejected by GitLab "
+            "(user not found or not assignable on this project)",
+        )
     return resolved
 
 
@@ -829,6 +907,30 @@ def _fetch_relations(
         relations.append(_make_relation(kind="mentions", ref=ref))
 
     return relations
+
+
+def _gitlab_pipeline_scope(status: str) -> str | None:
+    """Map our tool-surface `status` vocab to GitLab's pipeline `scope`.
+
+    Tool surface (see `tools/pipelines.py`): `queued | in_progress |
+    completed | all`. GitLab's `scope` accepts `running | pending |
+    finished | branches | tags`. We map onto the closest equivalent:
+
+      - `queued`       → `pending`
+      - `in_progress`  → `running`
+      - `completed`    → `finished`
+      - `all`          → no filter
+      - anything else  → no filter (avoid mis-mapping unknown agent input)
+
+    Ticket #49 finding 1: previously the kwarg wasn't accepted at all,
+    causing a TypeError crash.
+    """
+    mapping = {
+        "queued": "pending",
+        "in_progress": "running",
+        "completed": "finished",
+    }
+    return mapping.get(status)
 
 
 def _list_pipelines(
@@ -1036,7 +1138,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 f"/projects/{_project_path(project)}/issues", params=params,
             )
             _check(r)
-            return [_map_issue(it) for it in r.json()]
+            return [_map_issue(it, project) for it in r.json()]
 
     def get_ticket(
         self,
@@ -1060,7 +1162,7 @@ class GitLabProvider(TokenCapabilityProvider):
         with _client(project, token) as client:
             r = client.get(f"/projects/{path}/issues/{ticket_id}")
             _check(r)
-            ticket = _map_issue(r.json())
+            ticket = _map_issue(r.json(), project)
             c = client.get(
                 f"/projects/{path}/issues/{ticket_id}/notes",
                 params={"per_page": 100, "sort": "asc", "order_by": "created_at"},
@@ -1143,7 +1245,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 )
                 _check(pu)
                 raw = pu.json()
-            return _map_issue(raw)
+            return _map_issue(raw, project)
 
     def update_ticket(
         self,
@@ -1231,12 +1333,12 @@ class GitLabProvider(TokenCapabilityProvider):
                 )
 
             if not payload:
-                return _map_issue(current)
+                return _map_issue(current, project)
             r = client.put(
                 f"/projects/{path}/issues/{ticket_id}", json=payload,
             )
             _check(r)
-            return _map_issue(r.json())
+            return _map_issue(r.json(), project)
 
     def list_statuses(
         self,
@@ -1454,7 +1556,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 params=params,
             )
             _check(r)
-            return [_map_mr(it) for it in r.json()]
+            return [_map_mr(it, project) for it in r.json()]
 
     def get_pr(
         self,
@@ -1467,7 +1569,7 @@ class GitLabProvider(TokenCapabilityProvider):
         with _client(project, token) as client:
             r = client.get(f"/projects/{path}/merge_requests/{pr_id}")
             _check(r)
-            pr = _map_mr(r.json())
+            pr = _map_mr(r.json(), project)
             c = client.get(
                 f"/projects/{path}/merge_requests/{pr_id}/notes",
                 params={"per_page": 100, "sort": "asc", "order_by": "created_at"},
@@ -1533,7 +1635,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 payload["reviewer_ids"] = reviewer_ids
             r = client.post(f"/projects/{path}/merge_requests", json=payload)
             _check(r)
-            return _map_mr(r.json())
+            return _map_mr(r.json(), project)
 
     def update_pr(
         self,
@@ -1640,12 +1742,12 @@ class GitLabProvider(TokenCapabilityProvider):
                 )
 
             if not payload:
-                return _map_mr(current)
+                return _map_mr(current, project)
             r = client.put(
                 f"/projects/{path}/merge_requests/{pr_id}", json=payload,
             )
             _check(r)
-            return _map_mr(r.json())
+            return _map_mr(r.json(), project)
 
     def add_pr_comment(
         self,
@@ -1990,7 +2092,7 @@ class GitLabProvider(TokenCapabilityProvider):
             # mutations (e.g. webhook-driven label edits) are reflected.
             r2 = client.get(f"/projects/{path}/merge_requests/{pr_id}")
             _check(r2)
-            return _map_mr(r2.json())
+            return _map_mr(r2.json(), project)
 
     # ---------- relations (write side) ---------------------------------------
 
@@ -2123,49 +2225,77 @@ class GitLabProvider(TokenCapabilityProvider):
         project: ProjectConfig,
         token: str | None,
         branch: str,
+        status: str = "all",
         limit: int = 20,
     ) -> list[PipelineRun]:
-        return _list_pipelines(project, token, {"ref": branch}, limit)
+        params: dict[str, Any] = {"ref": branch}
+        scope = _gitlab_pipeline_scope(status)
+        if scope:
+            params["scope"] = scope
+        return _list_pipelines(project, token, params, limit)
 
     def list_runs_for_commit(
         self,
         project: ProjectConfig,
         token: str | None,
         sha: str,
+        status: str = "all",
         limit: int = 20,
     ) -> list[PipelineRun]:
-        return _list_pipelines(project, token, {"sha": sha}, limit)
+        params: dict[str, Any] = {"sha": sha}
+        scope = _gitlab_pipeline_scope(status)
+        if scope:
+            params["scope"] = scope
+        return _list_pipelines(project, token, params, limit)
 
     def list_runs_for_tag(
         self,
         project: ProjectConfig,
         token: str | None,
         tag: str,
+        status: str = "all",
         limit: int = 20,
-    ) -> list[PipelineRun]:
+    ) -> tuple[list[PipelineRun], list[str]]:
         """GitLab does not distinguish branch/tag refs in the pipelines
         query — both go through the `ref` parameter. We pass through
         and document the gap rather than synthesize a tag filter that
         the API doesn't support.
+
+        Returns `(runs, resolved_refs)` to match the GitHub signature
+        (`resolved_refs` lists the single ref string we queried with).
         """
-        return _list_pipelines(project, token, {"ref": tag}, limit)
+        params: dict[str, Any] = {"ref": tag}
+        scope = _gitlab_pipeline_scope(status)
+        if scope:
+            params["scope"] = scope
+        return _list_pipelines(project, token, params, limit), [tag]
 
     def list_runs_for_ticket(
         self,
         project: ProjectConfig,
         token: str | None,
         ticket_id: str,
+        status: str = "all",  # noqa: ARG002 — accepted for cross-provider symmetry
         limit: int = 20,
-    ) -> list[PipelineRun]:
+    ) -> tuple[list[PipelineRun], list[str]]:
         """Issues do not trigger pipelines directly. Strategy:
         1. Fetch MRs linked to the issue (`.../issues/:iid/related_merge_requests`).
         2. For each MR, fetch its pipelines (`.../merge_requests/:iid/pipelines`).
         3. Concatenate, sort by created_at desc, cap at `limit`.
 
-        Returns `[]` if no related MRs / no pipelines exist.
+        Returns `(runs, resolved_refs)` — `resolved_refs` lists the
+        MR iids (prefixed with `!`) we walked, mirroring the GitHub
+        signature so `tools/pipelines.py` can unpack both providers
+        the same way (#49 finding 1 fix).
+
+        `status` is accepted for surface symmetry but not applied —
+        the per-MR pipelines endpoint doesn't expose a usable scope
+        filter for this aggregation path; client-side filtering would
+        be misleading here.
         """
         path = _project_path(project)
         per_page = min(max(1, limit), 100)
+        resolved_refs: list[str] = []
         with _client(project, token) as client:
             r = client.get(
                 f"/projects/{path}/issues/{ticket_id}/related_merge_requests",
@@ -2177,6 +2307,7 @@ class GitLabProvider(TokenCapabilityProvider):
                 mr_iid = mr.get("iid")
                 if mr_iid is None:
                     continue
+                resolved_refs.append(f"!{mr_iid}")
                 pr = client.get(
                     f"/projects/{path}/merge_requests/{mr_iid}/pipelines",
                     params={"per_page": per_page},
@@ -2187,7 +2318,8 @@ class GitLabProvider(TokenCapabilityProvider):
         collected.sort(
             key=lambda r: r.get("created_at", ""), reverse=True,
         )
-        return [_map_pipeline_run(it) for it in collected[:per_page]]
+        runs = [_map_pipeline_run(it) for it in collected[:per_page]]
+        return runs, resolved_refs
 
     def get_run(
         self,

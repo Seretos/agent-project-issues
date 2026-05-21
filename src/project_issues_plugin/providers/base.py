@@ -1,8 +1,35 @@
 """Provider abstraction — common types shared by GitHub/GitLab."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
+
+
+_TIMESTAMP_FRACTION_RE = re.compile(
+    r"(?P<base>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+"
+    r"(?P<tz>(?:Z|[+-]\d{2}:?\d{2}))?$"
+)
+
+
+def normalize_timestamp(raw: str | None) -> str:
+    """Normalise a provider-returned timestamp to second precision (#49 finding 10).
+
+    GitHub returns `"2026-05-20T23:07:48Z"` (seconds), GitLab returns
+    `"2026-05-20T23:07:59.507Z"` (milliseconds). Both providers feed
+    through this helper so the cross-provider surface looks identical
+    and lexical string comparisons work without surprises.
+
+    Anything not matching `<YYYY-MM-DDTHH:MM:SS><.fraction><tz>` is
+    returned unchanged — we don't want to silently mangle vendor
+    payloads that happen to encode time differently.
+    """
+    if not raw:
+        return raw or ""
+    m = _TIMESTAMP_FRACTION_RE.match(raw)
+    if not m:
+        return raw
+    return f"{m.group('base')}{m.group('tz') or ''}"
 
 # Provider-native status as a free string.
 #

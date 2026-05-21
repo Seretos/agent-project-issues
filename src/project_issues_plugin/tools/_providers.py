@@ -129,11 +129,19 @@ def _normalize_target(project: ProjectConfig, raw):
 
 
 def _safe(call):
-    """Execute `call()` and translate known errors to a dict with `error`."""
+    """Execute `call()` and translate known errors to a dict with `error`.
+
+    `TypeError` is caught as defence-in-depth so a provider-tool surface
+    mismatch (e.g. ticket #49 finding 1: GitLab pipeline methods missing
+    a `status` kwarg) is reported as a structured error instead of a
+    raw Python traceback bubbling up to the agent.
+    """
     try:
         return call()
     except (LookupError, PermissionError, NotImplementedError, ValueError) as exc:
         return {"error": str(exc)}
+    except TypeError as exc:
+        return {"error": f"provider call rejected its arguments: {exc}"}
     except GitHubError as exc:
         return {"error": str(exc)}
     except GitLabError as exc:

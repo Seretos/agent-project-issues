@@ -92,7 +92,9 @@ def test_list_runs_for_tag_uses_ref_param(
         return _json([])
 
     _install_mock(monkeypatch, handler)
-    GitLabProvider().list_runs_for_tag(_project(), "t", "v1.0.0")
+    runs, refs = GitLabProvider().list_runs_for_tag(_project(), "t", "v1.0.0")
+    assert refs == ["v1.0.0"]
+    assert runs == []
 
 
 def test_list_runs_for_commit_sends_sha(
@@ -137,9 +139,11 @@ def test_list_runs_for_ticket_walks_related_mrs(
         return _json([], status_code=404)
 
     _install_mock(monkeypatch, handler)
-    runs = GitLabProvider().list_runs_for_ticket(_project(), "t", "5")
+    runs, refs = GitLabProvider().list_runs_for_ticket(_project(), "t", "5")
     # All 3 pipelines, sorted by created_at desc.
     assert [r.id for r in runs] == ["102", "101", "100"]
+    # MR iids prefixed with `!` mirror GitHub's resolved_refs surface.
+    assert refs == ["!10", "!11"]
 
 
 def test_list_runs_for_ticket_no_related_mrs(
@@ -151,8 +155,9 @@ def test_list_runs_for_ticket_no_related_mrs(
         return _json([], 404)
 
     _install_mock(monkeypatch, handler)
-    runs = GitLabProvider().list_runs_for_ticket(_project(), "t", "5")
+    runs, refs = GitLabProvider().list_runs_for_ticket(_project(), "t", "5")
     assert runs == []
+    assert refs == []
 
 
 # ---------- get_run ----------------------------------------------------------

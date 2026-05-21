@@ -359,29 +359,25 @@ def test_create_ticket_with_closed_status_issues_put_to_close(
     assert captured["put"] == {"state_event": "close"}
 
 
-def test_create_ticket_with_closed_not_planned_status_maps_to_close(
+def test_create_ticket_rejects_github_style_alias_on_gitlab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GitLab has no state_reason — `closed:not_planned` collapses to
-    `state_event=close` (semantically declined via label, see markers.py)."""
-    captured: dict = {}
+    """Per #49 finding 5: GitLab no longer silently coerces GitHub's
+    `closed:not_planned` into `state_event=close`. The agent must use a
+    value from `list_ticket_statuses` for the project's provider.
+    """
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/api/v4/users":
             return _json([])
-        if req.method == "POST" and req.url.path.endswith("/issues"):
-            return _json(_issue_payload(61))
-        if req.method == "PUT" and req.url.path.endswith("/issues/61"):
-            captured["put"] = json.loads(req.content.decode())
-            return _json(_issue_payload(61, state="closed"))
         return _json({}, status_code=404)
 
     _install_mock(monkeypatch, handler)
-    GitLabProvider().create_ticket(
-        _project(), "t", title="t", body="b",
-        labels=[], assignees=[], status="closed:not_planned",
-    )
-    assert captured["put"] == {"state_event": "close"}
+    with pytest.raises(ValueError, match="unsupported status 'closed:not_planned'"):
+        GitLabProvider().create_ticket(
+            _project(), "t", title="t", body="b",
+            labels=[], assignees=[], status="closed:not_planned",
+        )
 
 
 def test_create_ticket_status_open_skips_put(
@@ -448,34 +444,36 @@ def test_create_ticket_rejects_unknown_status_before_post(
     assert seen == []
 
 
-def test_create_ticket_drops_unknown_assignees(
+def test_create_ticket_rejects_unknown_assignees(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict = {}
+    """Per #49 finding 7: unresolvable usernames raise instead of being
+    silently dropped — matches GitHub's behaviour and the
+    AGENTS.md "clear failure beats silent success" principle.
+    """
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/api/v4/users":
-            # No users match.
             return _json([])
-        if req.method == "POST":
-            captured["body"] = json.loads(req.content.decode())
-            return _json(_issue_payload(1))
         return _json({}, status_code=404)
 
     _install_mock(monkeypatch, handler)
-    GitLabProvider().create_ticket(
-        _project(), "t", title="t", body="b", labels=[],
-        assignees=["ghost"],
-    )
-    # No assignee_ids key when nothing resolved — matches the GitHub
-    # provider's "no assignees" call shape.
-    assert "assignee_ids" not in captured["body"]
+    from project_issues_plugin.providers.gitlab import GitLabError
+    with pytest.raises(GitLabError, match="assignee 'ghost'"):
+        GitLabProvider().create_ticket(
+            _project(), "t", title="t", body="b", labels=[],
+            assignees=["ghost"],
+        )
 
 
 # ---------- update_ticket ----------------------------------------------------
 
 
 def test_update_ticket_status_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passing the canonical GitLab status (`closed`) closes the ticket.
+    Tests of the rejected GitHub-style aliases live in
+    `test_update_ticket_rejects_github_style_alias_on_gitlab`.
+    """
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -488,10 +486,29 @@ def test_update_ticket_status_close(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _install_mock(monkeypatch, handler)
     ticket = GitLabProvider().update_ticket(
-        _project(), "t", "5", status="closed:completed",
+        _project(), "t", "5", status="closed",
     )
     assert ticket.status == "closed"
     assert captured["body"]["state_event"] == "close"
+
+
+def test_update_ticket_rejects_github_style_alias_on_gitlab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per #49 finding 5: `closed:completed` is no longer silently
+    coerced to plain `closed` on GitLab. The rejection message mirrors
+    `list_ticket_statuses` (no spurious aliases)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return _json(_issue_payload(5, labels=["ai-generated"]))
+        return _json({}, status_code=404)
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(ValueError, match="unsupported status 'closed:completed'"):
+        GitLabProvider().update_ticket(
+            _project(), "t", "5", status="closed:completed",
+        )
 
 
 def test_update_ticket_status_reopen(monkeypatch: pytest.MonkeyPatch) -> None:

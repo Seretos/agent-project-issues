@@ -82,25 +82,30 @@ def test_body_prefix_normalises_leading_whitespace():
 
 def test_body_prefix_treats_none_as_empty_body():
     """Callers may pass `None` for optional bodies; the helper must not
-    crash and must still return a valid prefixed string."""
+    crash and must still return a valid prefixed string.
+
+    Canonical form for empty body is the bare marker line — trailing
+    newlines are stripped (ticket #49 finding 9).
+    """
     result = ensure_body_prefix(None)
-    assert result == AI_BODY_PREFIX
+    assert result == "#ai-generated"
 
 
 def test_body_prefix_handles_empty_string():
     result = ensure_body_prefix("")
-    assert result == AI_BODY_PREFIX
+    assert result == "#ai-generated"
 
 
 # ---------- apply_body_marker (ticket #44) -----------------------------------
 
 
 def test_apply_body_marker_generated_on_none():
-    assert apply_body_marker(None, will_be_ai_generated=True) == AI_GENERATED_PREFIX
+    """Empty body collapses to bare marker (ticket #49 finding 9)."""
+    assert apply_body_marker(None, will_be_ai_generated=True) == "#ai-generated"
 
 
 def test_apply_body_marker_modified_on_none():
-    assert apply_body_marker(None, will_be_ai_generated=False) == AI_MODIFIED_PREFIX
+    assert apply_body_marker(None, will_be_ai_generated=False) == "#ai-modified"
 
 
 def test_apply_body_marker_adds_modified_to_unmarked_body():

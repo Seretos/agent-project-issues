@@ -23,6 +23,7 @@ from project_issues_plugin.markers import (
 from project_issues_plugin.providers.base import (
     Comment,
     FailingJob,
+    normalize_timestamp,
     PipelineFailure,
     PipelineRun,
     PRFilters,
@@ -99,6 +100,10 @@ def _map_issue(raw: dict) -> Ticket:
         # GitHub returns `state_reason="completed"` for "completed" and
         # null/unknown for legacy issues — both map to `closed:completed`.
         status = "closed:completed"
+    # Labels are sorted alphabetically so callers comparing labels
+    # across read tools (`list_tickets` vs `get_ticket`) get a stable
+    # order — ticket #49 finding 11.
+    label_names = sorted(lbl["name"] for lbl in (raw.get("labels") or []))
     return Ticket(
         id=str(raw["number"]),
         title=raw.get("title") or "",
@@ -106,10 +111,10 @@ def _map_issue(raw: dict) -> Ticket:
         status=status,
         author=(raw.get("user") or {}).get("login", ""),
         assignees=[a["login"] for a in (raw.get("assignees") or [])],
-        labels=[lbl["name"] for lbl in (raw.get("labels") or [])],
+        labels=label_names,
         url=raw.get("html_url") or "",
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or ""),
     )
 
 
@@ -119,7 +124,7 @@ def _map_comment(raw: dict) -> Comment:
         author=(raw.get("user") or {}).get("login", ""),
         body=raw.get("body") or "",
         url=raw.get("html_url") or "",
-        created_at=raw.get("created_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
     )
 
 
@@ -144,8 +149,8 @@ def _map_review_comment(raw: dict) -> ReviewComment:
         side=raw.get("side"),
         commit_sha=raw.get("commit_id") or raw.get("original_commit_id") or "",
         in_reply_to=str(in_reply_to) if in_reply_to is not None else None,
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or ""),
         url=raw.get("html_url") or "",
         discussion_id=discussion_id,
     )
@@ -207,8 +212,8 @@ def _map_pr(raw: dict) -> PullRequest:
         merged=merged,
         mergeable=raw.get("mergeable"),  # may be None when GitHub hasn't computed
         url=raw.get("html_url") or "",
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or ""),
         mergeable_state=raw.get("mergeable_state"),
         merge_commit_sha=raw.get("merge_commit_sha"),
         auto_merge=raw.get("auto_merge"),
@@ -220,29 +225,31 @@ def _split_github_status(
 ) -> tuple[str | None, str | None]:
     """Return (state, state_reason) tuple for a provider-native status.
 
-    Accepted values:
-      - None              → (None, None)            (no state change)
-      - "open"            → ("open", None)
-      - "closed"          → ("closed", "completed") (legacy alias)
-      - "closed:completed"→ ("closed", "completed")
-      - "closed:not_planned" → ("closed", "not_planned")
+    Accepted values mirror `list_statuses().values` for GitHub —
+    `["open", "closed:completed", "closed:not_planned"]`. The legacy
+    bare `"closed"` alias is NO LONGER accepted (ticket #49 finding 5):
+    callers that previously got `closed` silently coerced into
+    `closed:completed` now get a structured rejection pointing back to
+    `list_ticket_statuses`. This keeps the discovery and write surfaces
+    consistent.
 
-    Anything else raises ValueError with the same hint as the failure
-    message in `update_ticket` so agents can re-discover the
-    state-space via `list_ticket_statuses`.
+      - None                  → (None, None)            (no state change)
+      - "open"                → ("open", None)
+      - "closed:completed"    → ("closed", "completed")
+      - "closed:not_planned"  → ("closed", "not_planned")
     """
     if status is None:
         return None, None
     if status == "open":
         return "open", None
-    if status in ("closed", "closed:completed"):
+    if status == "closed:completed":
         return "closed", "completed"
     if status == "closed:not_planned":
         return "closed", "not_planned"
     raise ValueError(
         f"unsupported status {status!r} for GitHub — "
         f"use list_ticket_statuses to discover valid values. "
-        f"Accepted: open, closed, closed:completed, closed:not_planned."
+        f"Accepted: open, closed:completed, closed:not_planned."
     )
 
 
@@ -353,6 +360,41 @@ def _github_post_dependency(
     _check(r)
     return _map_relation_from_sub_issue(
         target_raw, project, relation_kind_for_caller,
+    )
+
+
+def _github_assert_dependency_exists(
+    client: httpx.Client,
+    repo_path: str,
+    source_issue_number: str,
+    *,
+    target_internal_id: int,
+    source_ref: str,
+    target_ref: str,
+) -> None:
+    """Raise 404 when no `blocked_by` dependency exists from source→target.
+
+    Ticket #49 finding 8 / #48 finding 3: GitHub's
+    `DELETE /dependencies/blocked_by/{id}` is silently idempotent —
+    succeeds whether the link exists or not. The documented contract
+    of `remove_relation` says removing a non-existent relation must
+    raise, so we read the current dependency list first and 404
+    ourselves before the DELETE.
+    """
+    r = client.get(
+        f"{repo_path}/issues/{source_issue_number}/dependencies/blocked_by",
+    )
+    _check(r)
+    rows = r.json() or []
+    for row in rows:
+        # API surface uses the issue's internal id under either key
+        # depending on the version — accept both.
+        candidate = row.get("id") or row.get("internal_id")
+        if isinstance(candidate, int) and candidate == target_internal_id:
+            return
+    raise GitHubError(
+        404,
+        f"no blocks/blocked_by link from {source_ref} to {target_ref} found to remove",
     )
 
 
@@ -2328,6 +2370,17 @@ class GitHubProvider:
                 _check(r)
                 return {"removed": True}
             if kind == "blocked_by":
+                # Pre-check existence so the documented "remove returns
+                # error when nothing was removed" contract holds —
+                # GitHub's Dependencies DELETE endpoint is silently
+                # idempotent on its own (ticket #49 finding 8 / #48
+                # finding 3).
+                _github_assert_dependency_exists(
+                    client, _repo_path(project), ticket_id,
+                    target_internal_id=target_internal_id,
+                    source_ref=f"#{ticket_id}",
+                    target_ref=f"#{target_number}",
+                )
                 r = client.delete(
                     f"{_repo_path(project)}/issues/{ticket_id}"
                     f"/dependencies/blocked_by/{target_internal_id}",
@@ -2337,6 +2390,12 @@ class GitHubProvider:
             if kind == "blocks":
                 source_internal_id, _ = _fetch_issue_internal_id(
                     client, _repo_path(project), ticket_id,
+                )
+                _github_assert_dependency_exists(
+                    client, target_repo, target_number,
+                    target_internal_id=source_internal_id,
+                    source_ref=f"#{target_number}",
+                    target_ref=f"#{ticket_id}",
                 )
                 r = client.delete(
                     f"{target_repo}/issues/{target_number}"
@@ -2490,8 +2549,8 @@ def _map_run(raw: dict) -> PipelineRun:
         status=raw.get("status") or "",
         conclusion=raw.get("conclusion"),
         url=raw.get("html_url") or "",
-        created_at=raw.get("created_at") or "",
-        updated_at=raw.get("updated_at") or "",
+        created_at=normalize_timestamp(raw.get("created_at") or ""),
+        updated_at=normalize_timestamp(raw.get("updated_at") or ""),
         run_attempt=int(raw.get("run_attempt") or 1),
     )
 

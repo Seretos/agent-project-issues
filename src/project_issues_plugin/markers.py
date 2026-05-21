@@ -57,13 +57,18 @@ def apply_body_marker(body: str | None, *, will_be_ai_generated: bool) -> str:
     `None` is treated as an empty body so callers can pipe through
     optional inputs without a `None`-check. Calling the helper twice
     in a row produces the same string as calling it once.
+
+    Trailing newlines are stripped so the canonical form for empty
+    body collapses to the bare marker line (`"#ai-generated"`) — this
+    matches what GitLab persists and removes the GitHub/GitLab
+    asymmetry called out by ticket #49 finding 9.
     """
     text = body or ""
     # Strip any single existing marker line (idempotent + handles
     # generated↔modified transitions without stacking).
     stripped = _AI_MARKER_LINE_RE.sub("", text)
     prefix = AI_GENERATED_PREFIX if will_be_ai_generated else AI_MODIFIED_PREFIX
-    return prefix + stripped
+    return (prefix + stripped).rstrip("\n")
 
 
 def strip_leading_ai_marker(body: str | None) -> str:

@@ -293,6 +293,139 @@ def test_tool_back_compat_default_call_unchanged(monkeypatch):
     assert result["has_more"] is False
 
 
+def test_tool_tail_use_case_multipage_thread(monkeypatch):
+    """Regression: thread with 6 comments, limit=2 → must return the
+    LAST 2 (newest-first), not the first 2 reversed (ticket #47
+    follow-up after test-agent live-verify).
+
+    Algorithm: per_page=2 means last_page=3; tail-fetch fires page 1
+    probe (to read Link rel=last), then page 3 (the actual tail), and
+    returns the last page reversed.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register_tools(monkeypatch, _project())
+
+    all_comments = [
+        _comment(1, "first",  created_at="2024-01-01T00:00:00Z"),
+        _comment(2, "second", created_at="2024-01-02T00:00:00Z"),
+        _comment(3, "third",  created_at="2024-01-03T00:00:00Z"),
+        _comment(4, "fourth", created_at="2024-01-04T00:00:00Z"),
+        _comment(5, "fifth",  created_at="2024-01-05T00:00:00Z"),
+        _comment(6, "sixth",  created_at="2024-01-06T00:00:00Z"),
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        page = int(req.url.params.get("page", "1"))
+        per_page = int(req.url.params.get("per_page", "30"))
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_rows = all_comments[start:end]
+        # Build a minimal Link header that advertises the last page.
+        last_page = (len(all_comments) + per_page - 1) // per_page
+        link = f'<https://api.github.com/x?page={last_page}>; rel="last"'
+        if page < last_page:
+            link = (
+                f'<https://api.github.com/x?page={page + 1}>; rel="next", '
+                + link
+            )
+        return _json_response(page_rows, headers={"Link": link})
+
+    _install_mock(monkeypatch, handler)
+
+    result = tools["list_comments"](
+        project_id="acme", ticket_id="42",
+        order="desc", limit=2,
+    )
+    # MUST be the last two comments, not the first two reversed.
+    assert [c["body"] for c in result["comments"]] == ["sixth", "fifth"]
+    # Older pages still exist (the older 4 comments).
+    assert result["has_more"] is True
+
+
+def test_tool_tail_use_case_partial_last_page(monkeypatch):
+    """Tail with limit larger than last-page size walks backwards to
+    fill `limit` items. 7 comments, per_page=3 → last_page=3 has 1
+    item, walk back to page 2 (3 items) to get 4 total, slice tail
+    of `limit` newest-first."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register_tools(monkeypatch, _project())
+
+    all_comments = [
+        _comment(i, f"c{i}", created_at=f"2024-01-{i:02d}T00:00:00Z")
+        for i in range(1, 8)  # 7 comments
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        page = int(req.url.params.get("page", "1"))
+        per_page = int(req.url.params.get("per_page", "30"))
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_rows = all_comments[start:end]
+        last_page = (len(all_comments) + per_page - 1) // per_page
+        link = f'<https://api.github.com/x?page={last_page}>; rel="last"'
+        if page < last_page:
+            link = (
+                f'<https://api.github.com/x?page={page + 1}>; rel="next", '
+                + link
+            )
+        return _json_response(page_rows, headers={"Link": link})
+
+    _install_mock(monkeypatch, handler)
+
+    result = tools["list_comments"](
+        project_id="acme", ticket_id="42",
+        order="desc", limit=3,
+    )
+    # Last 3 newest-first: c7, c6, c5.
+    assert [c["body"] for c in result["comments"]] == ["c7", "c6", "c5"]
+    assert result["has_more"] is True
+
+
+def test_tool_tail_use_case_single_page_unchanged(monkeypatch):
+    """When the whole thread fits in one page, tail just reverses page 1."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register_tools(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return _json_response(
+            [_comment(1, "a"), _comment(2, "b")],
+            headers={"Link": '<https://api.github.com/x?page=1>; rel="last"'},
+        )
+
+    _install_mock(monkeypatch, handler)
+
+    result = tools["list_comments"](
+        project_id="acme", ticket_id="42",
+        order="desc", limit=5,
+    )
+    assert [c["body"] for c in result["comments"]] == ["b", "a"]
+    assert result["has_more"] is False
+
+
+def test_tool_desc_with_explicit_page_falls_back_to_simple_reverse(monkeypatch):
+    """Tail-fetch only triggers when page=1 and no since. An explicit
+    page=N stays in the regular ascending fetch + client-side reverse
+    so paginated callers get predictable behaviour."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register_tools(monkeypatch, _project())
+    captured: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["page"] = req.url.params.get("page", "")
+        return _json_response([_comment(1, "a"), _comment(2, "b")])
+
+    _install_mock(monkeypatch, handler)
+
+    result = tools["list_comments"](
+        project_id="acme", ticket_id="42",
+        order="desc", limit=2, page=2,
+    )
+    # Only one fetch (no probe), and `page=2` was honoured verbatim.
+    assert captured["page"] == "2"
+    # Reversed via the client-side helper (no smart tail).
+    assert [c["body"] for c in result["comments"]] == ["b", "a"]
+
+
 def test_invalid_since_propagates_as_error(monkeypatch):
     """A bad ISO timestamp from the agent reaches GitHub's API and
     typically gets a 422; the existing _safe wrapper translates it."""

@@ -1430,15 +1430,23 @@ class GitLabProvider(TokenCapabilityProvider):
         *,
         since: str | None = None,
         page: int = 1,
+        order: str = "asc",
     ) -> tuple[list[Comment], bool]:
-        """List user notes (non-system) on an issue, oldest first.
+        """List user notes (non-system) on an issue.
 
         System notes (state changes, label edits, milestone moves) are
         filtered out — they aren't user-facing comments.
 
-        Returns `(rows, has_more)`. `has_more` reflects GitLab's
-        `X-Next-Page` pagination header. `since` maps to GitLab's
+        Returns `(rows, has_more)`. `since` maps to GitLab's
         `updated_after` query parameter (ISO-8601). `page` is 1-based.
+
+        Tail-fetch (ticket #47 follow-up): when `order="desc"`,
+        `page=1`, and no `since`, the implementation probes the
+        `X-Total-Pages` header and fetches from the last page
+        backwards until `limit` items are collected, returning
+        newest-first. Without this special case the provider would
+        just reverse page 1, which is the OLDEST N in reverse order
+        rather than the newest.
 
         Filtering system notes happens client-side AFTER the API
         truncated to `per_page`, so the returned list can occasionally
@@ -1448,15 +1456,20 @@ class GitLabProvider(TokenCapabilityProvider):
         """
         per_page = min(max(1, limit), 100)
         path = _project_path(project)
-        params: dict[str, Any] = {
-            "per_page": per_page,
-            "page": page,
-            "sort": "asc",
-            "order_by": "created_at",
-        }
-        if since:
-            params["updated_after"] = since
         with _client(project, token) as client:
+            if order == "desc" and page == 1 and not since:
+                return self._list_comments_tail(
+                    client, project, path, ticket_id,
+                    per_page=per_page, limit=limit,
+                )
+            params: dict[str, Any] = {
+                "per_page": per_page,
+                "page": page,
+                "sort": "asc",
+                "order_by": "created_at",
+            }
+            if since:
+                params["updated_after"] = since
             r = client.get(
                 f"/projects/{path}/issues/{ticket_id}/notes",
                 params=params,
@@ -1469,6 +1482,61 @@ class GitLabProvider(TokenCapabilityProvider):
             next_page = (r.headers.get("X-Next-Page") or "").strip()
             has_more = bool(next_page)
             return rows, has_more
+
+    def _list_comments_tail(
+        self,
+        client: httpx.Client,
+        project: ProjectConfig,
+        path: str,
+        ticket_id: str,
+        *,
+        per_page: int,
+        limit: int,
+    ) -> tuple[list[Comment], bool]:
+        """Smart-fetch the last `limit` user notes newest-first.
+
+        Same shape as `GitHubProvider._list_comments_tail` — probe
+        page 1 for the total page count (`X-Total-Pages`), walk
+        backwards from the last page collecting items until at least
+        `limit` are gathered (or pages run out), reverse + slice.
+        """
+        url = f"/projects/{path}/issues/{ticket_id}/notes"
+        base_params: dict[str, Any] = {
+            "per_page": per_page,
+            "sort": "asc",
+            "order_by": "created_at",
+        }
+        probe = client.get(url, params={**base_params, "page": 1})
+        _check(probe)
+        total_pages_header = (probe.headers.get("X-Total-Pages") or "").strip()
+        try:
+            last_page = int(total_pages_header) if total_pages_header else 1
+        except ValueError:
+            last_page = 1
+        if last_page <= 1:
+            rows = [
+                _map_note(it, project) for it in probe.json()
+                if not it.get("system", False)
+            ]
+            rows.reverse()
+            return rows, False
+
+        collected_oldest_first: list[Comment] = []
+        cur = last_page
+        while cur >= 1 and len(collected_oldest_first) < limit:
+            r = client.get(url, params={**base_params, "page": cur})
+            _check(r)
+            page_rows = [
+                _map_note(it, project) for it in r.json()
+                if not it.get("system", False)
+            ]
+            collected_oldest_first = page_rows + collected_oldest_first
+            cur -= 1
+
+        tail = collected_oldest_first[-limit:]
+        tail.reverse()
+        has_more = cur >= 1
+        return tail, has_more
 
     def get_comment(
         self,

@@ -118,6 +118,25 @@ def _repo_path(project: ProjectConfig) -> str:
     return f"/repos/{project.owner}/{project.repo}"
 
 
+_LINK_LAST_RE = re.compile(r'<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"')
+
+
+def _parse_link_last_page(link_header: str) -> int | None:
+    """Return the page number from a `Link: rel="last"` entry, or None.
+
+    Used by the tail-fetch path in `list_comments` (ticket #47 follow-up).
+    """
+    if not link_header:
+        return None
+    m = _LINK_LAST_RE.search(link_header)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - regex guards int
+        return None
+
+
 def _map_issue(raw: dict) -> Ticket:
     state = raw.get("state", "open")
     state_reason = raw.get("state_reason")
@@ -1652,18 +1671,39 @@ class GitHubProvider:
         *,
         since: str | None = None,
         page: int = 1,
+        order: str = "asc",
     ) -> tuple[list[Comment], bool]:
         """List comments on a ticket (capped at `limit`, max 100 per page).
 
-        Returns `(rows, has_more)` — `has_more` is True when GitHub's
-        pagination Link header advertises a `next` page. `since` is
-        forwarded natively (`?since=<iso>`). `page` is 1-based.
+        Returns `(rows, has_more)`. `since` is forwarded natively
+        (`?since=<iso>`). `page` is 1-based.
+
+        Tail-fetch (ticket #47 follow-up): when `order="desc"`,
+        `page=1`, and no `since`, the implementation probes the
+        pagination Link header to find the last page, fetches from
+        the end backwards until `limit` items are collected, and
+        returns them newest-first. This makes `order="desc",
+        limit=N` actually return the LAST N comments — the recipe
+        promised by the ticket body. Without this special case the
+        provider would just reverse page 1, which is the OLDEST N
+        in reverse order rather than the newest.
+
+        `has_more` semantics:
+          - asc / explicit page / since: True when a `rel="next"`
+            link exists (more comments after the returned page).
+          - desc tail-fetch: True when older pages exist (more
+            comments BEFORE the returned tail slice).
         """
         per_page = min(max(1, limit), 100)
-        params: dict[str, Any] = {"per_page": per_page, "page": page}
-        if since:
-            params["since"] = since
         with _client(token) as client:
+            if order == "desc" and page == 1 and not since:
+                return self._list_comments_tail(
+                    client, project, ticket_id,
+                    per_page=per_page, limit=limit,
+                )
+            params: dict[str, Any] = {"per_page": per_page, "page": page}
+            if since:
+                params["since"] = since
             r = client.get(
                 f"{_repo_path(project)}/issues/{ticket_id}/comments",
                 params=params,
@@ -1673,6 +1713,49 @@ class GitHubProvider:
             link = r.headers.get("Link", "") or ""
             has_more = 'rel="next"' in link
             return rows, has_more
+
+    def _list_comments_tail(
+        self,
+        client: httpx.Client,
+        project: ProjectConfig,
+        ticket_id: str,
+        *,
+        per_page: int,
+        limit: int,
+    ) -> tuple[list[Comment], bool]:
+        """Smart-fetch the last `limit` comments newest-first.
+
+        Algorithm: probe page 1 to read the `Link rel="last"` header,
+        then fetch from the last page backwards, collecting until we
+        have at least `limit` items. Reverse + slice for the final
+        return. `has_more` indicates older pages still exist.
+        """
+        url = f"{_repo_path(project)}/issues/{ticket_id}/comments"
+        probe = client.get(url, params={"per_page": per_page, "page": 1})
+        _check(probe)
+        link = probe.headers.get("Link", "") or ""
+        last_page = _parse_link_last_page(link)
+        if last_page is None or last_page <= 1:
+            rows = [_map_comment(it) for it in probe.json()]
+            rows.reverse()
+            return rows, False
+
+        # Multi-page thread: walk backwards from the last page.
+        collected_oldest_first: list[Comment] = []
+        cur = last_page
+        while cur >= 1 and len(collected_oldest_first) < limit:
+            r = client.get(url, params={"per_page": per_page, "page": cur})
+            _check(r)
+            page_rows = [_map_comment(it) for it in r.json()]
+            collected_oldest_first = page_rows + collected_oldest_first
+            cur -= 1
+
+        # `collected_oldest_first` is ascending. We want the last `limit`
+        # items newest-first.
+        tail = collected_oldest_first[-limit:]
+        tail.reverse()
+        has_more = cur >= 1
+        return tail, has_more
 
     def get_comment(
         self,

@@ -81,11 +81,17 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_id = _normalize_id(project, ticket_id)
+            # Pass `order` down — the provider does a smart tail-fetch
+            # for desc+page=1+no-since so `order="desc", limit=N` actually
+            # returns the LAST N comments (ticket #47 follow-up). For
+            # explicit `page=N` or `since=…`, the provider falls back to
+            # the regular ascending fetch and we reverse client-side.
             comments, has_more = provider.list_comments(
                 project, token, normalized_id,
-                limit=limit, since=since, page=page,
+                limit=limit, since=since, page=page, order=order,
             )
-            ordered = apply_order(comments, order)
+            tail_fetched = (order == "desc" and page == 1 and not since)
+            ordered = comments if tail_fetched else apply_order(comments, order)
             rows = [asdict(c) for c in ordered]
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,

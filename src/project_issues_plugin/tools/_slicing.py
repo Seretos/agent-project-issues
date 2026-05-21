@@ -1,0 +1,91 @@
+"""Shared row-slicing helpers for list/get tools.
+
+Lifted out so the same `order` / `since` semantics serve `list_comments`
+(ticket #47) AND `get_ticket` / `get_pr` comment slicing (ticket #50).
+The body-trim helpers in this module are consumed by ticket #50.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Iterable, Literal
+
+
+def _parse_iso(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp tolerating the `Z` suffix.
+
+    Returns a timezone-aware `datetime`. Raises `ValueError` for
+    unparseable inputs — callers translate that to a user-facing error.
+    """
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def filter_since(rows: Iterable[Any], since: str | None, *, attr: str = "created_at"):
+    """Keep rows with `<attr>` strictly >= `since`. No-op when `since` is None.
+
+    Operates on dataclass instances (uses `getattr`) — provider methods
+    apply this AFTER mapping the raw API payload to a dataclass.
+    """
+    if not since:
+        return list(rows)
+    since_dt = _parse_iso(since)
+    out = []
+    for r in rows:
+        ts = getattr(r, attr)
+        if ts and _parse_iso(ts) >= since_dt:
+            out.append(r)
+    return out
+
+
+def apply_order(rows: list, order: Literal["asc", "desc"]) -> list:
+    """Return rows in the requested order, assuming the input is ascending."""
+    if order == "desc":
+        return list(reversed(rows))
+    return rows
+
+
+def apply_body_knobs(
+    rows: list[dict[str, Any]],
+    *,
+    omit_body: bool,
+    body_max_chars: int | None,
+    body_attr: str = "body",
+) -> list[dict[str, Any]]:
+    """Apply body slimming knobs to a list of dicts (post-`asdict`).
+
+    - `omit_body=True`: drop the body key entirely. A `body_truncated`
+      sibling is NOT set (callers detect omission via `body_attr not in row`).
+    - `body_max_chars=N`: truncate `body` to N characters and add
+      `body_truncated: bool` so callers can tell the body is a prefix.
+
+    Defaults (`omit_body=False`, `body_max_chars=None`) are a pass-through.
+    """
+    if not omit_body and body_max_chars is None:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        new = dict(row)
+        if omit_body:
+            new.pop(body_attr, None)
+            out.append(new)
+            continue
+        body = new.get(body_attr)
+        if body_max_chars is not None and isinstance(body, str):
+            if len(body) > body_max_chars:
+                new[body_attr] = body[:body_max_chars]
+                new["body_truncated"] = True
+            else:
+                new["body_truncated"] = False
+        out.append(new)
+    return out
+
+
+__all__ = [
+    "apply_body_knobs",
+    "apply_order",
+    "filter_since",
+]

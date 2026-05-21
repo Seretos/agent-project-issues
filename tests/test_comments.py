@@ -101,10 +101,13 @@ def test_list_comments_honors_pagination(monkeypatch: pytest.MonkeyPatch) -> Non
 
     _install_mock(monkeypatch, handler)
     provider = GitHubProvider()
-    comments = provider.list_comments(_project(), token="t", ticket_id="42", limit=5)
+    comments, has_more = provider.list_comments(
+        _project(), token="t", ticket_id="42", limit=5,
+    )
     assert [c.id for c in comments] == ["1", "2"]
     assert [c.body for c in comments] == ["first", "second"]
     assert captured["per_page"] == "5"
+    assert has_more is False
 
 
 def test_list_comments_caps_limit_at_100(monkeypatch: pytest.MonkeyPatch) -> None:

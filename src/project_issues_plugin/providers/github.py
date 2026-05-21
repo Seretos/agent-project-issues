@@ -1574,16 +1574,30 @@ class GitHubProvider:
         token: str | None,
         ticket_id: str,
         limit: int = 30,
-    ) -> list[Comment]:
-        """List comments on a ticket (most recent up to `limit`, capped at 100)."""
+        *,
+        since: str | None = None,
+        page: int = 1,
+    ) -> tuple[list[Comment], bool]:
+        """List comments on a ticket (capped at `limit`, max 100 per page).
+
+        Returns `(rows, has_more)` — `has_more` is True when GitHub's
+        pagination Link header advertises a `next` page. `since` is
+        forwarded natively (`?since=<iso>`). `page` is 1-based.
+        """
         per_page = min(max(1, limit), 100)
+        params: dict[str, Any] = {"per_page": per_page, "page": page}
+        if since:
+            params["since"] = since
         with _client(token) as client:
             r = client.get(
                 f"{_repo_path(project)}/issues/{ticket_id}/comments",
-                params={"per_page": per_page},
+                params=params,
             )
             _check(r)
-            return [_map_comment(it) for it in r.json()]
+            rows = [_map_comment(it) for it in r.json()]
+            link = r.headers.get("Link", "") or ""
+            has_more = 'rel="next"' in link
+            return rows, has_more
 
     def get_comment(
         self,

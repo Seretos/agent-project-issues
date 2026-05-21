@@ -16,6 +16,7 @@ The shared `_PROVIDERS`/`_resolve`/`_safe`/permission helpers live in
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -31,6 +32,7 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _safe,
 )
+from project_issues_plugin.tools._slicing import apply_order
 
 
 def register(mcp: FastMCP) -> None:
@@ -39,8 +41,28 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         ticket_id: str,
         limit: int = 30,
+        order: Literal["asc", "desc"] = "asc",
+        since: str | None = None,
+        page: int = 1,
     ) -> dict:
-        """List comments on a ticket. Default limit 30 (capped at 100).
+        """List comments on a ticket. Default: oldest-first, limit 30 (cap 100).
+
+        Args (ticket #47):
+          - `order`: `"asc"` (default, chronological) or `"desc"`
+            (reverse). For the "give me the most recent N comments"
+            use-case, pass `order="desc", limit=N` — the page is fetched
+            ascending from the provider and reversed client-side. On
+            threads longer than `limit`, the reversed slice covers only
+            the FIRST page; pass an explicit `page` to walk older
+            comments.
+          - `since`: ISO-8601 timestamp. Comments with `created_at`
+            (GitHub) / `updated_after` (GitLab) at or after this
+            instant are returned. Useful for "what changed since my
+            last check".
+          - `page`: 1-based page number; combine with `limit` (=
+            per_page). The response carries `has_more: bool` from the
+            provider's pagination header (GitHub `Link rel=next`,
+            GitLab `X-Next-Page`).
 
         Read-only: requires a token only if the repo is private.
         """
@@ -49,13 +71,17 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_id = _normalize_id(project, ticket_id)
-            comments = provider.list_comments(
-                project, token, normalized_id, limit=limit,
+            comments, has_more = provider.list_comments(
+                project, token, normalized_id,
+                limit=limit, since=since, page=page,
             )
+            ordered = apply_order(comments, order)
             return {
                 "project_id": project.id,
                 "ticket_id": normalized_id,
-                "comments": [asdict(c) for c in comments],
+                "comments": [asdict(c) for c in ordered],
+                "page": page,
+                "has_more": has_more,
             }
         return _safe(go)
 

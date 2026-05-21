@@ -1292,28 +1292,48 @@ class GitLabProvider(TokenCapabilityProvider):
         token: str | None,
         ticket_id: str,
         limit: int = 30,
-    ) -> list[Comment]:
+        *,
+        since: str | None = None,
+        page: int = 1,
+    ) -> tuple[list[Comment], bool]:
         """List user notes (non-system) on an issue, oldest first.
 
         System notes (state changes, label edits, milestone moves) are
         filtered out — they aren't user-facing comments.
+
+        Returns `(rows, has_more)`. `has_more` reflects GitLab's
+        `X-Next-Page` pagination header. `since` maps to GitLab's
+        `updated_after` query parameter (ISO-8601). `page` is 1-based.
+
+        Filtering system notes happens client-side AFTER the API
+        truncated to `per_page`, so the returned list can occasionally
+        be shorter than `limit` even when more user notes exist on
+        later pages — callers that need exactly `limit` user notes
+        should walk `has_more`.
         """
         per_page = min(max(1, limit), 100)
         path = _project_path(project)
+        params: dict[str, Any] = {
+            "per_page": per_page,
+            "page": page,
+            "sort": "asc",
+            "order_by": "created_at",
+        }
+        if since:
+            params["updated_after"] = since
         with _client(project, token) as client:
             r = client.get(
                 f"/projects/{path}/issues/{ticket_id}/notes",
-                params={
-                    "per_page": per_page,
-                    "sort": "asc",
-                    "order_by": "created_at",
-                },
+                params=params,
             )
             _check(r)
-            return [
+            rows = [
                 _map_note(it, project) for it in r.json()
                 if not it.get("system", False)
             ]
+            next_page = (r.headers.get("X-Next-Page") or "").strip()
+            has_more = bool(next_page)
+            return rows, has_more
 
     def get_comment(
         self,

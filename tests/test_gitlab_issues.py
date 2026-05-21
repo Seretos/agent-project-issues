@@ -701,9 +701,10 @@ def test_list_comments_filters_system_notes(
         ])
 
     _install_mock(monkeypatch, handler)
-    comments = GitLabProvider().list_comments(_project(), "t", "5")
+    comments, has_more = GitLabProvider().list_comments(_project(), "t", "5")
     assert len(comments) == 1
     assert comments[0].body == "user comment"
+    assert has_more is False
 
 
 def test_get_comment_composite_key(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -458,6 +458,10 @@ def test_gitlab_add_relation_blocked_by_posts_link(
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        # Ticket #49 finding 2 follow-up: the issue-links POST needs
+        # the target project's numeric id; resolved via this GET first.
+        if req.method == "GET" and req.url.path == "/api/v4/projects/acme/backend":
+            return _json({"id": 4242, "path_with_namespace": "acme/backend"})
         if (
             req.method == "POST"
             and "/issues/5/links" in req.url.path
@@ -477,6 +481,9 @@ def test_gitlab_add_relation_blocked_by_posts_link(
     assert rel.ticket_id == "#7"
     assert captured["body"]["link_type"] == "is_blocked_by"
     assert captured["body"]["target_issue_iid"] == "7"
+    # The body MUST carry the numeric project id, not the URL-encoded path
+    # (the original bug fix — see ticket #49 finding 2 follow-up).
+    assert captured["body"]["target_project_id"] == 4242
 
 
 def test_gitlab_add_relation_blocks_uses_blocks_link_type(
@@ -485,6 +492,8 @@ def test_gitlab_add_relation_blocks_uses_blocks_link_type(
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/api/v4/projects/acme/backend":
+            return _json({"id": 4242})
         if (
             req.method == "POST"
             and "/issues/5/links" in req.url.path
@@ -509,6 +518,8 @@ def test_gitlab_add_relation_relates_to_uses_relates_to_link_type(
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/api/v4/projects/acme/backend":
+            return _json({"id": 4242})
         if (
             req.method == "POST"
             and "/issues/5/links" in req.url.path
@@ -585,6 +596,8 @@ def test_gitlab_add_relation_duplicate_of_edits_body_closes_and_links(
 
     def handler(req: httpx.Request) -> httpx.Response:
         path = req.url.path
+        if req.method == "GET" and path == "/api/v4/projects/acme/backend":
+            return _json({"id": 4242})
         if req.method == "GET" and "/issues/5" in path and "links" not in path:
             return _json(_gl_issue(
                 5, description="#ai-generated\n\nsrc body",

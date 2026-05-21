@@ -470,6 +470,29 @@ def _gitlab_link_type(kind: str) -> str:
     raise ValueError(f"unmappable kind {kind!r} for GitLab issue links")
 
 
+def _resolve_gitlab_project_numeric_id(
+    client: httpx.Client,
+    project_path: str,
+) -> int:
+    """Resolve a GitLab project (by URL-encoded path) to its numeric id.
+
+    Ticket #49 finding 2 root cause: the issue-links endpoint
+    (`POST /projects/:id/issues/:iid/links`) accepts a URL-encoded
+    path for the `target_project_id` body field, but rejects mixed
+    case from path. The numeric id is unambiguous and round-trips
+    cleanly, so we always resolve to the integer before posting.
+    """
+    r = client.get(f"/projects/{project_path}")
+    _check(r)
+    pid = r.json().get("id")
+    if not isinstance(pid, int):
+        raise GitLabError(
+            500,
+            f"GitLab returned no numeric id for project '{project_path}'",
+        )
+    return pid
+
+
 def _gitlab_post_issue_link(
     client: httpx.Client,
     source_project_path: str,
@@ -481,9 +504,19 @@ def _gitlab_post_issue_link(
     relation_kind_for_caller: str,
     project: ProjectConfig,
 ) -> Relation:
-    """POST to the Issue Links endpoint and return a `Relation`."""
+    """POST to the Issue Links endpoint and return a `Relation`.
+
+    Uses the numeric project id for the `target_project_id` body
+    field (resolved via `_resolve_gitlab_project_numeric_id`). The
+    path-based form was case-sensitive in practice and produced
+    misleading `404 Project Not Found` responses for kinds other
+    than `duplicate_of` — ticket #49 finding 2 follow-up.
+    """
+    target_numeric_id = _resolve_gitlab_project_numeric_id(
+        client, target_project_path,
+    )
     body: dict[str, Any] = {
-        "target_project_id": target_project_path,
+        "target_project_id": target_numeric_id,
         "target_issue_iid": target_issue_iid,
         "link_type": link_type,
     }
@@ -501,7 +534,7 @@ def _gitlab_post_issue_link(
         kind=relation_kind_for_caller,
         ticket_id=f"#{target_issue_iid}",
         title=raw.get("title") or "",
-        url=target_url,
+        url=_canonical_url(target_url, project),
         state=raw.get("state") or "",
         is_pull_request=False,
     )

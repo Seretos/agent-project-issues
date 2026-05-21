@@ -187,6 +187,57 @@ def test_gitlab_map_issue_canonicalises_ticket_url(monkeypatch):
     )
 
 
+# ---------- finding 2 follow-up: GitLab add_relation 404 for blocks/etc. ----
+
+
+def test_gitlab_add_relation_blocks_uses_numeric_project_id(monkeypatch):
+    """Ticket #49 finding 2 follow-up flagged by the test agent: the
+    atomic-write fix alone didn't address the underlying 404 because
+    it only touched `_gitlab_mark_duplicate_of`. The real root cause
+    is the issue-links endpoint rejecting the URL-encoded path for
+    `target_project_id` — we now resolve the project's numeric id
+    first and send THAT in the body."""
+    captured: dict = {}
+    seen_get_project = []
+
+    def handler(req):
+        if req.method == "GET" and req.url.path == "/api/v4/projects/Seredos/gitlab-tests":
+            seen_get_project.append(True)
+            return _resp({"id": 12345, "path_with_namespace": "Seredos/gitlab-tests"})
+        if req.method == "POST" and "/issues/5/links" in req.url.path:
+            captured["body"] = json.loads(req.content.decode())
+            return _resp({"iid": 7, "title": "T", "state": "opened",
+                          "web_url": "https://gitlab.com/seredos/gitlab-tests/-/issues/7"})
+        return _resp({}, status_code=404)
+
+    _install_gitlab_mock(monkeypatch, handler)
+    rel = GitLabProvider().add_relation(
+        _gitlab_project(), "tok", "5", "blocks", "#7",
+    )
+    assert seen_get_project, "Should resolve project numeric id before posting"
+    assert captured["body"]["target_project_id"] == 12345  # numeric, not path
+    assert captured["body"]["link_type"] == "blocks"
+    assert rel.kind == "blocks"
+
+
+def test_gitlab_add_relation_blocks_propagates_404_from_resolver(monkeypatch):
+    """If the project-id resolver 404s, the link write never fires and
+    no body is mutated (atomic semantics preserved)."""
+    def handler(req):
+        if req.method == "GET" and "/api/v4/projects/" in req.url.path:
+            return _resp({"message": "Not Found"}, status_code=404)
+        if req.method == "POST" and "/issues/5/links" in req.url.path:
+            raise AssertionError("POST must not fire when project resolver 404s")
+        return _resp({}, status_code=404)
+
+    _install_gitlab_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.gitlab import GitLabError
+    with pytest.raises(GitLabError):
+        GitLabProvider().add_relation(
+            _gitlab_project(), "tok", "5", "blocks", "#7",
+        )
+
+
 # ---------- finding 5 + 6: status vocab single source of truth --------------
 
 

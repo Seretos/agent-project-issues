@@ -438,10 +438,20 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Merge a pull request.
 
-        `merge_method` controls the merge style on GitHub:
+        `merge_method` controls the merge style. Accepted by both
+        GitHub and GitLab providers:
           - "merge":  create a merge commit (default).
           - "squash": squash all commits into one and merge.
-          - "rebase": rebase the head branch onto base.
+          - "rebase": rebase the head branch onto base. GitLab raises
+            here because its rebase flow is a separate endpoint
+            (PUT .../rebase) that does not itself merge — call rebase
+            first, then merge with "merge".
+
+        `commit_title` / `commit_message` are forwarded as the merge
+        commit's title and body. GitLab has no separate title/body
+        split so the provider joins them as `"<title>\\n\\n<message>"`
+        into the appropriate `merge_commit_message` /
+        `squash_commit_message` field.
 
         Requires the project's `pulls.merge` permission. This flag has
         no flat-form equivalent and defaults to False on existing

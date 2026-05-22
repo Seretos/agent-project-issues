@@ -10,10 +10,14 @@ requires-python = ">=3.11"
 authors = [{ name = "Arne von Appen" }]
 dependencies = [
   "mcp>=1.2",
-  # Domain layer extracted in agent-plugin-dev#5. Pinned via Git tag —
-  # bump these when releasing a new lib version.
-  "lib-python-config @ git+https://github.com/Seretos/lib-python-config@v0.1.0",
-  "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@v0.1.0",
+  # Domain layer extracted in agent-plugin-dev#5. Pinned to the libs'
+  # `release/0.x` floating branch so minor/patch lib releases flow in
+  # on the next install/build without a plugin-side bump. The libs
+  # maintain this branch as a fast-forward-only pointer to the latest
+  # 0.x-compatible release commit. Bump to `release/Nx` once the libs
+  # reach Nx.0.0 and introduce breaking changes.
+  "lib-python-config @ git+https://github.com/Seretos/lib-python-config@release/0.x",
+  "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@release/0.x",
   # pydantic / ruamel.yaml / httpx come transitively via lib-python-projects;
   # they are kept out of this list intentionally so the plugin can only
   # talk to providers through the lib's BaseProvider surface.

@@ -37,6 +37,12 @@ extra_hidden = [
     "sniffio",
 ]
 extra_hidden += collect_submodules("project_issues_plugin")
+# Sibling libs extracted in agent-plugin-dev#5. They are installed via
+# git+https direct references (see pyproject.toml). Static import
+# analysis is unreliable for direct-reference packages on a clean CI
+# checkout — collect_submodules forces every submodule into the bundle.
+extra_hidden += collect_submodules("lib_python_config")
+extra_hidden += collect_submodules("lib_python_projects")
 
 a = Analysis(
     ["src/project_issues_plugin/__main__.py"],

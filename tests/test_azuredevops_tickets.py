@@ -309,6 +309,20 @@ def test_get_ticket_fetches_comments_and_relations(
                 ],
                 "continuationToken": None,
             })
+        if path.endswith("/_apis/wit/workitemsbatch"):
+            ids = json.loads(req.content.decode("utf-8"))["ids"]
+            return _json({
+                "value": [
+                    {
+                        "id": wid,
+                        "fields": {
+                            "System.Title": f"work item {wid}",
+                            "System.State": "Active",
+                        },
+                    }
+                    for wid in ids
+                ]
+            })
         raise AssertionError(f"unexpected {path}")
 
     _install_mock(monkeypatch, handler)
@@ -321,6 +335,10 @@ def test_get_ticket_fetches_comments_and_relations(
     assert len(relations) == 1
     assert relations[0].kind == "child"
     assert relations[0].ticket_id == "#9"
+    # Title + state now come from the workitemsbatch lookup, not the
+    # ADO relation type label (which used to leak in as "Child").
+    assert relations[0].title == "work item 9"
+    assert relations[0].state == "Active"
     assert truncated is False
 
 
@@ -340,6 +358,20 @@ def test_get_ticket_body_mentions_become_relations(
             )
         if path.endswith("/_apis/wit/workItems/5/comments"):
             return _json({"comments": [], "continuationToken": None})
+        if path.endswith("/_apis/wit/workitemsbatch"):
+            ids = json.loads(req.content.decode("utf-8"))["ids"]
+            return _json({
+                "value": [
+                    {
+                        "id": wid,
+                        "fields": {
+                            "System.Title": f"linked {wid}",
+                            "System.State": "New",
+                        },
+                    }
+                    for wid in ids
+                ]
+            })
         raise AssertionError(f"unexpected {path}")
 
     _install_mock(monkeypatch, handler)
@@ -349,6 +381,9 @@ def test_get_ticket_body_mentions_become_relations(
     kinds = {r.kind: r.ticket_id for r in relations}
     assert kinds.get("closes") == "#11"
     assert kinds.get("mentions") == "#22"
+    titles = {r.ticket_id: r.title for r in relations}
+    assert titles["#11"] == "linked 11"
+    assert titles["#22"] == "linked 22"
 
 
 # ---------- create_ticket ----------------------------------------------------
@@ -595,3 +630,121 @@ def test_update_comment_requires_ticket_id() -> None:
             _project(), token="t", comment_id="11", body="x", ticket_id=None
         )
     assert "ticket_id" in str(exc.value)
+
+
+# ---------- Round 3 bug-fix coverage ---------------------------------------
+
+
+def test_update_ticket_invalid_status_includes_accepted_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADO 400 on bad state -> error message lists the accepted states
+    so the agent doesn't need a separate list_ticket_statuses call."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        # Initial GET for the work item (update_ticket reads current).
+        if (
+            req.method == "GET"
+            and "/_apis/wit/workitems/5" in path
+        ):
+            return _json(_work_item_payload(5))
+        # The PATCH gets rejected with an ADO state-validation error.
+        if (
+            req.method == "PATCH"
+            and "/_apis/wit/workitems/5" in path
+        ):
+            return _json(
+                {
+                    "message": "The field 'State' contains the value 'Bogus' which is not in the list of supported values",
+                    "typeKey": "RuleValidationException",
+                },
+                status_code=400,
+            )
+        # list_statuses follow-up.
+        if path.endswith("/_apis/wit/workitemtypes"):
+            return _json({"value": [{"name": "Issue"}]})
+        if path.endswith("/_apis/wit/workitemtypes/Issue/states"):
+            return _json({
+                "value": [
+                    {"name": "To Do", "category": "Proposed"},
+                    {"name": "Doing", "category": "InProgress"},
+                    {"name": "Done", "category": "Completed"},
+                ]
+            })
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+
+    # Raises ValueError (not AzureDevOpsError) so the `_safe`
+    # translation produces a clean `{"error": "..."}` payload without
+    # the raw "Azure DevOps 400:" provider prefix.
+    with pytest.raises(ValueError) as exc:
+        AzureDevOpsProvider().update_ticket(
+            _project(default_type="Issue"),
+            token="t", ticket_id="5", status="Bogus",
+        )
+    msg = str(exc.value)
+    assert "ticket #5" in msg
+    assert "Bogus" in msg
+    assert "accepted" in msg.lower()
+    # The accepted list must include the discovered states.
+    assert "To Do" in msg
+    assert "Done" in msg
+    # No raw provider prefix.
+    assert "Azure DevOps 400" not in msg
+
+
+def test_get_comment_int32_overflow_id_pre_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Comment / ticket IDs beyond Int32 range are pre-rejected before
+    any network I/O — saves an opaque ADO 400 and surfaces the id
+    in the error message so `_safe` produces a clean
+    `{"error": "comment '...' not found ..."}` payload."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError("no network request expected — pre-validation should reject")
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(LookupError) as exc:
+        AzureDevOpsProvider().get_comment(
+            _project(),
+            token="t",
+            comment_id="99999999999999",  # > int32 max
+            ticket_id="5",
+        )
+    msg = str(exc.value)
+    assert "99999999999999" in msg
+    assert "not found" in msg
+    assert "2147483647" in msg or "32-bit" in msg
+
+
+def test_get_comment_int32_overflow_via_check_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: if a numeric overflow somehow makes it to ADO
+    (e.g. a non-digit string that the server later coerces), the
+    overflow message is still translated to 404 by `_check`."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return _json(
+            {
+                "message": "Value was either too large or too small for an Int32.",
+            },
+            status_code=400,
+        )
+
+    _install_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.azuredevops import AzureDevOpsError
+
+    # ticket_id at the int32 boundary — small enough to pass pre-validation
+    # but the comment endpoint can still surface its own overflow.
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().get_comment(
+            _project(),
+            token="t",
+            comment_id="123",
+            ticket_id="5",
+        )
+    assert exc.value.status == 404

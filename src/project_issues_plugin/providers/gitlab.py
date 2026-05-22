@@ -2431,11 +2431,11 @@ class GitLabProvider(TokenCapabilityProvider):
         token: str | None,
         run_id: str,
         *,
-        include_failure_context: bool = False,
+        include_failure_excerpt: bool = False,
     ) -> PipelineRun:
         """Fetch a single pipeline.
 
-        When `include_failure_context=True` and the pipeline concluded
+        When `include_failure_excerpt=True` and the pipeline concluded
         as failed, also fetch the failing jobs and a trace excerpt for
         each. GitLab does not expose GitHub-style annotations; the
         `annotations` field on each `FailingJob` is therefore `[]`.
@@ -2445,7 +2445,7 @@ class GitLabProvider(TokenCapabilityProvider):
             r = client.get(f"/projects/{path}/pipelines/{run_id}")
             _check(r)
             run = _map_pipeline_run(r.json())
-            if include_failure_context and run.conclusion == "failed":
+            if include_failure_excerpt and run.conclusion == "failed":
                 run.failure = _fetch_pipeline_failure(
                     client, project, run_id,
                 )

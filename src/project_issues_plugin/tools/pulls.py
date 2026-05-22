@@ -100,13 +100,7 @@ def register(mcp: FastMCP) -> None:
             applied_limit = min(max(1, limit), 100)
             payload: dict = {
                 "project_id": project.id,
-                # `prs` is the canonical key (matches the tool name);
-                # `pull_requests` is the legacy alias retained for back-
-                # compat (ticket #48 finding 8). Both reference the same
-                # list — feel free to delete the `pull_requests` key in
-                # your own code, or migrate to `prs` and ignore the alias.
                 "prs": rows,
-                "pull_requests": rows,
             }
             if applied_limit != limit:
                 payload["applied_limit"] = applied_limit

@@ -122,6 +122,24 @@ def _repos_handler(req: httpx.Request) -> httpx.Response | None:
     return None
 
 
+def _labels_handler(
+    req: httpx.Request, labels: list[str] | None = None
+) -> httpx.Response | None:
+    """Shared shard for the PR-labels endpoint that `get_pr`/`merge_pr`
+    now fetch separately. Returns `[]` by default so tests that don't
+    care about labels don't need to bother with the payload."""
+    if (
+        "/_apis/git/repositories/" in req.url.path
+        and req.url.path.endswith("/labels")
+        and req.method == "GET"
+    ):
+        names = labels or []
+        return _json({
+            "value": [{"name": n, "active": True} for n in names]
+        })
+    return None
+
+
 # ---------- list_prs ---------------------------------------------------------
 
 
@@ -226,6 +244,9 @@ def test_get_pr_lists_top_level_thread_comments(
         cached = _repos_handler(req)
         if cached is not None:
             return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
         path = req.url.path
         if path.endswith("/pullrequests/7"):
             return _json(_pr_payload(7))
@@ -325,15 +346,30 @@ def test_list_pr_review_comments_only_anchored_threads(
 
 def test_create_pr_emits_refs_and_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
+    applied_labels: list[str] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         cached = _repos_handler(req)
         if cached is not None:
             return cached
-        if req.method == "POST" and req.url.path.endswith("/pullrequests"):
+        path = req.url.path
+        if req.method == "POST" and path.endswith("/pullrequests"):
             captured["body"] = json.loads(req.content.decode("utf-8"))
             return _json(_pr_payload(11))
-        raise AssertionError(f"unexpected {req.method} {req.url.path}")
+        # Auto-applied ai-generated label
+        if req.method == "POST" and path.endswith("/pullrequests/11/labels"):
+            applied_labels.append(json.loads(req.content.decode("utf-8"))["name"])
+            return _json({})
+        # Labels endpoint now fetched separately in get_pr.
+        labels = _labels_handler(req, labels=applied_labels)
+        if labels is not None:
+            return labels
+        # The follow-up get_pr that read labels back
+        if req.method == "GET" and path.endswith("/pullrequests/11"):
+            return _json(_pr_payload(11))
+        if req.method == "GET" and path.endswith("/pullrequests/11/threads"):
+            return _json({"value": []})
+        raise AssertionError(f"unexpected {req.method} {path}")
 
     _install_mock(monkeypatch, handler)
     pr = AzureDevOpsProvider().create_pr(
@@ -351,6 +387,8 @@ def test_create_pr_emits_refs_and_marker(monkeypatch: pytest.MonkeyPatch) -> Non
     assert body["targetRefName"] == "refs/heads/main"
     assert body["isDraft"] is True
     assert "#ai-generated" in body["description"]
+    assert "ai-generated" in applied_labels
+    assert "ai-generated" in pr.labels
 
 
 # ---------- update_pr -------------------------------------------------------
@@ -359,12 +397,21 @@ def test_create_pr_emits_refs_and_marker(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_update_pr_status_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     """Closing a PR via our generic `status='closed'` maps to ADO 'abandoned'."""
     captured: dict = {}
+    applied_labels: list[str] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         cached = _repos_handler(req)
         if cached is not None:
             return cached
         path = req.url.path
+        # Auto-applied ai-modified label when the existing PR lacks
+        # the ai-generated marker.
+        if req.method == "POST" and path.endswith("/pullrequests/7/labels"):
+            applied_labels.append(json.loads(req.content.decode("utf-8"))["name"])
+            return _json({})
+        labels = _labels_handler(req, labels=applied_labels)
+        if labels is not None:
+            return labels
         if req.method == "PATCH" and path.endswith("/pullrequests/7"):
             captured["body"] = json.loads(req.content.decode("utf-8"))
             return _json(_pr_payload(7, status="abandoned"))
@@ -377,6 +424,7 @@ def test_update_pr_status_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_mock(monkeypatch, handler)
     AzureDevOpsProvider().update_pr(_project(), token="t", pr_id="7", status="closed")
     assert captured["body"]["status"] == "abandoned"
+    assert "ai-modified" in applied_labels
 
 
 # ---------- merge_pr --------------------------------------------------------
@@ -388,7 +436,8 @@ def test_update_pr_status_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     ("rebase", "rebase"),
 ])
 def test_merge_pr_method_mapping(
-    monkeypatch: pytest.MonkeyPatch, ours: str, theirs: str
+    monkeypatch: pytest.MonkeyPatch, ours: str, theirs: str,
+    fast_merge_settle: None,
 ) -> None:
     captured: dict = {}
 
@@ -396,13 +445,24 @@ def test_merge_pr_method_mapping(
         cached = _repos_handler(req)
         if cached is not None:
             return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
         path = req.url.path
         if req.method == "GET" and path.endswith("/pullrequests/7"):
-            return _json(_pr_payload(7))
+            # First GET (before PATCH) returns the open PR; subsequent
+            # GETs in the settle-loop return the merged state.
+            if "patched" in captured:
+                return _json(
+                    _pr_payload(7, status="completed", mergeStatus="succeeded")
+                )
+            return _json(_pr_payload(7, mergeStatus="notSet"))
         if req.method == "PATCH" and path.endswith("/pullrequests/7"):
             captured["body"] = json.loads(req.content.decode("utf-8"))
+            captured["patched"] = True
+            # ADO returns the pre-merge snapshot synchronously.
             return _json(
-                _pr_payload(7, status="completed", mergeStatus="succeeded")
+                _pr_payload(7, status="active", mergeStatus="queued")
             )
         raise AssertionError(f"unexpected {req.method} {path}")
 
@@ -412,6 +472,16 @@ def test_merge_pr_method_mapping(
     )
     assert captured["body"]["status"] == "completed"
     assert captured["body"]["completionOptions"]["mergeStrategy"] == theirs
+
+
+@pytest.fixture
+def fast_merge_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collapse the settle-loop's sleeps so tests run in ~milliseconds."""
+    monkeypatch.setattr(
+        azure_mod.AzureDevOpsProvider,
+        "_MERGE_SETTLE_DELAYS_MS",
+        (0, 0, 0, 0, 0, 0),
+    )
 
 
 # ---------- add_pr_comment + review comments -------------------------------
@@ -451,18 +521,41 @@ def test_add_pr_comment_creates_thread_without_context(
     assert "threadContext" not in body
     assert body["comments"][0]["parentCommentId"] == 0
     assert "#ai-generated" in body["comments"][0]["content"]
-    assert comment.id.startswith("42.")
+    # Top-of-thread comments expose the bare thread id, matching the
+    # GitHub `id == discussion_id` invariant.
+    assert comment.id == "42"
+
+
+def _items_handler_for_file(line_count: int = 50):
+    """Return an items-endpoint stub that resolves the file and reports
+    a `line_count`-line file content. Used by review-comment tests so
+    `_validate_pr_diff_line` doesn't reject the line as out-of-range.
+    """
+    body = "\n".join([f"line{i}" for i in range(1, line_count + 1)])
+
+    def stub(req: httpx.Request) -> httpx.Response | None:
+        if "/_apis/git/repositories/" in req.url.path and req.url.path.endswith(
+            "/items"
+        ):
+            return _json({"content": body})
+        return None
+
+    return stub
 
 
 def test_add_pr_review_comment_anchored_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict = {}
+    item_stub = _items_handler_for_file(line_count=50)
 
     def handler(req: httpx.Request) -> httpx.Response:
         cached = _repos_handler(req)
         if cached is not None:
             return cached
+        items_resp = item_stub(req)
+        if items_resp is not None:
+            return items_resp
         if req.method == "POST" and req.url.path.endswith("/pullrequests/7/threads"):
             captured["body"] = json.loads(req.content.decode("utf-8"))
             return _json({
@@ -485,6 +578,7 @@ def test_add_pr_review_comment_anchored_thread(
     rc = AzureDevOpsProvider().add_pr_review_comment(
         _project(), token="t", pr_id="7",
         body="please fix", path="/file.py", line=12, side="RIGHT",
+        commit_sha="abc",
     )
     ctx = captured["body"]["threadContext"]
     assert ctx["filePath"] == "/file.py"
@@ -497,11 +591,15 @@ def test_add_pr_review_comment_anchored_thread(
 
 def test_add_pr_review_comment_left_side(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
+    item_stub = _items_handler_for_file(line_count=50)
 
     def handler(req: httpx.Request) -> httpx.Response:
         cached = _repos_handler(req)
         if cached is not None:
             return cached
+        items_resp = item_stub(req)
+        if items_resp is not None:
+            return items_resp
         if req.method == "POST" and req.url.path.endswith("/pullrequests/7/threads"):
             captured["body"] = json.loads(req.content.decode("utf-8"))
             return _json({
@@ -517,6 +615,7 @@ def test_add_pr_review_comment_left_side(monkeypatch: pytest.MonkeyPatch) -> Non
     AzureDevOpsProvider().add_pr_review_comment(
         _project(), token="t", pr_id="7",
         body="x", path="/file.py", line=12, side="LEFT",
+        commit_sha="def",
     )
     ctx = captured["body"]["threadContext"]
     assert "leftFileStart" in ctx
@@ -565,3 +664,661 @@ def test_submit_pr_review_vote_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
         _project(), token="t", pr_id="7", state="approve", body="lgtm"
     )
     assert captured["body"]["vote"] == 10
+
+
+# ---------- post-#40 bug-fix coverage ---------------------------------------
+
+
+def test_merge_pr_conflicts_raises_classified_error(
+    monkeypatch: pytest.MonkeyPatch, fast_merge_settle: None
+) -> None:
+    """A PR with conflicts after the PATCH must surface as 409, not
+    leak through as the snapshot's `merged=false`."""
+    state: dict = {"patched": False}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
+        path = req.url.path
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            if state["patched"]:
+                return _json(_pr_payload(7, mergeStatus="conflicts"))
+            return _json(_pr_payload(7, mergeStatus="notSet"))
+        if req.method == "PATCH" and path.endswith("/pullrequests/7"):
+            state["patched"] = True
+            return _json(_pr_payload(7, mergeStatus="queued", status="completed"))
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.azuredevops import AzureDevOpsError
+
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().merge_pr(
+            _project(), token="t", pr_id="7", merge_method="merge"
+        )
+    assert exc.value.status == 409
+    assert "conflicts" in str(exc.value).lower()
+
+
+def test_merge_pr_stuck_in_progress_raises_202(
+    monkeypatch: pytest.MonkeyPatch, fast_merge_settle: None
+) -> None:
+    """If the settle-loop expires with mergeStatus still non-terminal,
+    raise 202 so the agent re-fetches rather than treating the
+    snapshot as merged=false."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7, mergeStatus="queued"))
+        if req.method == "PATCH" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7, mergeStatus="queued", status="completed"))
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.azuredevops import AzureDevOpsError
+
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().merge_pr(
+            _project(), token="t", pr_id="7", merge_method="merge"
+        )
+    assert exc.value.status == 202
+    assert "in progress" in str(exc.value).lower()
+
+
+def test_add_pr_review_comment_rejects_line_outside_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A line beyond the file's last line is rejected with 422, matching
+    GitHub's behavior. ADO would otherwise silently anchor the thread
+    to a non-existent position."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if "/_apis/git/repositories/" in path and path.endswith("/items"):
+            # 10-line file
+            return _json({"content": "\n".join(f"l{i}" for i in range(1, 11))})
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.azuredevops import AzureDevOpsError
+
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().add_pr_review_comment(
+            _project(), token="t", pr_id="7",
+            body="oops", path="/short.py", line=9999, side="RIGHT",
+            commit_sha="abc",
+        )
+    assert exc.value.status == 422
+    assert "outside" in str(exc.value).lower()
+
+
+def test_add_pr_review_comment_rejects_missing_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the path isn't present at the PR head commit, reject."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if "/_apis/git/repositories/" in path and path.endswith("/items"):
+            return _json({"message": "not found"}, status_code=404)
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    from project_issues_plugin.providers.azuredevops import AzureDevOpsError
+
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().add_pr_review_comment(
+            _project(), token="t", pr_id="7",
+            body="oops", path="/missing.py", line=1, side="RIGHT",
+            commit_sha="abc",
+        )
+    assert exc.value.status == 422
+    assert "missing.py" in str(exc.value)
+
+
+def test_review_comment_id_is_bare_thread_for_top_of_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Top-of-thread review comments use the bare thread id, matching
+    GitHub's `id == discussion_id` invariant. Replies keep the
+    composite form for cross-comment uniqueness."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        if req.url.path.endswith("/pullrequests/7/threads"):
+            return _json({
+                "value": [
+                    {
+                        "id": 50,
+                        "threadContext": {
+                            "filePath": "/a.py",
+                            "rightFileStart": {"line": 1},
+                        },
+                        "comments": [
+                            {
+                                "id": 1, "parentCommentId": 0,
+                                "author": {"displayName": "X"},
+                                "content": "<p>top</p>",
+                                "commentType": "text",
+                            },
+                            {
+                                "id": 2, "parentCommentId": 1,
+                                "author": {"displayName": "Y"},
+                                "content": "<p>reply</p>",
+                                "commentType": "text",
+                            },
+                        ],
+                    },
+                ]
+            })
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    rcs = AzureDevOpsProvider().list_pr_review_comments(
+        _project(), token="t", pr_id="7"
+    )
+    assert len(rcs) == 2
+    top = next(c for c in rcs if c.body.strip() == "top")
+    reply = next(c for c in rcs if c.body.strip() == "reply")
+    assert top.id == "50"
+    assert top.discussion_id == "50"
+    assert reply.id == "50.2"
+    assert reply.discussion_id == "50"
+    assert reply.in_reply_to == "50"
+
+
+def test_in_reply_to_accepts_composite_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`add_pr_review_comment(in_reply_to="50.1")` must address thread 50,
+    not crash. Older callers may round-trip the legacy composite id."""
+    addressed_thread: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if req.method == "POST" and "/threads/50/comments" in path:
+            addressed_thread["thread"] = 50
+            return _json({"id": 2, "parentCommentId": 1, "content": "<p>r</p>"})
+        if req.method == "GET" and path.endswith("/threads/50"):
+            return _json({
+                "id": 50,
+                "threadContext": {
+                    "filePath": "/a.py", "rightFileStart": {"line": 1},
+                },
+                "comments": [],
+            })
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    AzureDevOpsProvider().add_pr_review_comment(
+        _project(), token="t", pr_id="7", body="r", in_reply_to="50.1",
+    )
+    assert addressed_thread["thread"] == 50
+
+
+def test_pr_head_repo_full_name_is_three_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`head.repo_full_name` matches the project.path 3-segment shape so
+    cross-provider consumers don't see a bare repo name on Azure."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
+        if req.url.path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7))
+        if req.url.path.endswith("/pullrequests/7/threads"):
+            return _json({"value": []})
+        raise AssertionError(f"unexpected {req.url.path}")
+
+    _install_mock(monkeypatch, handler)
+    pr, _ = AzureDevOpsProvider().get_pr(_project(), token="t", pr_id="7")
+    assert pr.head["repo_full_name"] == "seredos/azure-tests/azure-tests"
+
+
+def test_submit_pr_review_tags_body_thread_with_property(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The body posts as a thread with the `projectIssues.kind=review_body`
+    property so it doesn't leak into `get_pr().comments[]`."""
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if path.endswith("/_apis/connectionData"):
+            return _json({
+                "authenticatedUser": {
+                    "id": "user-guid",
+                    "displayName": "Alice Builder",
+                    "uniqueName": "alice@example.com",
+                }
+            })
+        if req.method == "PUT" and "/reviewers/user-guid" in path:
+            return _json({"id": "user-guid", "vote": 10})
+        if req.method == "POST" and path.endswith("/threads"):
+            captured["thread"] = json.loads(req.content.decode("utf-8"))
+            return _json({
+                "id": 77,
+                "comments": [
+                    {"id": 1, "content": "<p>x</p>", "commentType": "text"}
+                ],
+            })
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    review = AzureDevOpsProvider().submit_pr_review(
+        _project(), token="t", pr_id="7", state="approve", body="lgtm",
+    )
+    thread = captured["thread"]
+    # Property must carry the review-body marker so downstream
+    # filtering hides it from get_pr().comments[].
+    props = thread.get("properties") or {}
+    assert "projectIssues.kind" in props
+    val = props["projectIssues.kind"]
+    assert (val.get("$value") if isinstance(val, dict) else val) == "review_body"
+    # Body got the #ai-generated prefix.
+    assert "#ai-generated" in thread["comments"][0]["content"]
+    # Review surface fields.
+    # author uses displayName to match _map_pr / _map_thread_comment on
+    # Azure (consistent identity shape across all PR surfaces).
+    assert review.author == "Alice Builder"
+    assert review.author != "user-guid"  # never the bare GUID
+    assert review.submitted_at  # not empty
+    assert review.id != "user-guid"  # synthesized, not the reviewer GUID
+    assert ":10:" in review.id  # vote-encoded
+
+
+def test_get_pr_filters_review_body_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threads tagged as review-bodies must not appear in get_pr().comments[]."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
+        path = req.url.path
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7))
+        if req.method == "GET" and path.endswith("/pullrequests/7/threads"):
+            return _json({
+                "value": [
+                    {
+                        "id": 1,
+                        "threadContext": None,
+                        "comments": [{"id": 1, "content": "<p>plain</p>", "commentType": "text"}],
+                    },
+                    {
+                        "id": 2,
+                        "threadContext": None,
+                        "properties": {
+                            "projectIssues.kind": {
+                                "$type": "System.String",
+                                "$value": "review_body",
+                            },
+                        },
+                        "comments": [{"id": 1, "content": "<p>review-body</p>", "commentType": "text"}],
+                    },
+                    {
+                        # Flat-property shape (ADO returns either form).
+                        "id": 3,
+                        "threadContext": None,
+                        "properties": {"projectIssues.kind": "review_body"},
+                        "comments": [{"id": 1, "content": "<p>review-body-flat</p>", "commentType": "text"}],
+                    },
+                ]
+            })
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    _, comments = AzureDevOpsProvider().get_pr(_project(), token="t", pr_id="7")
+    bodies = [c.body for c in comments]
+    assert any("plain" in b for b in bodies)
+    assert not any("review-body" in b for b in bodies)
+
+
+def test_update_pr_synthesizes_updated_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADO's PR resource has no real `updated_at`; after a write we
+    overlay the current UTC so downstream tooling can sort PRs by
+    last touch."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
+        path = req.url.path
+        if req.method == "POST" and path.endswith("/pullrequests/7/labels"):
+            return _json({})
+        if req.method == "PATCH" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7, title="new"))
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7, title="new"))
+        if path.endswith("/threads"):
+            return _json({"value": []})
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    pr = AzureDevOpsProvider().update_pr(
+        _project(), token="t", pr_id="7", title="new"
+    )
+    # creationDate was 2026-05-18; updated_at must be newer.
+    assert pr.updated_at > pr.created_at
+
+
+# ---------- Round 2 bug-fix coverage ----------------------------------------
+
+
+def test_merge_pr_waits_for_both_status_and_merge_to_settle(
+    monkeypatch: pytest.MonkeyPatch, fast_merge_settle: None
+) -> None:
+    """The PATCH response shows `status=active, mergeStatus=queued`; the
+    settle-loop must wait until BOTH transition (succeeded + completed)
+    before returning, otherwise `_map_pr` derives merged=false from
+    the half-finished snapshot."""
+    state: dict = {"poll": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        labels = _labels_handler(req)
+        if labels is not None:
+            return labels
+        path = req.url.path
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            state["poll"] += 1
+            # First poll: mergeStatus succeeded but status still active
+            # (mid-async). Second poll: both settled.
+            if state["poll"] <= 1:
+                return _json(
+                    _pr_payload(7, status="active", mergeStatus="succeeded")
+                )
+            return _json(
+                _pr_payload(7, status="completed", mergeStatus="succeeded")
+            )
+        if req.method == "PATCH" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7, status="active", mergeStatus="queued"))
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    pr = AzureDevOpsProvider().merge_pr(
+        _project(), token="t", pr_id="7", merge_method="merge"
+    )
+    assert pr.merged is True
+    assert pr.status == "merged"
+
+
+def test_get_pr_fetches_labels_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADO's single-PR GET doesn't include labels. Provider must call
+    the labels endpoint so the PR returned by get_pr/create_pr/update_pr/
+    merge_pr advertises labels consistently with list_prs."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        labels = _labels_handler(req, labels=["ai-generated", "shipit"])
+        if labels is not None:
+            return labels
+        path = req.url.path
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            # Note: NO labels field — single GET doesn't include them.
+            return _json(_pr_payload(7))
+        if path.endswith("/threads"):
+            return _json({"value": []})
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    pr, _ = AzureDevOpsProvider().get_pr(_project(), token="t", pr_id="7")
+    assert pr.labels == ["ai-generated", "shipit"]
+
+
+def test_get_pr_labels_endpoint_403_does_not_kill_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 403 on the labels endpoint is best-effort: surface empty
+    labels rather than killing the legitimate get_pr."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if "/labels" in path and req.method == "GET":
+            return _json({"message": "forbidden"}, status_code=403)
+        if req.method == "GET" and path.endswith("/pullrequests/7"):
+            return _json(_pr_payload(7))
+        if path.endswith("/threads"):
+            return _json({"value": []})
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    pr, _ = AzureDevOpsProvider().get_pr(_project(), token="t", pr_id="7")
+    assert pr.labels == []
+
+
+def test_submit_pr_review_author_never_falls_through_to_guid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """connectionData payload carries the GUID + displayName. The
+    reviewer PUT response is the second identity source. Whatever
+    happens, the author must never fall through to the bare GUID."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if path.endswith("/_apis/connectionData"):
+            return _json({
+                "authenticatedUser": {
+                    "id": "guid-only",
+                    "displayName": "Arne von Appen",
+                }
+            })
+        if req.method == "PUT" and "/reviewers/guid-only" in path:
+            return _json({"id": "guid-only", "vote": 10})
+        if req.method == "POST" and path.endswith("/threads"):
+            return _json({"id": 1, "comments": [{"id": 1, "content": "<p>x</p>"}]})
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    review = AzureDevOpsProvider().submit_pr_review(
+        _project(), token="t", pr_id="7", state="approve", body="lgtm"
+    )
+    # author uses displayName, matching the _map_pr / _map_thread_comment
+    # convention so the same user looks the same across all Azure
+    # PR-related surfaces.
+    assert review.author == "Arne von Appen"
+    assert review.author != "guid-only"
+
+
+def test_submit_pr_review_body_includes_ai_marker_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The returned Review.body carries the #ai-generated prefix that
+    the docs promise — matching the GitHub provider."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if path.endswith("/_apis/connectionData"):
+            return _json({"authenticatedUser": {"id": "u1", "mailAddress": "u1@x"}})
+        if req.method == "PUT" and "/reviewers/" in path:
+            return _json({"id": "u1", "vote": 10})
+        if req.method == "POST" and path.endswith("/threads"):
+            return _json({"id": 1, "comments": [{"id": 1, "content": "<p>x</p>"}]})
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    review = AzureDevOpsProvider().submit_pr_review(
+        _project(), token="t", pr_id="7", state="approve", body="looks good",
+    )
+    assert review.body.startswith("#ai-generated")
+    assert "looks good" in review.body
+
+
+def test_submit_pr_review_author_via_reviewer_put_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When connectionData returns only the GUID, the reviewer PUT
+    response carries the human-readable identity. The merged identity
+    must surface the displayName so the author field is consistent
+    with the PR-level / comment-level author shape on Azure."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        path = req.url.path
+        if path.endswith("/_apis/connectionData"):
+            # Slim payload: ADO sometimes returns just `id` + descriptor.
+            return _json({"authenticatedUser": {"id": "guid-only"}})
+        if req.method == "PUT" and "/reviewers/guid-only" in path:
+            # The PUT response carries the rich identity.
+            return _json({
+                "id": "guid-only",
+                "displayName": "Arne von Appen",
+                "uniqueName": "arne@example.com",
+                "vote": 10,
+            })
+        if req.method == "POST" and path.endswith("/threads"):
+            return _json({"id": 1, "comments": [{"id": 1, "content": "<p>x</p>"}]})
+        raise AssertionError(f"unexpected {req.method} {path}")
+
+    _install_mock(monkeypatch, handler)
+    review = AzureDevOpsProvider().submit_pr_review(
+        _project(), token="t", pr_id="7", state="approve", body="lgtm",
+    )
+    # The merged identity surfaces displayName from the PUT response;
+    # the bare GUID from connectionData never bleeds through.
+    assert review.author == "Arne von Appen"
+    assert "guid-only" not in review.author
+
+
+def test_add_pr_review_comment_echoes_caller_commit_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub echoes the `commit_id` the caller supplied; Azure must
+    mirror that on the ReviewComment return rather than the bogus
+    None we got when the thread payload didn't carry a SHA."""
+    item_stub = _items_handler_for_file(line_count=50)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        items_resp = item_stub(req)
+        if items_resp is not None:
+            return items_resp
+        if req.method == "POST" and req.url.path.endswith("/pullrequests/7/threads"):
+            return _json({
+                "id": 100,
+                "threadContext": json.loads(req.content.decode("utf-8"))["threadContext"],
+                "comments": [
+                    {"id": 1, "parentCommentId": 0, "content": "<p>r</p>", "commentType": "text"}
+                ],
+            })
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    rc = AzureDevOpsProvider().add_pr_review_comment(
+        _project(), token="t", pr_id="7",
+        body="check this", path="/file.py", line=5, side="RIGHT",
+        commit_sha="abc1234",
+    )
+    assert rc.commit_sha == "abc1234"
+
+
+def test_review_comment_original_line_and_commit_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_map_thread_comment_for_review` was returning original_line=None
+    and a junk offset for commit_sha. Now original_line falls back to
+    the current line for fresh threads, and commit_sha is None when
+    the thread doesn't carry a SHA marker rather than fabricated."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        cached = _repos_handler(req)
+        if cached is not None:
+            return cached
+        if req.url.path.endswith("/pullrequests/7/threads"):
+            return _json({
+                "value": [
+                    {
+                        "id": 99,
+                        "threadContext": {
+                            "filePath": "/a.py",
+                            "rightFileStart": {"line": 5},
+                            "rightFileEnd": {"line": 5},
+                        },
+                        "pullRequestThreadContext": {
+                            "trackingCriteria": {
+                                "origRightFileStart": {"line": 3},
+                            },
+                        },
+                        "comments": [
+                            {
+                                "id": 1,
+                                "parentCommentId": 0,
+                                "author": {"displayName": "Alice"},
+                                "content": "<p>fix this</p>",
+                                "commentType": "text",
+                            }
+                        ],
+                    },
+                ]
+            })
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    rcs = AzureDevOpsProvider().list_pr_review_comments(
+        _project(), token="t", pr_id="7"
+    )
+    assert len(rcs) == 1
+    rc = rcs[0]
+    # original_line comes from the tracking origRightFileStart.line.
+    assert rc.original_line == 3
+    # commit_sha is None when no SHA-shaped value is available — not
+    # the bogus character-offset string the old code returned.
+    assert rc.commit_sha is None or isinstance(rc.commit_sha, str)
+    # And critically, never an integer offset.
+    assert rc.commit_sha != 1

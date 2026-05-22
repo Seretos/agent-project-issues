@@ -109,6 +109,22 @@ def test_add_relation_emits_json_patch(monkeypatch: pytest.MonkeyPatch) -> None:
             captured["patch"] = json.loads(req.content.decode("utf-8"))
             assert req.headers.get("Content-Type") == "application/json-patch+json"
             return _json({"id": 5})
+        # add_relation now also batch-fetches the target's title + state
+        # so the returned Relation is populated.
+        if req.url.path.endswith("/_apis/wit/workitemsbatch"):
+            ids = json.loads(req.content.decode("utf-8"))["ids"]
+            return _json({
+                "value": [
+                    {
+                        "id": wid,
+                        "fields": {
+                            "System.Title": f"target {wid}",
+                            "System.State": "Active",
+                        },
+                    }
+                    for wid in ids
+                ]
+            })
         raise AssertionError(f"unexpected {req.method} {req.url.path}")
 
     _install_mock(monkeypatch, handler)
@@ -124,6 +140,9 @@ def test_add_relation_emits_json_patch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert op["value"]["url"].endswith("/_apis/wit/workItems/9")
     assert rel.kind == "child"
     assert rel.ticket_id == "#9"
+    # Title + state now populated via the batch lookup.
+    assert rel.title == "target 9"
+    assert rel.state == "Active"
 
 
 def test_add_relation_unsupported_kind_raises() -> None:
@@ -187,7 +206,7 @@ def test_remove_relation_finds_index_and_emits_remove(
     assert op["path"] == "/relations/1"
 
 
-def test_remove_relation_not_found_returns_diagnostic(
+def test_remove_relation_not_found_raises_lookup_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(req: httpx.Request) -> httpx.Response:
@@ -196,15 +215,17 @@ def test_remove_relation_not_found_returns_diagnostic(
         raise AssertionError(f"unexpected {req.method} {req.url.path}")
 
     _install_mock(monkeypatch, handler)
-    result = AzureDevOpsProvider().remove_relation(
-        _project(), token="t", ticket_id="5", kind="child", target="9"
-    )
-    assert result == {
-        "removed": False,
-        "reason": "relation_not_found",
-        "kind": "child",
-        "target": "#9",
-    }
+    # `tools/relations.py` documents that removing a non-existent relation
+    # surfaces as `{"error": ...}` via `_safe` — that's a LookupError at
+    # provider level. GitHub does the same; Azure now matches.
+    with pytest.raises(LookupError) as exc:
+        AzureDevOpsProvider().remove_relation(
+            _project(), token="t", ticket_id="5", kind="child", target="9"
+        )
+    msg = str(exc.value)
+    assert "child" in msg
+    assert "#5" in msg
+    assert "#9" in msg
 
 
 # ---------- pipelines -------------------------------------------------------
@@ -301,7 +322,7 @@ def test_get_run_includes_failure_context(
 
     _install_mock(monkeypatch, handler)
     run = AzureDevOpsProvider().get_run(
-        _project(), token="t", run_id="101", include_failure_context=True
+        _project(), token="t", run_id="101", include_failure_excerpt=True
     )
     assert run.conclusion == "failure"
     assert run.failure is not None
@@ -390,6 +411,181 @@ def test_refs_rejects_url_for_wrong_repo() -> None:
             p,
         )
     assert "other-repo" in str(exc.value)
+
+
+# ---------- post-#40 bug-fix coverage ---------------------------------------
+
+
+def test_list_runs_for_tag_returns_tuple(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tools/pipelines.py expects `(runs, resolved_refs)`. Previously
+    Azure returned a bare list which raised ValueError on unpack."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/_apis/build/builds"):
+            return _json({"value": [_build_payload(101)]})
+        raise AssertionError(f"unexpected {req.url.path}")
+
+    _install_mock(monkeypatch, handler)
+    runs, resolved_refs = AzureDevOpsProvider().list_runs_for_tag(
+        _project(), token="t", tag="v1.0", limit=5
+    )
+    assert len(runs) == 1
+    assert resolved_refs == ["v1.0"]
+
+
+def test_list_runs_for_tag_empty_returns_empty_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No builds → no resolved_refs (tool layer triggers the hint)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/_apis/build/builds"):
+            return _json({"value": []})
+        raise AssertionError
+
+    _install_mock(monkeypatch, handler)
+    runs, resolved_refs = AzureDevOpsProvider().list_runs_for_tag(
+        _project(), token="t", tag="v1.0", limit=5
+    )
+    assert runs == []
+    assert resolved_refs == []
+
+
+def test_list_runs_for_ticket_returns_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolved refs are `build/{id}` markers for each ArtifactLink we
+    actually walked."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if "/_apis/wit/workitems/5" in path:
+            return _json({
+                "id": 5,
+                "relations": [
+                    {
+                        "rel": "ArtifactLink",
+                        "url": "vstfs:///Build/Build/42",
+                        "attributes": {"name": "Build"},
+                    },
+                ],
+            })
+        if path.endswith("/_apis/build/builds/42"):
+            return _json(_build_payload(42))
+        raise AssertionError(f"unexpected {path}")
+
+    _install_mock(monkeypatch, handler)
+    runs, resolved_refs = AzureDevOpsProvider().list_runs_for_ticket(
+        _project(), token="t", ticket_id="5", limit=10
+    )
+    assert len(runs) == 1
+    assert resolved_refs == ["build/42"]
+
+
+def test_check_400_with_workitem_typekey_becomes_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADO returns 400 for several semantic-404 cases; we re-tag those
+    so the tool-layer `_rewrap_404` can add context."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return _json(
+            {
+                "message": "Work item 9999 does not exist",
+                "typeKey": "WorkItemNotFoundException",
+            },
+            status_code=400,
+        )
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().get_ticket(_project(), token="t", ticket_id="9999")
+    assert exc.value.status == 404
+
+
+def test_check_400_transition_appends_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bad status transition surfaces the GitHub/GitLab hint."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return _json(
+            {
+                "message": "Bogus is not a valid state for work item type Task",
+                "typeKey": "WorkItemTransitionDeniedException",
+            },
+            status_code=400,
+        )
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().get_ticket(_project(), token="t", ticket_id="9999")
+    assert "list_ticket_statuses" in str(exc.value)
+
+
+def test_check_400_with_comment_typekey_becomes_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_comment on a missing id used to surface as raw 400.
+    CommentNotFoundException must be re-tagged as 404 so the tool
+    layer's `_rewrap_404` adds the `comment '...' not found` context.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return _json(
+            {
+                "message": "The specified comment does not exist",
+                "typeKey": "CommentNotFoundException",
+            },
+            status_code=400,
+        )
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().get_comment(
+            _project(), token="t", comment_id="99999", ticket_id="5",
+        )
+    assert exc.value.status == 404
+
+
+def test_check_transition_hint_via_allowed_list_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some ADO state-validation errors don't say "transition" but use
+    "is not in the allowed list" — the hint must still fire."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return _json(
+            {
+                "message": "The value 'Bogus' is not in the allowed list",
+                "typeKey": "RuleValidationException",
+            },
+            status_code=400,
+        )
+
+    _install_mock(monkeypatch, handler)
+    with pytest.raises(AzureDevOpsError) as exc:
+        AzureDevOpsProvider().get_ticket(_project(), token="t", ticket_id="5")
+    assert "list_ticket_statuses" in str(exc.value)
+
+
+def test_pipeline_get_run_kwarg_is_failure_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool layer passes `include_failure_excerpt`; the provider
+    signature must accept that exact name (not the historical
+    `include_failure_context` which existed on GitLab/Azure)."""
+    import inspect
+
+    sig = inspect.signature(AzureDevOpsProvider.get_run)
+    assert "include_failure_excerpt" in sig.parameters
+    assert "include_failure_context" not in sig.parameters
+
+    from project_issues_plugin.providers.gitlab import GitLabProvider
+
+    sig_gl = inspect.signature(GitLabProvider.get_run)
+    assert "include_failure_excerpt" in sig_gl.parameters
+    assert "include_failure_context" not in sig_gl.parameters
 
 
 def test_refs_accepts_visualstudio_com_legacy_url() -> None:

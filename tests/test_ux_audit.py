@@ -225,7 +225,7 @@ def test_get_pr_404_echoes_id(monkeypatch):
 # ---------- finding 8: list_prs `prs` alias key -----------------------------
 
 
-def test_list_prs_has_prs_alias_key(monkeypatch):
+def test_list_prs_only_returns_prs_key(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
     tools = _register(monkeypatch, pull_tools)
 
@@ -234,10 +234,10 @@ def test_list_prs_has_prs_alias_key(monkeypatch):
 
     _install_github_mock(monkeypatch, handler)
     result = tools["list_prs"](project_id="acme")
-    # Both keys present, pointing to the same list.
+    # The legacy `pull_requests` alias key (ticket #48 finding 8) has
+    # been removed — only the canonical `prs` key remains.
     assert "prs" in result
-    assert "pull_requests" in result
-    assert result["prs"] is result["pull_requests"]
+    assert "pull_requests" not in result
 
 
 # ---------- finding 9: update_pr(status="merged") rejected with hint --------

@@ -34,6 +34,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from html import escape as html_escape, unescape as html_unescape
 from typing import Any
@@ -115,9 +116,52 @@ def _client(project: ProjectConfig, token: str | None) -> httpx.Client:
     return httpx.Client(base_url=base, headers=headers, timeout=30.0)
 
 
+_NOT_FOUND_TYPE_KEYS: frozenset[str] = frozenset(
+    {
+        "WorkItemNotFoundException",
+        "RelatedArtifactNotFoundException",
+        "GitItemNotFoundException",
+        "GitPullRequestNotFoundException",
+        "WorkItemTypeNotFoundException",
+        "CommentNotFoundException",
+        "WorkItemCommentNotFoundException",
+        "ItemNotFoundException",
+    }
+)
+
+_TRANSITION_TYPE_KEYS: frozenset[str] = frozenset(
+    {
+        "WorkItemTransitionDeniedException",
+        "WorkItemSaveFailedException",
+        "RuleValidationException",
+        "WorkItemRuleException",
+        "InvalidArgumentValueException",
+    }
+)
+
+_TRANSITION_MSG_FRAGMENTS: tuple[str, ...] = (
+    "transition",
+    "is not a valid state",
+    "not in the allowed",
+    "allowed list",
+    "allowed values",
+)
+
+
 def _check(resp: httpx.Response) -> None:
+    """Translate a non-success ADO response into an `AzureDevOpsError`.
+
+    Two extra translations on top of the raw envelope:
+      - ADO returns 400 for several "not found" classes (deleted work
+        items, missing PR refs, unknown work-item types). We re-tag
+        those as 404 so the tool-layer `_rewrap_404` adds the
+        `kind 'project#id' not found` context.
+      - Work-item state-transition 400s get a hint pointing at
+        `list_ticket_statuses`, mirroring the GitHub/GitLab providers.
+    """
     if resp.is_success:
         return
+    type_key: str = ""
     try:
         payload = resp.json()
         # Azure DevOps error envelopes:
@@ -125,12 +169,45 @@ def _check(resp: httpx.Response) -> None:
         #   {"$id":"1","innerException":null,"message":"...","typeKey":"..."}
         #   {"value": {...}, "count": 0}  (rare; only when a 200 wrapper)
         msg = payload.get("message") or resp.reason_phrase
+        type_key = payload.get("typeKey") or ""
         inner = payload.get("innerException")
         if isinstance(inner, dict) and inner.get("message"):
             msg = f"{msg}: {inner['message']}"
     except Exception:
         msg = resp.reason_phrase or "request failed"
-    raise AzureDevOpsError(resp.status_code, msg)
+
+    status = resp.status_code
+    msg_lower = (msg or "").lower()
+
+    # 400-but-actually-404 normalization.
+    if status == 400 and (
+        type_key in _NOT_FOUND_TYPE_KEYS
+        or "does not exist" in msg_lower
+        or "could not be found" in msg_lower
+        or "was not found" in msg_lower
+        # int32-overflow ids surface as ".NET Int32 overflow" 400s
+        # rather than 404s; treat as not-found so `_rewrap_404` adds
+        # the id-echoing context. Two phrasings ADO uses:
+        or "too large or too small for an int32" in msg_lower
+        or "value was either too large" in msg_lower
+    ):
+        status = 404
+
+    # Status-transition hint parity with GitHub/GitLab. ADO surfaces
+    # invalid System.State values under a handful of typeKeys with
+    # message fragments that all boil down to "your value isn't in the
+    # allowed list" — match any of them so the hint reliably fires.
+    if (
+        status in (400, 409)
+        and (
+            type_key in _TRANSITION_TYPE_KEYS
+            or any(frag in msg_lower for frag in _TRANSITION_MSG_FRAGMENTS)
+        )
+        and "list_ticket_statuses" not in msg
+    ):
+        msg = f"{msg} — use list_ticket_statuses to discover valid values"
+
+    raise AzureDevOpsError(status, msg)
 
 
 # ---------- scope helpers ----------------------------------------------------
@@ -537,6 +614,13 @@ class _MarkdownExtractor(HTMLParser):
         if self._in_pre:
             self._emit(data)
             return
+        # The HTMLParser hands us the literal whitespace between block
+        # elements (e.g. the `\n` between `</li>` and `<li>`); inside a
+        # list that compounds with the `\n` we emit on `</li>` end and
+        # produces a blank line between bullets. Drop whitespace-only
+        # data while we're inside a list to keep bullets adjacent.
+        if self._list_stack and not data.strip():
+            return
         self._emit(data)
 
     def _emit(self, s: str) -> None:
@@ -547,6 +631,11 @@ class _MarkdownExtractor(HTMLParser):
         # Collapse runs of three+ blank lines and strip leading/trailing
         # whitespace so the markdown matches what a human would write.
         text = re.sub(r"\n{3,}", "\n\n", text)
+        # Defensive: strip trailing whitespace per line so ADO's HTML
+        # editor / round-trip artefacts (e.g. a trailing space after the
+        # `#ai-generated` marker line) don't leak into the agent-facing
+        # markdown.
+        text = "\n".join(line.rstrip() for line in text.split("\n"))
         return text.strip()
 
 
@@ -594,6 +683,39 @@ def _identity_display_name(field: dict | str | None) -> str:
         return (
             field.get("displayName")
             or field.get("uniqueName")
+            or field.get("id")
+            or ""
+        )
+    return ""
+
+
+def _identity_login_or_display(field: dict | str | None) -> str:
+    """Pull a login-shaped identifier out of an ADO `IdentityRef`.
+
+    Used where the GitHub provider would surface `user.login` — for
+    Azure that's whichever email-style field the payload exposes.
+    ADO uses inconsistent field names across endpoints:
+      - WorkItem / PR identity refs:  `uniqueName`
+      - `connectionData.authenticatedUser`:  `principalName` /
+        `mailAddress` (no `uniqueName`)
+      - Reviewer payloads:  sometimes `uniqueName`, sometimes just `id`
+
+    Try the email-shaped fields first, then displayName, then id —
+    so the returned string is never empty when ADO returned any
+    identity payload at all, and never a bare GUID when a human-
+    readable login exists.
+    """
+    if not field:
+        return ""
+    if isinstance(field, str):
+        m = re.match(r"^(.*?)\s*<([^>]+)>\s*$", field)
+        return m.group(2).strip() if m else field
+    if isinstance(field, dict):
+        return (
+            field.get("uniqueName")
+            or field.get("mailAddress")
+            or field.get("principalName")
+            or field.get("displayName")
             or field.get("id")
             or ""
         )
@@ -689,6 +811,26 @@ def _map_thread_comment_for_review(
         line = None
         side = None
 
+    # `original_line` reflects the line as anchored on the original
+    # iteration of the PR — when ADO has reattached the thread across
+    # rebases, `trackingCriteria.origRightFileStart/origLeftFileStart`
+    # carries the pre-reattachment line. For fresh threads tracking is
+    # absent and we fall back to the current line (matching GitHub's
+    # behavior on a brand-new review comment).
+    tracking = (thread.get("pullRequestThreadContext") or {}).get(
+        "trackingCriteria"
+    ) or {}
+    if side == "RIGHT":
+        orig_anchor = tracking.get("origRightFileStart") or right_start
+    elif side == "LEFT":
+        orig_anchor = tracking.get("origLeftFileStart") or left_start
+    else:
+        orig_anchor = {}
+    original_line = (
+        orig_anchor.get("line") if isinstance(orig_anchor, dict) else None
+    )
+
+    comment_id = raw.get("id") or 0
     parent_id = raw.get("parentCommentId") or 0
     thread_id = thread.get("id")
     # The first comment in a thread has id 1 (per ADO docs). The
@@ -698,19 +840,26 @@ def _map_thread_comment_for_review(
     discussion_id = str(thread_id) if thread_id is not None else None
     in_reply_to = str(thread_id) if parent_id else None
 
+    # ADO doesn't expose a commit SHA on the thread itself. The
+    # iteration tracking only carries iteration indices; resolving them
+    # to SHAs needs an extra `/iterations` round-trip per thread, which
+    # is too expensive for `list_pr_review_comments`. Leave `None` when
+    # not derivable rather than fabricating from an unrelated field.
+    commit_sha_raw = (
+        (thread.get("pullRequestThreadContext") or {})
+        .get("changeTrackingId")
+    )
+    commit_sha = str(commit_sha_raw) if isinstance(commit_sha_raw, str) else None
+
     return ReviewComment(
-        id=f"{thread_id}.{raw.get('id', '')}" if thread_id is not None else str(raw.get("id", "")),
-        author=_identity_display_name(raw.get("author")),
+        id=_format_thread_comment_id(thread_id, comment_id),
+        author=_identity_login_or_display(raw.get("author")),
         body=_html_to_markdown(raw.get("content") or ""),
         path=file_path,
         line=line,
-        original_line=None,
+        original_line=original_line,
         side=side,
-        commit_sha=(thread.get("pullRequestThreadContext") or {})
-        .get("trackingCriteria", {})
-        .get("origRightFileEnd", {})
-        .get("offset", "")
-        or "",
+        commit_sha=commit_sha,
         in_reply_to=in_reply_to,
         created_at=normalize_timestamp(raw.get("publishedDate") or ""),
         updated_at=normalize_timestamp(raw.get("lastUpdatedDate") or ""),
@@ -727,13 +876,115 @@ def _map_thread_comment(
 ) -> Comment:
     """Translate a top-of-thread comment (no file context) into a `Comment`."""
     thread_id = thread.get("id")
+    comment_id = raw.get("id") or 0
     return Comment(
-        id=f"{thread_id}.{raw.get('id', '')}" if thread_id is not None else str(raw.get("id", "")),
+        id=_format_thread_comment_id(thread_id, comment_id),
         author=_identity_display_name(raw.get("author")),
         body=_html_to_markdown(raw.get("content") or ""),
         url=_build_pr_url(project, pr_id) + f"?discussionId={thread_id}",
         created_at=normalize_timestamp(raw.get("publishedDate") or ""),
     )
+
+
+def _format_thread_comment_id(thread_id: int | str | None, comment_id: int | str) -> str:
+    """Build a PR-comment id matching GitHub's `id == discussion_id`
+    invariant for top-of-thread comments.
+
+    - top-of-thread (`comment_id == 1`): bare `thread_id` so callers
+      can round-trip the id as `in_reply_to` without surprises.
+    - replies (`comment_id > 1`): `f"{thread_id}.{comment_id}"`.
+
+    The composite form is intentionally non-numeric so callers don't
+    confuse it with a GitHub-style flat id.
+    """
+    if thread_id is None:
+        return str(comment_id or "")
+    try:
+        cid_int = int(comment_id)
+    except (TypeError, ValueError):
+        cid_int = 0
+    if cid_int <= 1:
+        return str(thread_id)
+    return f"{thread_id}.{cid_int}"
+
+
+REVIEW_BODY_PROPERTY_KEY = "projectIssues.kind"
+REVIEW_BODY_PROPERTY_VALUE = "review_body"
+
+# Work-item and comment ids are .NET Int32; anything beyond
+# `2_147_483_647` triggers an opaque ADO 400 (System.OverflowException).
+# Reject those at the provider entry-point so the agent gets a clean
+# "kind 'project#id' not found" via `_safe` instead of the raw 400.
+_ADO_INT32_MAX = 2_147_483_647
+
+
+def _validate_int32_id(raw: str | int, kind: str) -> None:
+    """Raise `LookupError` when `raw` is a numeric id beyond Int32 range.
+
+    `kind` is a short noun ("comment", "ticket", "work item") used in
+    the error message so the agent sees which surface rejected the id.
+    Non-numeric input passes through unchanged — ADO will surface its
+    own (already-curated by `_check`) error for those.
+    """
+    if isinstance(raw, int):
+        candidate = raw
+    elif isinstance(raw, str):
+        stripped = raw.strip().lstrip("#")
+        if not stripped.isdigit():
+            return
+        candidate = int(stripped)
+    else:
+        return
+    if candidate > _ADO_INT32_MAX:
+        raise LookupError(
+            f"{kind} '{raw}' not found — id exceeds the Azure DevOps "
+            f"32-bit integer range (max {_ADO_INT32_MAX})"
+        )
+
+
+def _thread_property_value(thread: dict, key: str) -> str | None:
+    """Read a thread `properties.{key}` value, handling both envelope and
+    flat shapes ADO returns inconsistently:
+      - envelope: `{key: {"$type": "System.String", "$value": "x"}}`
+      - flat:     `{key: "x"}`
+    """
+    props = thread.get("properties") or {}
+    entry = props.get(key)
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        v = entry.get("$value")
+        return v if isinstance(v, str) else None
+    if isinstance(entry, str):
+        return entry
+    return None
+
+
+def _is_review_body_thread(thread: dict) -> bool:
+    """True iff this thread was posted as the body of a `submit_pr_review`."""
+    return (
+        _thread_property_value(thread, REVIEW_BODY_PROPERTY_KEY)
+        == REVIEW_BODY_PROPERTY_VALUE
+    )
+
+
+def _utc_iso_now() -> str:
+    """Return the current UTC time as an ISO-8601 `Z`-suffixed string."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_thread_id_from_alias(value: str | None) -> str | None:
+    """Pull the thread-id prefix out of a comment id alias.
+
+    Accepts both the canonical `thread_id` form and the legacy
+    `f"{thread_id}.{comment_id}"` composite. Used when a caller passes
+    a comment id back as `in_reply_to` — we only need the thread part
+    to address the ADO API.
+    """
+    if not value:
+        return None
+    head = value.split(".", 1)[0]
+    return head or None
 
 
 def _map_pr(raw: dict, project: ProjectConfig) -> PullRequest:
@@ -753,10 +1004,22 @@ def _map_pr(raw: dict, project: ProjectConfig) -> PullRequest:
 
     source_ref = (raw.get("sourceRefName") or "").removeprefix("refs/heads/")
     target_ref = (raw.get("targetRefName") or "").removeprefix("refs/heads/")
+    # `repo_full_name` mirrors GitHub's `org/repo` shape — on ADO the
+    # canonical 3-segment identifier is `org/project/repo`, matching the
+    # YAML `path` field. Fall back to the embedded repo name when any
+    # segment is missing so the field is never empty.
+    repo_name = (raw.get("repository") or {}).get("name", "") or ""
+    org_seg = project.organization or ""
+    proj_seg = project.ado_project or ""
+    repo_seg = project.repository or repo_name
+    if org_seg and proj_seg and repo_seg:
+        repo_full_name = f"{org_seg}/{proj_seg}/{repo_seg}"
+    else:
+        repo_full_name = repo_name
     head = {
         "ref": source_ref,
         "sha": raw.get("lastMergeSourceCommit", {}).get("commitId", "") or "",
-        "repo_full_name": (raw.get("repository") or {}).get("name", "") or "",
+        "repo_full_name": repo_full_name,
     }
     base_ref_dict = {
         "ref": target_ref,
@@ -1032,9 +1295,15 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         opens = [s.get("name") for s in states if s.get("category") in _open_state_categories()]
         default_open = opens[0] if opens else (values[0] if values else "")
 
+        # Process templates without a "Removed" category (notably Basic)
+        # don't have a distinct declined state — surface that honestly as
+        # an empty string rather than collapsing it onto
+        # terminal_completed, which previously left both fields equal
+        # and agents thinking they had two interchangeable terminal
+        # states to choose from.
         terminal = (by_cat.get("Completed") or []) + (by_cat.get("Removed") or [])
-        terminal_completed = (by_cat.get("Completed") or terminal)
-        terminal_declined = (by_cat.get("Removed") or terminal_completed)
+        terminal_completed = by_cat.get("Completed") or []
+        terminal_declined = by_cat.get("Removed") or []
         hints: dict[str, str | list[str]] = {
             "default_open": default_open,
             "terminal": terminal,
@@ -1183,6 +1452,7 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         ticket_id: str,
         include_relations: bool = True,
     ) -> tuple[Ticket, list[Comment], list[Relation], bool]:
+        _validate_int32_id(ticket_id, "ticket")
         params = _api_version_params({"$expand": "Relations"})
         path = f"{_project_scope(project)}/_apis/wit/workitems/{quote(str(ticket_id), safe='')}"
         with _client(project, token) as c:
@@ -1249,7 +1519,11 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         ticket_id: str,
     ) -> list[Relation]:
         rels_payload = raw.get("relations") or []
-        out: list[Relation] = []
+        # Phase 1: collect (kind, target_id, display_url) for typed
+        # relations, and (ref_kind, ref_id) for body-text mentions. We
+        # defer Relation construction until phase 3 so a single batch
+        # call can populate Title + State for every target.
+        typed_targets: list[tuple[str, str, str]] = []
         for rel in rels_payload:
             rel_type = rel.get("rel") or ""
             kind = _ado_rel_to_kind(rel_type)
@@ -1259,35 +1533,97 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
             # url looks like `https://dev.azure.com/{org}/_apis/wit/workItems/{id}`.
             m = re.search(r"/workItems/(\d+)", url)
             target_id = m.group(1) if m else ""
-            attrs = rel.get("attributes") or {}
-            display_url = _build_work_item_url(project, target_id) if target_id else url
+            display_url = (
+                _build_work_item_url(project, target_id) if target_id else url
+            )
+            typed_targets.append((kind, target_id, display_url))
+
+        body_text = _html_to_markdown(
+            (raw.get("fields") or {}).get("System.Description")
+        )
+        mention_targets: list[tuple[str, str]] = []
+        for ref_kind, ref_id in _scan_refs_for_mentions(body_text):
+            if ref_id == str(ticket_id):
+                continue
+            mention_targets.append((ref_kind, ref_id))
+
+        # Phase 2: single workitemsbatch call to populate Title + State
+        # for all targets at once. ADO caps at 200 ids per call which is
+        # well above any realistic relation count for a single ticket.
+        all_ids = {tid for _, tid, _ in typed_targets if tid}
+        all_ids.update(rid for _, rid in mention_targets)
+        title_state_by_id = self._fetch_work_item_title_state(
+            project, token, sorted(all_ids)
+        )
+
+        # Phase 3: build the Relations using the looked-up Title + State.
+        out: list[Relation] = []
+        for kind, target_id, display_url in typed_targets:
+            title, state = title_state_by_id.get(target_id, ("", ""))
             out.append(
                 Relation(
                     kind=kind,
                     ticket_id=f"#{target_id}" if target_id else "",
-                    title=attrs.get("name") or "",
+                    title=title,
                     url=display_url,
-                    state="",
+                    state=state,
                     is_pull_request=False,
                 )
             )
-        # Body-text scan for `#N` mentions / closing keywords. Mirrors
-        # GitHub's behaviour so the surface is consistent.
-        body_text = _html_to_markdown(
-            (raw.get("fields") or {}).get("System.Description")
-        )
-        for ref_kind, ref_id in _scan_refs_for_mentions(body_text):
-            if ref_id == str(ticket_id):
-                continue
+        for ref_kind, ref_id in mention_targets:
+            title, state = title_state_by_id.get(ref_id, ("", ""))
             out.append(
                 Relation(
                     kind=ref_kind,
                     ticket_id=f"#{ref_id}",
-                    title="",
+                    title=title,
                     url=_build_work_item_url(project, ref_id),
-                    state="",
+                    state=state,
                     is_pull_request=False,
                 )
+            )
+        return out
+
+    def _fetch_work_item_title_state(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ids: list[str],
+    ) -> dict[str, tuple[str, str]]:
+        """Batch-fetch System.Title + System.State for the given work-item ids.
+
+        Returns a `{id: (title, state)}` map. Missing ids (deleted /
+        invisible work items) are absent from the map so the caller can
+        default to empty strings.
+        """
+        if not ids:
+            return {}
+        body = {
+            "ids": [int(i) for i in ids if i.isdigit()],
+            "fields": ["System.Title", "System.State"],
+        }
+        if not body["ids"]:
+            return {}
+        path = f"{_project_scope(project)}/_apis/wit/workitemsbatch"
+        try:
+            with _client(project, token) as c:
+                resp = c.post(path, params=_api_version_params(), json=body)
+            if not resp.is_success:
+                # Best-effort: empty titles beat blowing up the whole
+                # get_ticket path. The relation array still surfaces.
+                return {}
+            value = (resp.json() or {}).get("value") or []
+        except httpx.HTTPError:
+            return {}
+        out: dict[str, tuple[str, str]] = {}
+        for item in value:
+            wid = item.get("id")
+            fields = item.get("fields") or {}
+            if wid is None:
+                continue
+            out[str(wid)] = (
+                fields.get("System.Title") or "",
+                fields.get("System.State") or "",
             )
         return out
 
@@ -1355,6 +1691,7 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         assignees_add: list[str] | None = None,
         assignees_remove: list[str] | None = None,
     ) -> Ticket:
+        _validate_int32_id(ticket_id, "ticket")
         # Read current work item (need tags + assignee for diff semantics).
         path = f"{_project_scope(project)}/_apis/wit/workitems/{quote(str(ticket_id), safe='')}"
         with _client(project, token) as c:
@@ -1431,7 +1768,38 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 headers={"Content-Type": "application/json-patch+json"},
                 json=patch,
             )
-        _check(resp)
+        try:
+            _check(resp)
+        except AzureDevOpsError as exc:
+            # If the patch was rejected for an invalid state value,
+            # surface a curated `ValueError` with the accepted list —
+            # mirrors `github._split_github_status` so the `_safe`
+            # translation produces a clean `{"error": "ticket #5 state
+            # 'Bogus' rejected — accepted: [...]"}` payload without the
+            # raw "Azure DevOps 400:" provider prefix.
+            #
+            # `_check` already appended the `list_ticket_statuses` hint
+            # to the message; we use that as the trigger for the
+            # curated rewrap.
+            if (
+                status is not None
+                and exc.status in (400, 409)
+                and "list_ticket_statuses" in exc.message
+            ):
+                accepted: list[str] | None = None
+                try:
+                    spec = self.list_statuses(project, token)
+                    accepted = list(spec.values)
+                except Exception:
+                    accepted = None
+                accepted_clause = (
+                    f" — accepted: {accepted}" if accepted else ""
+                )
+                raise ValueError(
+                    f"ticket #{ticket_id} state {status!r} rejected"
+                    f"{accepted_clause}"
+                ) from exc
+            raise
         return _map_work_item(resp.json(), project)
 
     # ---------- comments — work item --------------------------------------
@@ -1521,6 +1889,8 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 "azuredevops.get_comment requires ticket_id "
                 "(work-item comment ids are scoped to a work item).",
             )
+        _validate_int32_id(ticket_id, "ticket")
+        _validate_int32_id(comment_id, "comment")
         path = (
             f"{_project_scope(project)}/_apis/wit/workItems/"
             f"{quote(str(ticket_id), safe='')}/comments/{quote(str(comment_id), safe='')}"
@@ -1544,6 +1914,8 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 "azuredevops.update_comment requires ticket_id "
                 "(work-item comment ids are scoped to a work item).",
             )
+        _validate_int32_id(ticket_id, "ticket")
+        _validate_int32_id(comment_id, "comment")
         # Read current to decide the marker flavour.
         path = (
             f"{_project_scope(project)}/_apis/wit/workItems/"
@@ -1632,8 +2004,46 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
             resp = c.get(path, params=_api_version_params())
         _check(resp)
         pr = _map_pr(resp.json(), project)
+        # ADO's single-PR GET doesn't include labels by default; the
+        # list-PRs endpoint does. Fetch the labels endpoint so every
+        # PR-returning surface (create / update / get / merge_pr)
+        # advertises labels consistently.
+        pr.labels = self._fetch_pr_labels(project, token, repo_id, pr_id)
         comments = self._list_pr_top_level_comments(project, token, pr_id, repo_id)
         return pr, comments
+
+    def _fetch_pr_labels(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        repo_id: str,
+        pr_id: str,
+    ) -> list[str]:
+        """Read the PR labels endpoint and return a sorted name list.
+
+        Best-effort: a 403/404 just returns `[]` so a missing label
+        permission doesn't kill the legitimate PR fetch.
+        """
+        path = (
+            f"{_project_scope(project)}/_apis/git/repositories/"
+            f"{quote(repo_id, safe='')}/pullrequests/"
+            f"{quote(str(pr_id), safe='')}/labels"
+        )
+        try:
+            with _client(project, token) as c:
+                resp = c.get(path, params=_api_version_params())
+        except httpx.HTTPError:
+            return []
+        if resp.status_code in (403, 404):
+            return []
+        if not resp.is_success:
+            return []
+        payload = resp.json() or {}
+        return sorted(
+            (lbl.get("name") or "")
+            for lbl in (payload.get("value") or [])
+            if lbl.get("name") and lbl.get("active", True)
+        )
 
     def _list_pr_threads(
         self,
@@ -1664,6 +2074,12 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
             if thread.get("threadContext"):
                 continue
             if thread.get("isDeleted"):
+                continue
+            # Threads created as the body of a `submit_pr_review` are
+            # tagged with a custom property; hide them from the flat
+            # comments stream to match GitHub's separation of review
+            # bodies vs PR comments.
+            if _is_review_body_thread(thread):
                 continue
             for raw in thread.get("comments") or []:
                 if raw.get("commentType") == "system":
@@ -1708,6 +2124,15 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         assignees: list[str] | None = None,
         requested_reviewers: list[str] | None = None,
     ) -> PullRequest:
+        """Create a pull request, applying the AI-generated marker + label.
+
+        Mirrors `github.py:create_pr`: the body always gets the
+        `#ai-generated` marker prefix and the `ai-generated` label is
+        appended to the user-supplied labels (de-duped, preserving the
+        caller's order). Label application is best-effort — a 403/404
+        from `_add_pr_label` is swallowed so a missing tag-management
+        permission doesn't kill the legitimate PR.
+        """
         repo_id = self._resolve_repository_id(project, token)
         body_with_marker = ensure_body_prefix(body or "")
         payload: dict[str, Any] = {
@@ -1731,11 +2156,39 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
             resp = c.post(path, params=_api_version_params(), json=payload)
         _check(resp)
         pr = _map_pr(resp.json(), project)
-        if labels:
-            for lbl in labels:
-                self._add_pr_label(project, token, repo_id, pr.id, lbl)
+        # Mirror github.py:create_pr — always merge the ai-generated
+        # label, dropping caller duplicates while preserving their order.
+        merged_labels = list(dict.fromkeys([*(labels or []), AI_GENERATED_LABEL]))
+        if merged_labels:
+            for lbl in merged_labels:
+                self._add_pr_label_best_effort(project, token, repo_id, pr.id, lbl)
             pr, _ = self.get_pr(project, token, pr.id)
         return pr
+
+    def _add_pr_label_best_effort(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        repo_id: str,
+        pr_id: str,
+        label: str,
+    ) -> bool:
+        """Like `_add_pr_label` but swallows permission failures.
+
+        Returns True on success, False when the call returned 403/404 or
+        an `AzureDevOpsError` carrying those statuses — matching the
+        GitHub provider's best-effort label policy.
+        """
+        try:
+            self._add_pr_label(project, token, repo_id, pr_id, label)
+            return True
+        except AzureDevOpsError as exc:
+            if exc.status in (403, 404):
+                log.info(
+                    "skipping label %r on PR %s: %s", label, pr_id, exc.message,
+                )
+                return False
+            raise
 
     def _add_pr_label(
         self,
@@ -1793,23 +2246,48 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         reviewers_remove: list[str] | None = None,
         draft: bool | None = None,
     ) -> PullRequest:
+        """Update a PR's title/body/state/base, plus label/reviewer deltas.
+
+        Mirrors `github.py:update_pr` for the marker + label policy:
+          - The body always carries a marker line; `#ai-generated` is
+            preserved when the PR was originally agent-authored,
+            otherwise `#ai-modified` is stamped.
+          - When the existing PR does not already carry the
+            `ai-generated` label, the `ai-modified` label is added
+            (best-effort, swallowing 403/404).
+
+        Limitation: ADO has no native `updated_at` field on PRs, so we
+        synthesize one (current UTC) whenever this call performs any
+        write — the returned `pr.updated_at` therefore reflects "this
+        call mutated the PR" rather than ADO's persisted state.
+        """
         repo_id = self._resolve_repository_id(project, token)
         path = (
             f"{_project_scope(project)}/_apis/git/repositories/"
             f"{quote(repo_id, safe='')}/pullrequests/{quote(str(pr_id), safe='')}"
         )
 
+        # Read once: we need the current body/labels for marker + label
+        # state decisions; reusing this snapshot across the body and
+        # label branches keeps it to one round-trip.
+        with _client(project, token) as c:
+            cur_resp = c.get(path, params=_api_version_params())
+        _check(cur_resp)
+        cur = cur_resp.json() or {}
+        cur_labels = {
+            (lbl.get("name") or "")
+            for lbl in (cur.get("labels") or [])
+            if lbl.get("name")
+        }
+        cur_md = _html_to_markdown(cur.get("description") or "")
+        already_ai = has_ai_generated_marker(cur_md) or (
+            AI_GENERATED_LABEL in cur_labels
+        )
+
         payload: dict[str, Any] = {}
         if title is not None:
             payload["title"] = title
         if body is not None:
-            # Stamp #ai-modified if not already #ai-generated.
-            with _client(project, token) as c:
-                resp = c.get(path, params=_api_version_params())
-            _check(resp)
-            cur = resp.json() or {}
-            cur_md = _html_to_markdown(cur.get("description") or "")
-            already_ai = has_ai_generated_marker(cur_md)
             new_body = apply_body_marker(body, will_be_ai_generated=already_ai)
             payload["description"] = _markdown_to_html(new_body)
         if base is not None:
@@ -1825,15 +2303,34 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 "merged": "completed",
             }.get(status, status)
 
+        wrote = False
         if payload:
             with _client(project, token) as c:
                 resp = c.patch(path, params=_api_version_params(), json=payload)
             _check(resp)
+            wrote = True
+
+        # Auto-apply `ai-modified` when the PR wasn't originally agent-
+        # authored AND that label isn't already in the requested deltas.
+        # Best-effort: a missing tag-management permission doesn't kill
+        # the legitimate update.
+        explicit_label_names = set(labels_add or []) | set(labels_remove or [])
+        if (
+            not already_ai
+            and AI_MODIFIED_LABEL not in cur_labels
+            and AI_MODIFIED_LABEL not in explicit_label_names
+        ):
+            if self._add_pr_label_best_effort(
+                project, token, repo_id, pr_id, AI_MODIFIED_LABEL
+            ):
+                wrote = True
 
         for lbl in labels_add or []:
             self._add_pr_label(project, token, repo_id, pr_id, lbl)
+            wrote = True
         for lbl in labels_remove or []:
             self._remove_pr_label(project, token, repo_id, pr_id, lbl)
+            wrote = True
 
         if reviewers_add or reviewers_remove:
             for r in reviewers_add or []:
@@ -1844,6 +2341,7 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 with _client(project, token) as c:
                     resp = c.put(rev_path, params=_api_version_params(), json={"vote": 0})
                 _check(resp)
+                wrote = True
             for r in reviewers_remove or []:
                 rev_path = (
                     f"{_project_scope(project)}/_apis/git/repositories/"
@@ -1853,8 +2351,11 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                     resp = c.delete(rev_path, params=_api_version_params())
                 if resp.status_code != 404:
                     _check(resp)
+                wrote = True
 
         pr, _ = self.get_pr(project, token, pr_id)
+        if wrote:
+            pr.updated_at = _utc_iso_now()
         return pr
 
     def merge_pr(
@@ -1866,6 +2367,13 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         commit_title: str | None = None,
         commit_message: str | None = None,
     ) -> PullRequest:
+        """Complete a PR. ADO's `status=completed` PATCH triggers an async
+        merge — the response carries the pre-merge snapshot, so we
+        poll until `mergeStatus` settles before mapping the PR. The
+        backoff cap is ~3s total; if the merge is still in flight after
+        that we raise `AzureDevOpsError(202, …)` so callers know to
+        re-fetch rather than treat the snapshot as merged=false.
+        """
         repo_id = self._resolve_repository_id(project, token)
         path = (
             f"{_project_scope(project)}/_apis/git/repositories/"
@@ -1896,7 +2404,80 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         with _client(project, token) as c:
             resp = c.patch(path, params=_api_version_params(), json=body)
         _check(resp)
-        return _map_pr(resp.json(), project)
+
+        # Settle-loop: ADO returns the PATCH response before the async
+        # merge finishes. Poll until mergeStatus is a terminal state.
+        settled = self._wait_for_merge_settle(project, token, path, pr_id)
+        merge_status = settled.get("mergeStatus")
+        if merge_status == "conflicts":
+            raise AzureDevOpsError(
+                409,
+                f"PR {pr_id}: merge has conflicts — resolve before retrying",
+            )
+        if merge_status == "rejectedByPolicy":
+            raise AzureDevOpsError(
+                409,
+                f"PR {pr_id}: merge rejected by branch policy",
+            )
+        if merge_status == "failure":
+            raise AzureDevOpsError(
+                500,
+                f"PR {pr_id}: merge failed (Azure DevOps server-side error)",
+            )
+        if merge_status != "succeeded":
+            raise AzureDevOpsError(
+                202,
+                f"PR {pr_id}: merge in progress — retry get_pr to confirm",
+            )
+        pr = _map_pr(settled, project)
+        # Labels live on a separate endpoint — keep merge_pr's return
+        # consistent with get_pr / list_prs.
+        pr.labels = self._fetch_pr_labels(project, token, repo_id, str(pr_id))
+        return pr
+
+    _MERGE_SETTLE_DELAYS_MS: tuple[int, ...] = (
+        200, 400, 800, 1600, 3200, 4000,
+    )
+
+    def _wait_for_merge_settle(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        path: str,
+        pr_id: str,
+    ) -> dict:
+        """Poll the PR until both `mergeStatus` AND `status` settle.
+
+        Returns the last fetched PR payload regardless of outcome; the
+        caller inspects `mergeStatus` (and `status`) to translate into
+        success / error.
+
+        Settled means EITHER:
+          - mergeStatus == "succeeded" AND status == "completed"
+            (i.e. ADO has actually finalized the merge), OR
+          - mergeStatus ∈ {"conflicts", "rejectedByPolicy", "failure"}
+            (terminal failure modes).
+
+        Earlier versions only checked mergeStatus and could return a
+        snapshot with status still "active" — `_map_pr` then derives
+        `merged=false` even though the merge is done. Cumulative cap
+        is ~10s to absorb slow-environment lag.
+        """
+        merge_failure = {"conflicts", "rejectedByPolicy", "failure"}
+        last: dict = {}
+        for delay_ms in self._MERGE_SETTLE_DELAYS_MS:
+            time.sleep(delay_ms / 1000.0)
+            with _client(project, token) as c:
+                resp = c.get(path, params=_api_version_params())
+            _check(resp)
+            last = resp.json() or {}
+            ms = last.get("mergeStatus")
+            st = last.get("status")
+            if ms in merge_failure:
+                return last
+            if ms == "succeeded" and st == "completed":
+                return last
+        return last
 
     # ---------- pull requests — comments / reviews ------------------------
 
@@ -1956,11 +2537,20 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         body_with_marker = ensure_comment_prefix(body or "")
 
         if in_reply_to:
-            # Reply lives inside an existing thread.
+            # Reply lives inside an existing thread. Accept both the
+            # canonical thread-id form and the legacy
+            # `"{thread}.{comment}"` composite that older callers may
+            # have round-tripped from a previous `id`.
+            thread_alias = _parse_thread_id_from_alias(in_reply_to)
+            if not thread_alias:
+                raise AzureDevOpsError(
+                    422,
+                    f"in_reply_to {in_reply_to!r} is not a valid thread id",
+                )
             thread_path = (
                 f"{_project_scope(project)}/_apis/git/repositories/"
                 f"{quote(repo_id, safe='')}/pullrequests/{quote(str(pr_id), safe='')}"
-                f"/threads/{quote(str(in_reply_to), safe='')}/comments"
+                f"/threads/{quote(thread_alias, safe='')}/comments"
             )
             with _client(project, token) as c:
                 resp = c.post(
@@ -1978,13 +2568,25 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
             thread_get_path = (
                 f"{_project_scope(project)}/_apis/git/repositories/"
                 f"{quote(repo_id, safe='')}/pullrequests/{quote(str(pr_id), safe='')}"
-                f"/threads/{quote(str(in_reply_to), safe='')}"
+                f"/threads/{quote(thread_alias, safe='')}"
             )
             with _client(project, token) as c:
                 tresp = c.get(thread_get_path, params=_api_version_params())
             _check(tresp)
             thread = tresp.json()
-            return _map_thread_comment_for_review(thread, raw, project, str(pr_id))
+            rc = _map_thread_comment_for_review(thread, raw, project, str(pr_id))
+            # Echo the caller-supplied commit_sha when the thread payload
+            # doesn't carry one — matches GitHub's review-comment return.
+            if commit_sha and not rc.commit_sha:
+                rc.commit_sha = commit_sha
+            return rc
+
+        # Validate that `line` is reachable at the PR head — ADO would
+        # silently accept lines beyond the file length and create a
+        # context-less thread; GitHub returns 422 here. Mirror that.
+        self._validate_pr_diff_line(
+            project, token, repo_id, str(pr_id), path, line, side, commit_sha,
+        )
 
         thread_context: dict[str, Any] = {"filePath": path}
         if (side or "RIGHT").upper() == "LEFT":
@@ -2016,7 +2618,97 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         comments = thread.get("comments") or []
         if not comments:
             raise AzureDevOpsError(0, "thread create returned no comments")
-        return _map_thread_comment_for_review(thread, comments[0], project, str(pr_id))
+        rc = _map_thread_comment_for_review(thread, comments[0], project, str(pr_id))
+        # Echo the caller-supplied commit_sha when the thread payload
+        # doesn't carry one — matches GitHub's review-comment return.
+        if commit_sha and not rc.commit_sha:
+            rc.commit_sha = commit_sha
+        return rc
+
+    def _validate_pr_diff_line(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        repo_id: str,
+        pr_id: str,
+        file_path: str,
+        line: int,
+        side: str | None,
+        commit_sha: str | None,
+    ) -> None:
+        """Reject `line` if outside the file's line range at the PR head.
+
+        ADO would otherwise silently anchor the thread to nothing; GitHub
+        returns 422 for the same input. The check is best-effort —
+        binary files, deleted files, and missing iterations short-circuit
+        to `AzureDevOpsError(422, …)` so the caller sees the same shape.
+        """
+        if line is None or line < 1:
+            raise AzureDevOpsError(
+                422,
+                f"line {line!r} is not a valid 1-based line number",
+            )
+        # Resolve the commit to fetch the file from. For `side=LEFT` we
+        # want the target (base) commit; otherwise the source (head)
+        # commit. Use the provided commit_sha when set; else fetch from
+        # the PR resource.
+        commit_to_use = commit_sha
+        if not commit_to_use:
+            pr_path = (
+                f"{_project_scope(project)}/_apis/git/repositories/"
+                f"{quote(repo_id, safe='')}/pullrequests/{quote(str(pr_id), safe='')}"
+            )
+            with _client(project, token) as c:
+                pr_resp = c.get(pr_path, params=_api_version_params())
+            _check(pr_resp)
+            pr_raw = pr_resp.json() or {}
+            if (side or "RIGHT").upper() == "LEFT":
+                commit_to_use = (
+                    (pr_raw.get("lastMergeTargetCommit") or {}).get("commitId")
+                )
+            else:
+                commit_to_use = (
+                    (pr_raw.get("lastMergeSourceCommit") or {}).get("commitId")
+                )
+        if not commit_to_use:
+            raise AzureDevOpsError(
+                422,
+                f"could not resolve commit to validate line {line} of {file_path}",
+            )
+        item_path = (
+            f"{_project_scope(project)}/_apis/git/repositories/"
+            f"{quote(repo_id, safe='')}/items"
+        )
+        params = _api_version_params(
+            {
+                "path": file_path,
+                "versionDescriptor.version": commit_to_use,
+                "versionDescriptor.versionType": "commit",
+                "includeContent": "true",
+                "$format": "json",
+            }
+        )
+        with _client(project, token) as c:
+            item_resp = c.get(item_path, params=params)
+        if item_resp.status_code == 404:
+            raise AzureDevOpsError(
+                422,
+                f"file {file_path!r} not found at commit {commit_to_use[:8]} "
+                f"of PR {pr_id}",
+            )
+        _check(item_resp)
+        content = (item_resp.json() or {}).get("content")
+        if not isinstance(content, str):
+            # Binary or unreadable file — fall through silently rather
+            # than blocking the comment.
+            return
+        line_count = content.count("\n") + (0 if content.endswith("\n") else 1)
+        if line > line_count:
+            raise AzureDevOpsError(
+                422,
+                f"line {line} is outside the {line_count}-line range of "
+                f"{file_path} at commit {commit_to_use[:8]}",
+            )
 
     def submit_pr_review(
         self,
@@ -2027,6 +2719,23 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         body: str | None = None,
         commit_sha: str | None = None,
     ) -> Review:
+        """Vote on a PR (approve / request_changes / comment).
+
+        ADO models reviews as a per-reviewer vote on the PR resource;
+        there is no native "review body" attached to the vote. When a
+        body is supplied we post it as a normal thread but tag the
+        thread with a custom property
+        (`projectIssues.kind=review_body`) so it doesn't leak into
+        `get_pr().comments[]` or `list_comments` — matching GitHub's
+        separation of review bodies vs ordinary PR comments.
+
+        Identity, timestamp, and id are synthesized to match the
+        cross-provider `Review` shape: `author` is the reviewer's
+        unique-name (UPN/email, the closest analogue of a GitHub login),
+        `submitted_at` is a current UTC ISO-8601, and `id` includes the
+        vote + ms-timestamp so consecutive `comment + approve` calls
+        from the same reviewer don't collide.
+        """
         repo_id = self._resolve_repository_id(project, token)
         vote = {"approve": 10, "request_changes": -10, "comment": 0}.get(state, 0)
 
@@ -2054,22 +2763,63 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         with _client(project, token) as c:
             resp = c.put(rev_path, params=_api_version_params(), json={"vote": vote})
         _check(resp)
+        # The reviewer PUT response carries the full identity
+        # (displayName + uniqueName), while connectionData often returns
+        # only the GUID. Prefer the PUT response, falling back to
+        # connectionData so a missing field doesn't drop us to the GUID.
+        reviewer_identity = resp.json() or {}
+        merged_identity = {**identity, **reviewer_identity}
 
-        review_id = resp.json().get("id") or reviewer_id
-
+        body_with_marker = ensure_comment_prefix(body) if body else ""
         if body:
-            # Drop the review body as a regular PR comment so it's
-            # visible alongside the vote.
-            self.add_pr_comment(project, token, pr_id, body)
+            threads_path = (
+                f"{_project_scope(project)}/_apis/git/repositories/"
+                f"{quote(repo_id, safe='')}/pullrequests/"
+                f"{quote(str(pr_id), safe='')}/threads"
+            )
+            payload = {
+                "comments": [
+                    {
+                        "parentCommentId": 0,
+                        "content": _markdown_to_html(body_with_marker),
+                        "commentType": "text",
+                    }
+                ],
+                "status": "active",
+                "properties": {
+                    REVIEW_BODY_PROPERTY_KEY: {
+                        "$type": "System.String",
+                        "$value": REVIEW_BODY_PROPERTY_VALUE,
+                    },
+                },
+            }
+            with _client(project, token) as c:
+                tresp = c.post(threads_path, params=_api_version_params(), json=payload)
+            _check(tresp)
 
-        normalized_state: Any = state if state in ("approve", "request_changes", "comment") else "comment"
+        normalized_state: Any = (
+            state if state in ("approve", "request_changes", "comment") else "comment"
+        )
+        submitted_at = _utc_iso_now()
+        synthesized_id = (
+            f"{reviewer_id}:{vote}:{int(time.time() * 1000)}"
+        )
         return Review(
-            id=str(review_id),
+            id=synthesized_id,
             state=normalized_state,
-            author=_identity_display_name(identity),
-            body=body or "",
+            # `_identity_display_name` keeps the author field
+            # consistent with `_map_pr` (PR-level author) and
+            # `_map_thread_comment` (PR comment author) — all three
+            # surfaces use the same display-name shape on Azure, so an
+            # agent that compares them sees a single identity string
+            # per user. Cross-provider, GitHub still returns its login;
+            # Azure returns the display name (its natural primary key).
+            author=_identity_display_name(merged_identity),
+            # Surface the marker-prefixed body so the contract docs
+            # ("body carries #ai-generated") hold for the Review return.
+            body=body_with_marker,
             url=_build_pr_url(project, pr_id),
-            submitted_at="",
+            submitted_at=submitted_at,
             commit_sha=commit_sha,
         )
 
@@ -2106,12 +2856,19 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 json=patch,
             )
         _check(resp)
+        # Surface the target's title + state so the Relation return
+        # matches what `get_ticket` reports for the same link — agents
+        # often display this immediately after add_relation succeeds.
+        title_state = self._fetch_work_item_title_state(
+            project, token, [str(target_id)]
+        )
+        title, state = title_state.get(str(target_id), ("", ""))
         return Relation(
             kind=kind,
             ticket_id=f"#{target_id}",
-            title="",
+            title=title,
             url=_build_work_item_url(project, target_id),
-            state="",
+            state=state,
             is_pull_request=False,
         )
 
@@ -2143,12 +2900,10 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                 index = i
                 break
         if index is None:
-            return {
-                "removed": False,
-                "reason": "relation_not_found",
-                "kind": kind,
-                "target": f"#{target_id}",
-            }
+            raise LookupError(
+                f"relation '{kind}' on ticket '#{ticket_id}' targeting "
+                f"'#{target_id}' not found"
+            )
 
         patch = [{"op": "remove", "path": f"/relations/{index}"}]
         with _client(project, token) as c:
@@ -2197,10 +2952,15 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         tag: str,
         status: str = "all",
         limit: int = 20,
-    ) -> list[PipelineRun]:
+    ) -> tuple[list[PipelineRun], list[str]]:
+        """Returns `(runs, resolved_refs)`. `resolved_refs` is `[tag]`
+        because ADO's `branchName` parameter accepts the ref directly
+        without resolving to a commit SHA first.
+        """
         branch = tag if tag.startswith("refs/") else f"refs/tags/{tag}"
         params = _api_version_params({"branchName": branch, "$top": max(1, limit)})
-        return self._list_builds(project, token, params, status, limit)
+        runs = self._list_builds(project, token, params, status, limit)
+        return runs, ([tag] if runs else [])
 
     def list_runs_for_ticket(
         self,
@@ -2209,7 +2969,11 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         ticket_id: str,
         status: str = "all",
         limit: int = 20,
-    ) -> list[PipelineRun]:
+    ) -> tuple[list[PipelineRun], list[str]]:
+        """Returns `(runs, resolved_refs)`. `resolved_refs` is the list of
+        `build/{id}` markers we walked from the work item's
+        ArtifactLink relations — mirrors GitLab's `!{iid}` shape.
+        """
         # Walk the work item's relations for ArtifactLink entries pointing
         # at Build artifacts.
         path = (
@@ -2231,8 +2995,9 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
             if m:
                 build_ids.append(int(m.group(1)))
         if not build_ids:
-            return []
+            return [], []
         runs: list[PipelineRun] = []
+        resolved_refs: list[str] = []
         with _client(project, token) as c:
             for bid in build_ids[: max(1, limit)]:
                 bresp = c.get(
@@ -2243,7 +3008,8 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
                     continue
                 _check(bresp)
                 runs.append(_map_build_run(bresp.json(), project))
-        return runs
+                resolved_refs.append(f"build/{bid}")
+        return runs, resolved_refs
 
     def _list_builds(
         self,
@@ -2267,14 +3033,14 @@ class AzureDevOpsProvider(TokenCapabilityProvider):
         project: ProjectConfig,
         token: str | None,
         run_id: str,
-        include_failure_context: bool = False,
+        include_failure_excerpt: bool = False,
     ) -> PipelineRun:
         path = f"{_project_scope(project)}/_apis/build/builds/{quote(str(run_id), safe='')}"
         with _client(project, token) as c:
             resp = c.get(path, params=_api_version_params())
         _check(resp)
         run = _map_build_run(resp.json(), project)
-        if include_failure_context and run.conclusion == "failure":
+        if include_failure_excerpt and run.conclusion == "failure":
             run.failure = self._fetch_build_failure_context(
                 project, token, str(run_id)
             )

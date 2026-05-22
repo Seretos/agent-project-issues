@@ -164,7 +164,7 @@ def test_list_prs_default_uses_pulls_endpoint(monkeypatch: pytest.MonkeyPatch) -
     _install_mock(monkeypatch, handler)
     result = tools["list_prs"](project_id="acme")
     assert "error" not in result, result
-    assert [pr["id"] for pr in result["pull_requests"]] == ["1", "2"]
+    assert [pr["id"] for pr in result["prs"]] == ["1", "2"]
     assert seen_paths == ["/repos/acme/backend/pulls"]
 
 
@@ -188,7 +188,7 @@ def test_list_prs_with_labels_switches_to_search(
     assert "is:pr" in q
     assert "repo:acme/backend" in q
     assert "label:needs-review" in q
-    assert [pr["id"] for pr in result["pull_requests"]] == ["5"]
+    assert [pr["id"] for pr in result["prs"]] == ["5"]
 
 
 # ---------- create_pr -------------------------------------------------------

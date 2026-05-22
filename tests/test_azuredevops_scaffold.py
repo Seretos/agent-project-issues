@@ -295,6 +295,38 @@ def test_markdown_to_html_handles_headings_other_than_marker() -> None:
     assert "<h2>Section</h2>" in html
 
 
+def test_unordered_list_round_trip_keeps_bullets_adjacent() -> None:
+    """The HTMLParser feeds the literal `\\n` between `</li>` and `<li>`
+    into `handle_data`; without the in-list whitespace guard that
+    compounds into a blank line between every bullet. Round-trip must
+    preserve adjacency."""
+    md_in = "- one\n- two\n- three"
+    html = _markdown_to_html(md_in)
+    md_back = _html_to_markdown(html)
+    # No blank line between bullets.
+    assert "- one\n- two\n- three" in md_back
+
+
+def test_ordered_list_round_trip_keeps_items_adjacent() -> None:
+    md_in = "1. one\n2. two\n3. three"
+    html = _markdown_to_html(md_in)
+    md_back = _html_to_markdown(html)
+    assert "1. one\n2. two\n3. three" in md_back
+
+
+def test_html_to_markdown_strips_trailing_per_line_whitespace() -> None:
+    """ADO's HTML editor can leak trailing spaces (notably after the AI
+    marker line). `_html_to_markdown` strips them per line so the agent-
+    visible body stays clean."""
+    # Trailing space inside the marker paragraph + inside a body line.
+    html = "<p>#ai-generated </p><p>Hello world  </p>"
+    md = _html_to_markdown(html)
+    # No line ends with a space.
+    for line in md.splitlines():
+        assert line == line.rstrip(), repr(line)
+    assert "#ai-generated" in md
+
+
 # ---------- mappers ----------------------------------------------------------
 
 
@@ -461,8 +493,10 @@ def test_list_statuses_basic_template(monkeypatch: pytest.MonkeyPatch) -> None:
     assert spec.values == ["To Do", "Doing", "Done"]
     assert spec.hints["default_open"] == "To Do"
     assert spec.hints["terminal_completed"] == "Done"
-    # Basic has no Removed state — fall back to terminal_completed.
-    assert spec.hints["terminal_declined"] == "Done"
+    # Basic has no Removed state — surface that honestly as "" rather
+    # than collapsing onto terminal_completed, which would mislead
+    # agents into thinking they had two terminal states to pick from.
+    assert spec.hints["terminal_declined"] == ""
     # transitions: all states can reach every other state (we don't
     # restrict because ADO doesn't expose the legal-transitions graph).
     assert set(spec.transitions["To Do"]) == {"Doing", "Done"}

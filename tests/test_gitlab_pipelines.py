@@ -176,7 +176,7 @@ def test_get_run_basic(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_get_run_succeeds_skips_failure_context_even_if_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """include_failure_context=True on a successful run still returns
+    """include_failure_excerpt=True on a successful run still returns
     `failure=None` — only failed runs trigger the jobs/traces walk."""
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -184,7 +184,7 @@ def test_get_run_succeeds_skips_failure_context_even_if_requested(
 
     _install_mock(monkeypatch, handler)
     run = GitLabProvider().get_run(
-        _project(), "t", "100", include_failure_context=True,
+        _project(), "t", "100", include_failure_excerpt=True,
     )
     assert run.conclusion == "success"
     assert run.failure is None
@@ -230,7 +230,7 @@ def test_get_run_failed_with_failure_context(
 
     _install_mock(monkeypatch, handler)
     run = GitLabProvider().get_run(
-        _project(), "t", "100", include_failure_context=True,
+        _project(), "t", "100", include_failure_excerpt=True,
     )
     assert run.conclusion == "failed"
     assert run.failure is not None
@@ -264,7 +264,7 @@ def test_get_run_failed_handles_jobs_endpoint_unreachable(
 
     _install_mock(monkeypatch, handler)
     run = GitLabProvider().get_run(
-        _project(), "t", "100", include_failure_context=True,
+        _project(), "t", "100", include_failure_excerpt=True,
     )
     assert run.failure is not None
     assert run.failure.failing_jobs == []

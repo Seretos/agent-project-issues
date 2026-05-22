@@ -227,7 +227,7 @@ def test_list_prs_omit_body(monkeypatch):
     _install_mock(monkeypatch, handler)
     result = tools["list_prs"](project_id="acme", omit_body=True)
     assert "error" not in result
-    for row in result["pull_requests"]:
+    for row in result["prs"]:
         assert "body" not in row
 
 
@@ -240,8 +240,8 @@ def test_list_prs_body_max_chars(monkeypatch):
 
     _install_mock(monkeypatch, handler)
     result = tools["list_prs"](project_id="acme", body_max_chars=5)
-    assert result["pull_requests"][0]["body"] == "abcde"
-    assert result["pull_requests"][0]["body_truncated"] is True
+    assert result["prs"][0]["body"] == "abcde"
+    assert result["prs"][0]["body_truncated"] is True
 
 
 # ---------- list_comments ---------------------------------------------------

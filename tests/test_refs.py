@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
+from lib_python_projects import ProjectConfig
 from project_issues_plugin.refs import (
     GitHubRefParser,
     GitLabRefParser,

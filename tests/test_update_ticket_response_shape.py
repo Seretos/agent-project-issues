@@ -13,15 +13,15 @@ from typing import Callable
 
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers.base import Ticket
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers.base import Ticket
 from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import tickets as ticket_tools
 
 
 def _project() -> ProjectConfig:
     # Permissions: issues.modify=True is required for update_ticket.
-    from project_issues_plugin.config import IssuesPermissions, Permissions
+    from lib_python_projects import IssuesPermissions, Permissions
     return ProjectConfig(
         id="acme",
         provider="github",
@@ -50,16 +50,14 @@ def _register_tools_with_mock_provider(
 ) -> dict[str, Callable]:
     """Wire up update_ticket against a mock provider so we can pin the
     response shape without touching httpx."""
-    from project_issues_plugin import config as cfg_mod
-
     project = _project()
 
-    def fake_load_projects(cwd=None):
-        return cfg_mod.LoadResult(
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
             projects=[project], state="ok", search_root="/tmp"
         )
 
-    monkeypatch.setattr(cfg_mod, "load_projects", fake_load_projects)
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "ghp_token")
 
     captured_kwargs: dict = {}

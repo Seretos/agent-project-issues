@@ -19,11 +19,11 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
-from project_issues_plugin.providers.azuredevops import AzureDevOpsError
-from project_issues_plugin.providers.base import PRFilters
-from project_issues_plugin.providers.github import GitHubError
-from project_issues_plugin.providers.gitlab import GitLabError
+from lib_python_projects import load_projects, resolve_token  # noqa: F401
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
+from lib_python_projects.providers.base import PRFilters
+from lib_python_projects.providers.github import GitHubError
+from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,

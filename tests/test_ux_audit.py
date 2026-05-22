@@ -17,13 +17,13 @@ from typing import Callable
 import httpx
 import pytest
 
-from project_issues_plugin import config as cfg_mod
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
-from project_issues_plugin.providers.github import (
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers import github as github_provider
+from lib_python_projects.providers.github import (
     GitHubProvider,
     _format_github_validation_errors,
 )
+from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import comments as comment_tools
 from project_issues_plugin.tools import pulls as pull_tools
 from project_issues_plugin.tools import relations as relation_tools
@@ -77,11 +77,11 @@ class _StubMCP:
 def _register(monkeypatch, module):
     project = _project()
 
-    def fake_load_projects(cwd=None):
-        return cfg_mod.LoadResult(
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
             projects=[project], state="ok", search_root="/tmp",
         )
-    monkeypatch.setattr(cfg_mod, "load_projects", fake_load_projects)
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
     if hasattr(module, "load_projects"):
         monkeypatch.setattr(module, "load_projects", fake_load_projects)
     stub = _StubMCP()
@@ -301,7 +301,7 @@ def test_github_422_error_uses_summary_formatter(monkeypatch):
         }, status_code=422)
 
     _install_github_mock(monkeypatch, handler)
-    from project_issues_plugin.providers.github import GitHubError
+    from lib_python_projects.providers.github import GitHubError
     with pytest.raises(GitHubError) as excinfo:
         # Trigger a write that goes through _check.
         GitHubProvider().update_ticket(

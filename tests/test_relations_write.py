@@ -20,12 +20,12 @@ from typing import Callable
 import httpx
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
-from project_issues_plugin.providers import gitlab as gitlab_provider
-from project_issues_plugin.providers.base import RelationKindUnsupported
-from project_issues_plugin.providers.github import GitHubProvider
-from project_issues_plugin.providers.gitlab import GitLabProvider
+from lib_python_projects import ProjectConfig
+from lib_python_projects.providers import github as github_provider
+from lib_python_projects.providers import gitlab as gitlab_provider
+from lib_python_projects.providers.base import RelationKindUnsupported
+from lib_python_projects.providers.github import GitHubProvider
+from lib_python_projects.providers.gitlab import GitLabProvider
 
 
 # ---------- helpers ----------------------------------------------------------
@@ -340,7 +340,7 @@ def test_github_remove_relation_blocked_by_404_when_link_missing(
         raise AssertionError(f"unexpected {req.method} {req.url}")
 
     _install_github_mock(monkeypatch, handler)
-    from project_issues_plugin.providers.github import GitHubError
+    from lib_python_projects.providers.github import GitHubError
     with pytest.raises(GitHubError, match="no blocks/blocked_by link"):
         GitHubProvider().remove_relation(
             _github_project(), "tok", "5", "blocked_by", "#7",

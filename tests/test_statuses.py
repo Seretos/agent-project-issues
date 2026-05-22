@@ -17,10 +17,11 @@ from typing import Callable
 
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
-from project_issues_plugin.providers.base import StatusSpec
-from project_issues_plugin.providers.github import GitHubProvider
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers import github as github_provider
+from lib_python_projects.providers.base import StatusSpec
+from lib_python_projects.providers.github import GitHubProvider
+from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import tickets as ticket_tools
 
 
@@ -45,14 +46,12 @@ class _StubMCP:
 
 
 def _register_tools(monkeypatch: pytest.MonkeyPatch, project: ProjectConfig):
-    from project_issues_plugin import config as cfg_mod
-
-    def fake_load_projects(cwd=None):
-        return cfg_mod.LoadResult(
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
             projects=[project], state="ok", search_root="/tmp"
         )
 
-    monkeypatch.setattr(cfg_mod, "load_projects", fake_load_projects)
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
     ticket_tools._status_cache_clear()
     stub = _StubMCP()
     ticket_tools.register(stub)

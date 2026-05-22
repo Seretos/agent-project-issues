@@ -62,13 +62,13 @@ import time
 
 from mcp.server.fastmcp import FastMCP
 
-from project_issues_plugin.config import (
-    LoadResult,
+from lib_python_projects import (
     ProjectConfig,
+    ProjectsLoadResult,
     load_projects,
     resolve_token,
 )
-from project_issues_plugin.providers.base import TokenCapabilities
+from lib_python_projects.providers.base import TokenCapabilities
 
 # Env var that flips debug mode on. Truthy values enable the raw-path
 # fields in the `runtime` block. Anything else (unset, "0", "false",
@@ -206,6 +206,7 @@ def _project_to_dict(p: ProjectConfig) -> dict:
         "base_url": p.base_url,
         "web_url": p.web_url,
         "source": p.source,
+        "local_path": p.local_path,
         "permissions": {
             "read": True,
             "issues": {
@@ -226,7 +227,7 @@ def _project_to_dict(p: ProjectConfig) -> dict:
     }
 
 
-def _runtime_block(result: LoadResult) -> dict:
+def _runtime_block(result: ProjectsLoadResult) -> dict:
     """Top-level diagnostic block.
 
     `config_files_searched` and `config_file_loaded` are absent
@@ -349,7 +350,10 @@ def register(mcp: FastMCP) -> None:
         learning the location of the permissions file. Start the
         server with `PROJECT_ISSUES_DEBUG=1` to expose them.
         """
-        result = load_projects()
+        result = load_projects(
+            config_filename="projects.yml",
+            config_filename_alt="projects.yaml",
+        )
         return {
             "projects": [_project_to_dict(p) for p in result.projects],
             "state": result.state,
@@ -383,7 +387,10 @@ def register(mcp: FastMCP) -> None:
         debug-gated `runtime.config_files_searched` /
         `config_file_loaded`, per-match `token_error`).
         """
-        result = load_projects()
+        result = load_projects(
+            config_filename="projects.yml",
+            config_filename_alt="projects.yaml",
+        )
         cap = max(1, limit)
         q_trimmed = (query or "").strip()
         if not q_trimmed:

@@ -10,18 +10,54 @@ match the nested `Permissions` model:
 
   - `_require_issues_create`  / `_require_issues_modify`
   - `_require_pulls_create`   / `_require_pulls_modify`  / `_require_pulls_merge`
+
+Library layering (agent-plugin-dev#5):
+  - Domain models (`ProjectConfig`, `resolve_token`, `load_projects`)
+    come from `lib_python_projects`.
+  - Provider implementations (`GitHubProvider`, `GitLabProvider`,
+    `AzureDevOpsProvider`) and their typed error classes come from
+    `lib_python_projects.providers.*`.
+
+`load_projects` is re-bound at this module's top level so tests can
+monkey-patch `project_issues_plugin.tools._providers.load_projects`
+to substitute a deterministic project list without hitting the disk.
 """
 from __future__ import annotations
 
-from project_issues_plugin import config as _cfg_mod
-from project_issues_plugin import refs as _refs
-from project_issues_plugin.config import ProjectConfig, resolve_token
-from project_issues_plugin.providers.azuredevops import (
+from lib_python_projects import ProjectConfig, load_projects, resolve_token
+from lib_python_projects.providers.azuredevops import (
     AzureDevOpsError,
     AzureDevOpsProvider,
 )
-from project_issues_plugin.providers.github import GitHubError, GitHubProvider
-from project_issues_plugin.providers.gitlab import GitLabError, GitLabProvider
+from lib_python_projects.providers.github import GitHubError, GitHubProvider
+from lib_python_projects.providers.gitlab import GitLabError, GitLabProvider
+
+from project_issues_plugin import refs as _refs
+
+
+# The plugin uses `projects.yml` (renamed from the legacy
+# `project-issues.yml` as part of the lib refactor). The lib's default
+# is still `project-issues.yml` for backwards-compat with the migrated
+# loader tests, so we pass the new name through every load_projects()
+# call from the plugin.
+_CONFIG_FILENAME = "projects.yml"
+_CONFIG_FILENAME_ALT = "projects.yaml"
+
+
+def _load_projects():
+    """Thin indirection around `load_projects` so tests can monkey-patch
+    `project_issues_plugin.tools._providers.load_projects` to substitute
+    a fake project list.
+
+    Reads the module-level `load_projects` so the monkey-patch is
+    honoured even though the import bound a reference at startup.
+    """
+    import sys
+    mod = sys.modules[__name__]
+    return mod.load_projects(
+        config_filename=_CONFIG_FILENAME,
+        config_filename_alt=_CONFIG_FILENAME_ALT,
+    )
 
 
 _PROVIDERS = {
@@ -32,10 +68,9 @@ _PROVIDERS = {
 
 
 def _resolve(project_id: str) -> ProjectConfig:
-    # Access `load_projects` via the config module (not a top-level import)
-    # so existing tests that monkey-patch `config.load_projects` keep working
-    # after we moved the helper here from the individual tool modules.
-    result = _cfg_mod.load_projects()
+    # Access `load_projects` via this module so monkey-patches on
+    # `project_issues_plugin.tools._providers.load_projects` are honoured.
+    result = _load_projects()
     for p in result.projects:
         if p.id == project_id:
             return p
@@ -190,4 +225,6 @@ __all__ = [
     "_normalize_target",
     "_rewrap_404",
     "_safe",
+    "load_projects",
+    "resolve_token",
 ]

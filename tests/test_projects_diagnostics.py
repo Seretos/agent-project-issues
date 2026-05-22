@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from project_issues_plugin import config as cfg_mod
-from project_issues_plugin.config import ProjectConfig
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects import loader as cfg_mod
 from project_issues_plugin.tools import projects as proj_tools
 
 
@@ -33,7 +33,7 @@ def _write_cfg(tmp_path: Path) -> None:
     # Project-boundary walk requires `.git/` at the repo root the config
     # lives in. Plant an empty one — the resolver only checks existence.
     (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
-    cfg = tmp_path / ".seretos" / "project-issues.yml"
+    cfg = tmp_path / ".seretos" / "projects.yml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(textwrap.dedent(
         """
@@ -115,8 +115,8 @@ def test_paths_exposed_under_debug_flag(
     paths = out["runtime"]["config_files_searched"]
     assert isinstance(paths, list)
     assert len(paths) >= 1
-    # At least one searched path must point to a project-issues file.
-    assert any("project-issues" in p for p in paths)
+    # At least one searched path must point to a projects.yml file.
+    assert any("projects.yml" in p or "projects.yaml" in p for p in paths)
 
 
 @pytest.mark.parametrize(
@@ -321,8 +321,8 @@ def test_autodiscovered_project_uses_probed_permissions(
     project AND a token is available, the per-project permissions in
     the response must come from the live probe, not the all-False
     default. The `permissions_source` field must be `"token-probe"`."""
-    from project_issues_plugin import config as cfg_mod_local
-    from project_issues_plugin.providers.base import TokenCapabilities
+    from lib_python_projects import loader as cfg_mod_local
+    from lib_python_projects.providers.base import TokenCapabilities
 
     for var in (
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
@@ -336,7 +336,7 @@ def test_autodiscovered_project_uses_probed_permissions(
     # Stub the loader to hand back a single auto-discovered project so
     # we don't need a real git repo on disk.
     auto = _autodiscovered_project()
-    fake_result = cfg_mod_local.LoadResult(
+    fake_result = ProjectsLoadResult(
         projects=[auto],
         config_file=None,
         searched_paths=[],
@@ -385,7 +385,7 @@ def test_no_token_keeps_default_false(
 ) -> None:
     """Auto-discovered project WITHOUT a token must NOT probe and must
     keep all-False permissions. `permissions_source` is `"default"`."""
-    from project_issues_plugin import config as cfg_mod_local
+    from lib_python_projects import loader as cfg_mod_local
 
     for var in (
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
@@ -396,7 +396,7 @@ def test_no_token_keeps_default_false(
         monkeypatch.delenv(var, raising=False)
 
     auto = _autodiscovered_project()
-    fake_result = cfg_mod_local.LoadResult(
+    fake_result = ProjectsLoadResult(
         projects=[auto],
         config_file=None,
         searched_paths=[],
@@ -435,8 +435,8 @@ def test_probed_permissions_are_cached_within_ttl(
     monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
 ) -> None:
     """A second call within the TTL must hit the cache (probe called once)."""
-    from project_issues_plugin import config as cfg_mod_local
-    from project_issues_plugin.providers.base import TokenCapabilities
+    from lib_python_projects import loader as cfg_mod_local
+    from lib_python_projects.providers.base import TokenCapabilities
 
     for var in (
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
@@ -448,7 +448,7 @@ def test_probed_permissions_are_cached_within_ttl(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
 
     auto = _autodiscovered_project()
-    fake_result = cfg_mod_local.LoadResult(
+    fake_result = ProjectsLoadResult(
         projects=[auto], config_file=None, searched_paths=[], state="ok",
         search_root="/tmp",
     )
@@ -494,8 +494,8 @@ def test_autodiscovered_gitlab_project_probes_via_gitlab_provider(
     """Auto-discovered gitlab.com remote → permissions come from the
     GitLab provider's `probe_token_capabilities`, matching the GitHub
     auto-discovery contract."""
-    from project_issues_plugin import config as cfg_mod_local
-    from project_issues_plugin.providers.base import TokenCapabilities
+    from lib_python_projects import loader as cfg_mod_local
+    from lib_python_projects.providers.base import TokenCapabilities
 
     for var in (
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
@@ -507,7 +507,7 @@ def test_autodiscovered_gitlab_project_probes_via_gitlab_provider(
     monkeypatch.setenv("GITLAB_TOKEN", "glpat_real_value")
 
     auto = _autodiscovered_gitlab_project()
-    fake_result = cfg_mod_local.LoadResult(
+    fake_result = ProjectsLoadResult(
         projects=[auto], config_file=None, searched_paths=[], state="ok",
         search_root="/tmp",
     )
@@ -555,8 +555,8 @@ def test_probe_failure_records_error_and_keeps_defaults(
 ) -> None:
     """A failed probe (e.g. 404) must NOT grant permissions; the failure
     reason flows through to `permissions_probe_error`."""
-    from project_issues_plugin import config as cfg_mod_local
-    from project_issues_plugin.providers.base import TokenCapabilities
+    from lib_python_projects import loader as cfg_mod_local
+    from lib_python_projects.providers.base import TokenCapabilities
 
     for var in (
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
@@ -568,7 +568,7 @@ def test_probe_failure_records_error_and_keeps_defaults(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
 
     auto = _autodiscovered_project()
-    fake_result = cfg_mod_local.LoadResult(
+    fake_result = ProjectsLoadResult(
         projects=[auto], config_file=None, searched_paths=[], state="ok",
         search_root="/tmp",
     )

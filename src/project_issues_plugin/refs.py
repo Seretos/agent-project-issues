@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from project_issues_plugin.config import ProjectConfig
+from lib_python_projects import ProjectConfig
 
 
 class _RefParser(Protocol):

@@ -13,8 +13,9 @@ from typing import Callable
 import httpx
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers import github as github_provider
+from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import pulls as pull_tools
 
 
@@ -130,16 +131,14 @@ class _StubMCP:
 
 
 def _register_tools_with(monkeypatch: pytest.MonkeyPatch, project: ProjectConfig):
-    from project_issues_plugin import config as cfg_mod
-
-    def fake_load_projects(cwd=None):
-        return cfg_mod.LoadResult(
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
             projects=[project],
             state="ok",
             search_root="/tmp",
         )
 
-    monkeypatch.setattr(cfg_mod, "load_projects", fake_load_projects)
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
     monkeypatch.setattr(pull_tools, "load_projects", fake_load_projects)
 
     stub = _StubMCP()

@@ -15,7 +15,7 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from project_issues_plugin.config import resolve_token
+from lib_python_projects import resolve_token
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,

@@ -22,11 +22,11 @@ from mcp.server.fastmcp import FastMCP
 
 # `load_projects` is re-exported here purely so tests that monkey-patch
 # `tools.comments.load_projects` keep working. The runtime call path goes
-# through `tools/_providers.py::_resolve` which reads via the config module.
-from project_issues_plugin.config import load_projects, resolve_token  # noqa: F401
-from project_issues_plugin.providers.azuredevops import AzureDevOpsError
-from project_issues_plugin.providers.github import GitHubError
-from project_issues_plugin.providers.gitlab import GitLabError
+# through `tools/_providers.py::_resolve` which reads via the lib loader.
+from lib_python_projects import load_projects, resolve_token  # noqa: F401
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
+from lib_python_projects.providers.github import GitHubError
+from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,

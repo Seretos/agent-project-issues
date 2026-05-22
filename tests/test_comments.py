@@ -13,9 +13,10 @@ from typing import Callable
 import httpx
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
-from project_issues_plugin.providers.github import GitHubProvider
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers import github as github_provider
+from lib_python_projects.providers.github import GitHubProvider
+from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import comments as comment_tools
 
 
@@ -263,18 +264,17 @@ def _register_tools_with(monkeypatch: pytest.MonkeyPatch, project: ProjectConfig
 
     Returns the dict of registered tool callables.
     """
-    from project_issues_plugin import config as cfg_mod
-
-    def fake_load_projects(cwd=None):
-        return cfg_mod.LoadResult(
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
             projects=[project],
             state="ok",
             search_root="/tmp",
         )
 
-    # Patch both the config module and the symbol already imported by
-    # `tools/comments.py` (it was bound at import time).
-    monkeypatch.setattr(cfg_mod, "load_projects", fake_load_projects)
+    # Patch the `_providers` indirection (the runtime call path through
+    # `_resolve`) and the `comments.load_projects` re-export (kept for
+    # back-compat; some tests patch it directly).
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
     monkeypatch.setattr(comment_tools, "load_projects", fake_load_projects)
 
     stub = _StubMCP()

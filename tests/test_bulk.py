@@ -13,8 +13,9 @@ from typing import Callable
 import httpx
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
+from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers import github as github_provider
+from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import bulk as bulk_tools
 
 
@@ -108,16 +109,18 @@ class _StubMCP:
 def _register_tools_with(
     monkeypatch: pytest.MonkeyPatch, projects: list[ProjectConfig]
 ):
-    from project_issues_plugin import config as cfg_mod
-
-    def fake_load_projects(cwd=None):
-        return cfg_mod.LoadResult(
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
             projects=projects,
             state="ok",
             search_root="/tmp",
         )
 
-    monkeypatch.setattr(cfg_mod, "load_projects", fake_load_projects)
+    # `_providers.load_projects` is the module-level name `_resolve`
+    # reads through (via the indirection shim). Patching it routes every
+    # tool call through the fake list. `bulk.list_tickets_across_projects`
+    # calls `bulk.load_projects` directly, so patch that too.
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
     monkeypatch.setattr(bulk_tools, "load_projects", fake_load_projects)
 
     stub = _StubMCP()

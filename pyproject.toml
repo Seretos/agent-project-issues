@@ -1,3 +1,21 @@
+# TODO(agent-plugin-dev#5): Once `lib-python-config` v0.1.0 and
+# `lib-python-projects` v0.1.0 are tagged on GitHub, replace the
+# editable-install instructions in README.md with proper VCS deps:
+#
+#   "lib-python-config @ git+https://github.com/Seretos/lib-python-config@v0.1.0",
+#   "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@v0.1.0",
+#
+# For now, the two sibling libs MUST be installed editable BEFORE this
+# plugin is installed:
+#
+#   pip install -e ../../libs/lib-python-config
+#   pip install -e ../../libs/lib-python-projects
+#   pip install -e .[test]
+#
+# PEP 508 `file://` direct references are unreliable across platforms
+# (pip / build backends), so we document the order instead — same
+# rationale as `lib-python-projects/pyproject.toml`.
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -5,14 +23,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "project-issues-plugin"
 version = "0.1.0"
-description = "Claude Code plugin: MCP server for GitHub/GitLab issue management"
+description = "Claude Code plugin: MCP server for GitHub/GitLab/Azure DevOps issue management"
 requires-python = ">=3.11"
 authors = [{ name = "Arne von Appen" }]
 dependencies = [
   "mcp>=1.2",
-  "httpx>=0.27",
-  "pydantic>=2.6",
-  "ruamel.yaml>=0.18",
+  # pydantic / ruamel.yaml / httpx come transitively via lib-python-projects;
+  # they are kept out of this list intentionally so the plugin can only
+  # talk to providers through the lib's BaseProvider surface.
 ]
 
 [project.optional-dependencies]

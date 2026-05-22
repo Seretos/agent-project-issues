@@ -17,9 +17,9 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from project_issues_plugin.config import ProjectConfig, load_projects, resolve_token
-from project_issues_plugin.providers.base import TicketFilters
-from project_issues_plugin.providers.github import GitHubError
+from lib_python_projects import ProjectConfig, load_projects, resolve_token
+from lib_python_projects.providers.base import TicketFilters
+from lib_python_projects.providers.github import GitHubError
 from project_issues_plugin.tools._providers import _provider_for
 from project_issues_plugin.tools._slicing import apply_body_knobs
 
@@ -76,7 +76,10 @@ def register(mcp: FastMCP) -> None:
         `project_count` is the number of projects attempted including
         failed ones.
         """
-        loaded = load_projects()
+        loaded = load_projects(
+            config_filename="projects.yml",
+            config_filename_alt="projects.yaml",
+        )
         all_projects = loaded.projects
 
         if project_ids is None:

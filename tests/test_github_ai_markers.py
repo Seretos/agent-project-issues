@@ -20,9 +20,9 @@ from typing import Callable
 import httpx
 import pytest
 
-from project_issues_plugin.config import ProjectConfig
-from project_issues_plugin.providers import github as github_provider
-from project_issues_plugin.providers.github import (
+from lib_python_projects import ProjectConfig
+from lib_python_projects.providers import github as github_provider
+from lib_python_projects.providers.github import (
     GitHubError,
     GitHubProvider,
     _ensure_label,

@@ -1,117 +1,49 @@
 # agent-project-issues
 
-MCP server that lets AI coding agents read and write GitHub/GitLab issues with per-project permissions and automatic AI-attribution markers. Ships as a self-contained Windows `.exe` (PyInstaller-frozen Python + mcp + httpx + pydantic) so end users don't need a Python toolchain.
+MCP server exposing provider-agnostic issue/PR management (GitHub, GitLab, Azure DevOps) to AI
+coding agents, with per-project permissions and automatic AI-attribution. Ships as a
+self-contained binary (PyInstaller) so end users need no Python toolchain.
 
-## Layout
+## Where the code lives (read before grounding a change)
 
-```
-src/project_issues_plugin/      # Python source (src-layout)
-  server.py                       # FastMCP entry point, wires the tools
-  config.py                       # YAML loader + git-remote autodiscovery + LoadResult
-  markers.py                      # AI-attribution constants (labels, comment prefix)
-  providers/
-    base.py                       # provider-agnostic Ticket/Comment dataclasses
-    github.py                     # REST v3 implementation
-    gitlab.py                     # GitLab v4 REST implementation
-    azuredevops.py                # Azure DevOps REST 7.1 implementation
-  tools/
-    _providers.py                 # shared _PROVIDERS / _resolve / _safe / permission gates
-    projects.py                   # list_projects / find_projects
-    tickets.py                    # list/get/create/update_ticket, add_comment
-    comments.py                   # list/get/update_comment
-    bulk.py                       # list_tickets_across_projects
-    pulls.py                      # list/get/create/update_pr, add_pr_comment, merge_pr
+This repo is the **MCP server + tool wiring only**. The domain layer lives in the libs, pinned
+via git `@release/0.x` in `pyproject.toml`:
 
-tests/                          # pytest, runs on every push (test.yml)
-scripts/build.ps1               # PyInstaller wrapper + smoke test + optional packaging
-project-issues.spec             # PyInstaller config
-pyproject.toml                  # setuptools (package-dir = src/) + pytest config
-.claude-plugin/plugin.json      # plugin manifest, points at bin/project-issues (Windows MCP hosts resolve to .exe via PATHEXT)
+- **`lib-python-projects`** — `ProjectConfig`, `load_projects`, `resolve_token`, and **all
+  provider implementations** (`GitHubProvider` / `GitLabProvider` / `AzureDevOpsProvider`,
+  `BaseProvider`, `TicketFilters` / `PRFilters`, the typed `*Error` classes, and the
+  AI-attribution machinery).
+- **`lib-python-config`** — lower-level config primitives the above builds on.
 
-.github/workflows/
-  test.yml                      # pytest on every push and PR
-  release.yml                   # manual-dispatch full release flow
-  dispatch.yml                  # manual recovery: re-send marketplace dispatch
-```
+So a ticket about provider behaviour, the data model, config loading, or attribution markers is
+almost always a change **in the lib**, not here. This repo only wires the lib's surface into MCP
+tools: tool modules are registered in `src/project_issues_plugin/server.py`; shared helpers
+(resolve, permission gates, error translation, id normalisation) live in `tools/_providers.py`.
 
-## Branches
+## Invariants (don't break these)
 
-- `main` — source of truth. All edits go here.
-- `release` — orphan branch, force-pushed by `release.yml`. Contains only install-ready files: `.claude-plugin/plugin.json`, `bin/project-issues` (Linux ELF), `bin/project-issues.exe` (Windows PE), `README.md`. Clients clone at the version tag (e.g. `v0.0.1`), which lives on a release-branch commit.
+- **Permission gates are mandatory.** Every write tool routes through the gates in
+  `tools/_providers.py` — `_require_token`, `_require_issues_create` / `_require_issues_modify`,
+  `_require_pulls_create` / `_require_pulls_modify` / `_require_pulls_merge`. A new write op
+  without its gate is a bug.
+- **Errors return as data, not tracebacks.** Wrap provider calls in `_safe` so failures surface
+  as `{"error": "..."}`; never let a raw exception reach the agent.
+- **Never emit attribution markers from tool arguments.** The layer auto-prepends the
+  `#ai-generated` marker / applies the `ai-generated` label. Tools and callers must not pass them.
+- **Config file is `projects.yml`.** The plugin passes this name (and `projects.yaml`)
+  explicitly to `load_projects`, because the lib still defaults to the legacy
+  `project-issues.yml`. Don't "simplify" that back to the lib default.
 
-The release branch shares no history with main. Don't try to merge between them.
+## Gotchas
 
-## Release flow
+- `python -m pytest` runs the suite (config in `pyproject.toml`, `pythonpath=src`). Tests stub
+  the project/provider layer (monkey-patching `_providers.load_projects` + fake providers), so a
+  **green run ≠ verified against a live provider** — real HTTP is exercised in the lib / manually.
+- Installing test deps (`pip install -e ".[test]"`) pulls `lib-python-config` /
+  `lib-python-projects` from GitHub (`@release/0.x`), so it needs network + git access.
 
-Triggered manually:
+## More
 
-```
-Actions → release → Run workflow → version=X.Y.Z
-```
-
-or `gh workflow run release.yml -f version=X.Y.Z`.
-
-The workflow:
-1. Validates `X.Y.Z` is semver.
-2. Fails if tag `vX.Y.Z` already exists.
-3. Stamps the version into `pyproject.toml` and `.claude-plugin/plugin.json` (CI checkout only — never pushed back to main).
-4. Runs `scripts/build.ps1 -Clean -Package` (PyInstaller → smoke test → ZIP).
-5. Stashes the ZIP outside the working tree (step 6 wipes it).
-6. Force-pushes the orphan `release` branch from the staged install-ready tree.
-7. Creates the `vX.Y.Z` tag on that commit and a GitHub Release with the ZIP attached.
-8. POSTs to `Seretos/agent-marketplace/dispatches` with the plugin metadata. (Direct POST because tags created via `GITHUB_TOKEN` don't trigger downstream workflows — Actions blocks it to prevent loops.)
-
-## Environment variables (server-side)
-
-| Variable | Effect |
-|---|---|
-| `PROJECT_ISSUES_PLUGIN_CWD` | Override the search root for `.seretos/project-issues.yml` and `.git/config`. Highest priority. Set this when a host (e.g. GitHub Copilot CLI) spawns the MCP from somewhere other than the user's working directory. |
-| `CLAUDE_PROJECT_DIR` | Fallback search root if the plugin var is unset. |
-| `PROJECT_ISSUES_PLUGIN_LOG` | Logging level (`DEBUG`/`INFO`/…). Default `INFO`. Goes to stderr. |
-| `GITHUB_TOKEN` / `GITLAB_TOKEN` / `AZURE_DEVOPS_TOKEN` | Default tokens for `_auto` projects discovered from the git remote. |
-| `<token_env>` | Per-project token if `token_env` is set in YAML. The token value itself never leaves the process. |
-
-## AI-marker conventions
-
-`markers.py` defines stable constants that are visible to end users in their own repositories:
-
-- `AI_GENERATED_LABEL = "ai-generated"`
-- `AI_MODIFIED_LABEL  = "ai-modified"`
-- `AI_NOT_PLANNED_LABEL = "ai-closed-not-planned"`
-- `AI_COMMENT_PREFIX = "#ai-generated\n\n"` (single `#` — `##` would render as h2)
-
-**These strings MUST remain stable across versions.** Changing them retroactively orphans existing labels/comments in user repos. If you ever need new variants, add new constants instead of mutating these.
-
-The provider applies markers automatically; the agent must not pass them in arguments.
-
-## Build conventions (`scripts/build.ps1`)
-
-- Compatible with **Windows PowerShell 5.1** and PowerShell 7. CI uses 7.
-- No global `$ErrorActionPreference = 'Stop'` — httpx/pyinstaller log to stderr.
-- Python discovery prefers `py.exe -3` locally, `python.exe` in `$env:CI`.
-- The smoke test runs an MCP `initialize` handshake against the freshly built `.exe`.
-
-## PyInstaller / src-layout notes
-
-- The Python package is `project_issues_plugin` under `src/`. `pyproject.toml` declares `package-dir = { "" = "src" }` and `pythonpath = ["src"]`.
-- `project-issues.spec` references `src/project_issues_plugin/__main__.py` as the entry and `pathex=[ROOT / "src"]`.
-- `httpx` / `httpcore` / `certifi` are pulled in via `collect_all(...)` because httpx loads transports lazily.
-
-## Conventions
-
-- Tests live in `tests/` and use pytest. They cover deterministic logic (markers, config parsing). HTTP paths are tested manually against real providers.
-- GitLab is stubbed — `_PROVIDERS` in `tools/_providers.py` only registers GitHub. Auto-discovery emits gitlab projects but write paths fail with `NotImplementedError`.
-- Permissions are split into nested namespaces (`permissions.issues` / `permissions.pulls`). The legacy flat form (`{create, modify}` / `{create, modify, pr_create, pr_modify}`) and the old TOML format were removed in YAML schema v1 — see `README.md` for the migration cheat-sheet. `permissions.pulls.merge` defaults to false.
-- Permission gating lives in `tools/_providers.py` (`_require_token`, `_require_issues_create`, `_require_issues_modify`, `_require_pulls_create`, `_require_pulls_modify`, `_require_pulls_merge`). New write operations MUST go through these helpers.
-- Azure DevOps provider notes:
-  - `path` is `organization/project/repository`. Work items are scoped to `organization/project`; pull requests are scoped to the full three-part path. Two YAML entries with the same `organization/project` prefix share their work-item view.
-  - Auth is HTTP Basic with empty username + PAT as password. PAT scope determines what `permissions:` should advertise.
-  - Work-item bodies and comments are HTML on the wire; the provider converts to/from markdown via a minimal stdlib converter so the `markers.py` machinery (which expects `#ai-generated\n\n` literally) keeps working.
-  - The optional `default_work_item_type: <name>` field selects which type `create_ticket` creates. When unset, the provider discovers a default once per project (Issue → Bug → User Story → Product Backlog Item → Requirement), covering Basic / Agile / Scrum / CMMI templates.
-  - Process-template states are discovered per project via `/workitemtypes/{type}/states` and cached in-process for one hour. `list_ticket_statuses` consumes that cache.
-- The `dispatch.yml` workflow is a manual recovery tool only.
-
-## What lives where (for cross-repo reasoning)
-
-- The marketplace contract (payload format) is in `agent-marketplace/AGENTS.md`. The "Dispatch to agent-marketplace" step in `release.yml` here must match it.
-- `MARKETPLACE_DISPATCH_TOKEN` is a fine-grained PAT with `contents: write` + `pull-requests: write` on `Seretos/agent-marketplace`, stored as a repo secret here.
+Build (PyInstaller), the release pipeline, server-side env vars, and the marketplace contract
+are documented in `README.md` / `SECURITY.md`. Provider internals (Azure work-item types, HTML
+conversion, auth schemes, status discovery) live with the code in `lib-python-projects`.

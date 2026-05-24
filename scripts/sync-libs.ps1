@@ -1,19 +1,20 @@
-# Refresh the floating lib-python-{config,projects} dependencies to the
-# current HEAD of their release/0.x branch.
+# Sync the lib-python-* dependencies to the refs declared in pyproject.toml.
 #
-# Why this exists:
-#   pyproject.toml floats these libs on `@release/0.x` (a moving branch).
-#   pip will NOT re-pull a branch dependency whose version string is
-#   unchanged -- it reports "already satisfied" even after the branch HEAD
-#   moved. A fresh CI runner sidesteps that (empty env every run); a local
-#   dev env does not. Worse, a local `pip install -e <lib>` shadows the
-#   released package entirely, so `pytest` runs green against your local
-#   checkout while CI runs red against the released lib (see AGENTS.md).
+# How the two libs are pinned:
+#   lib-python-config  -- floats on `@release/0.x` (a moving branch). pip
+#                         will NOT re-pull a branch dep whose version string
+#                         is unchanged, so a local dev env can silently lag
+#                         behind CI (which always starts with a clean env).
+#   lib-python-projects -- pinned to an exact immutable tag (@v0.1.5). The
+#                         tag never moves, so drift is impossible; however a
+#                         local `pip install -e <lib>` checkout can still
+#                         shadow the released package entirely, making pytest
+#                         run green locally while CI runs against the real pin.
 #
 #   This script force-reinstalls EXACTLY the specs declared in pyproject.toml
-#   (no local checkout, no editable), so a local test run uses the same libs
-#   as CI and any release/0.x drift surfaces immediately -- locally, not
-#   only in the pipeline.
+#   for both libs (no local checkout, no editable), so a local test run uses
+#   the same packages as CI. For lib-python-config this also surfaces any
+#   release/0.x drift immediately -- locally, not only in the pipeline.
 #
 # Usage (from anywhere; paths resolve off the repo root):
 #   pwsh -File scripts/sync-libs.ps1
@@ -45,7 +46,7 @@ if (-not $specs -or $specs.Count -eq 0) {
     Fail "No 'lib-python-* @ git+...' specs found in pyproject.toml."
 }
 
-Write-Step "Force-reinstalling floating libs from pyproject.toml specs"
+Write-Step "Force-reinstalling lib-python-* from pyproject.toml specs"
 $specs | ForEach-Object { Write-Host "    $_" }
 
 # --force-reinstall + --no-cache-dir: re-fetch the branch HEAD even though
@@ -54,4 +55,4 @@ $specs | ForEach-Object { Write-Host "    $_" }
 & $py -m pip install --force-reinstall --no-cache-dir --no-deps @specs
 if ($LASTEXITCODE -ne 0) { Fail "pip install (lib refresh) failed." }
 
-Write-Step "Libs synced to release/0.x HEAD."
+Write-Step "Libs synced: lib-python-config to release/0.x HEAD; lib-python-projects pinned at v0.1.5."

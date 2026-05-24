@@ -6,8 +6,9 @@ self-contained binary (PyInstaller) so end users need no Python toolchain.
 
 ## Where the code lives (read before grounding a change)
 
-This repo is the **MCP server + tool wiring only**. The domain layer lives in the libs, pinned
-via git `@release/0.x` in `pyproject.toml`:
+This repo is the **MCP server + tool wiring only**. The domain layer lives in the libs, declared
+in `pyproject.toml`: `lib-python-config` floats on `@release/0.x`; `lib-python-projects` is
+pinned to the exact immutable tag `@v0.1.5`.
 
 - **`lib-python-projects`** — `ProjectConfig`, `load_projects`, `resolve_token`, and **all
   provider implementations** (`GitHubProvider` / `GitLabProvider` / `AzureDevOpsProvider`,
@@ -39,16 +40,21 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
 - `python -m pytest` runs the suite (config in `pyproject.toml`, `pythonpath=src`). Tests stub
   the project/provider layer (monkey-patching `_providers.load_projects` + fake providers), so a
   **green run ≠ verified against a live provider** — real HTTP is exercised in the lib / manually.
-- Installing test deps (`pip install -e ".[test]"`) pulls `lib-python-config` /
-  `lib-python-projects` from GitHub (`@release/0.x`), so it needs network + git access.
-- **The libs float on `@release/0.x` — keep local in sync, or local pytest lies.** The deps track
-  a moving branch, but pip won't re-pull a branch dep whose version is unchanged ("already
-  satisfied"), and a local `pip install -e <lib>` checkout *shadows* the released package
-  entirely. Either way your local suite can pass against a stale/local lib while CI fails against
-  the current `release/0.x`. **Never depend on a local lib branch for this repo.** Run
-  `pwsh scripts/test.ps1` (force-refreshes both libs to `release/0.x` HEAD, then runs pytest) — or
-  `pwsh scripts/sync-libs.ps1` before a bare `python -m pytest`. CI runs the same sync step so the
-  pipeline can't be fooled by a cached wheel.
+- Installing test deps (`pip install -e ".[test]"`) pulls `lib-python-config` from GitHub
+  (`@release/0.x`) and `lib-python-projects` at the pinned tag (`@v0.1.5`), so it needs network
+  + git access.
+- **`lib-python-config` floats on `@release/0.x` — keep local in sync, or local pytest lies.**
+  pip won't re-pull a branch dep whose version is unchanged ("already satisfied"), and a local
+  `pip install -e <lib>` checkout *shadows* the released package entirely. Either way your local
+  suite can pass against a stale/local lib while CI fails against the current `release/0.x`.
+  **Never depend on a local lib branch for this repo.** Run `pwsh scripts/test.ps1`
+  (force-refreshes `lib-python-config` to `release/0.x` HEAD, then runs pytest) — or
+  `pwsh scripts/sync-libs.ps1` before a bare `python -m pytest`. CI runs the same sync step so
+  the pipeline can't be fooled by a cached wheel.
+- **`lib-python-projects` is pinned to the exact tag `v0.1.5` — no drift possible.** The tag is
+  immutable, so a stale pip cache can't silently slide the dep forward. However a local
+  `pip install -e <lib>` checkout still shadows the pinned release, so `sync-libs.ps1` (and
+  `test.ps1`) force-reinstall it from the declared tag ref, overriding any local editable shadow.
 
 ## More
 

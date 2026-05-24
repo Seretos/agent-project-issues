@@ -177,7 +177,11 @@ def test_list_prs_with_labels_switches_to_search(
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/search/issues":
             captured_q["q"] = req.url.params.get("q", "")
+            # Search returns issue-shaped stubs; the provider back-fills
+            # each via GET /pulls/{n} for the full PR fields (lib >=0.1.3).
             return _json({"items": [_pr_payload(5, title="match")]})
+        if req.url.path == "/repos/acme/backend/pulls/5":
+            return _json(_pr_payload(5, title="match"))
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)

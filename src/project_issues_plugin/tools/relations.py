@@ -49,11 +49,23 @@ def register(mcp: FastMCP) -> None:
         not directly settable — they emerge from the other side of a
         write or from body content scanned by the read path.
 
-        `target` is a same-project issue reference (`#N` or `N`). The
-        ticket explicitly mentioned cross-project targets
-        (`owner/repo#N`); they are accepted on the surface but
-        currently raise NotImplementedError — to be lifted in a
-        follow-up.
+        `target` is a same-project issue reference. Accepted forms:
+          - Bare integer: `7`
+          - Hash-prefixed: `#7`
+          - Full provider issue/PR URL (e.g.
+            `https://github.com/acme/backend/issues/7`)
+
+        Cross-project references are rejected at two levels depending
+        on their shape:
+          - `owner/repo#N` or `owner/repo!N` (contains `/` and `#`/`!`,
+            the GitLab MR form): passes through `_normalize_target`
+            unchanged, then the provider rejects it with a
+            `NotImplementedError` indicating cross-project/cross-repo
+            targets are not yet supported.
+          - Inputs with a `/` but no `#` or `!` (e.g. `owner/repo`):
+            rejected earlier by `_normalize_target` with `ValueError:
+            "id 'owner/repo' could not be normalised — expected a bare
+            number, '#N', or a full issue/PR URL"`.
 
         Symmetry: `add_relation(A, kind=parent, target=B)` is a logical
         alias for `add_relation(B, kind=child, target=A)`. Pick the

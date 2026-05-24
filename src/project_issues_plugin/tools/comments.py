@@ -113,18 +113,22 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def get_comment(
         project_id: str,
-        ticket_id: str,
         comment_id: str,
+        ticket_id: str | None = None,
     ) -> dict:
         """Get a single comment by id.
 
         `ticket_id` carries consistent semantics across providers
         (ticket #41 addendum):
-          - GitHub: unused (comment ids are repo-wide).
+          - GitHub: unused (comment ids are repo-wide). May be omitted
+            or set to `None`.
           - GitLab: required when `comment_id` is a bare note id (as
             returned by `add_comment`). Composite `"<iid>/<note_id>"`
             in `comment_id` keeps working too — `ticket_id` is then
             ignored.
+          - Azure DevOps: always required — work-item comment ids are
+            scoped to a work item (`workItems/{ticket_id}/comments/
+            {comment_id}`); omitting it returns a structured error.
 
         Read-only: requires a token only if the repo is private.
         """
@@ -148,15 +152,23 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def update_comment(
         project_id: str,
-        ticket_id: str,
         comment_id: str,
         body: str,
+        ticket_id: str | None = None,
     ) -> dict:
         """Update an existing comment's body.
 
-        `ticket_id` carries the same cross-provider semantics as in
-        `get_comment` — on GitLab it's used to address the note when
-        `comment_id` is a bare note id (ticket #41 addendum).
+        `ticket_id` carries consistent semantics across providers
+        (ticket #41 addendum):
+          - GitHub: unused (comment ids are repo-wide). May be omitted
+            or set to `None`.
+          - GitLab: required when `comment_id` is a bare note id (as
+            returned by `add_comment`). Composite `"<iid>/<note_id>"`
+            in `comment_id` keeps working too — `ticket_id` is then
+            ignored.
+          - Azure DevOps: always required — work-item comment ids are
+            scoped to a work item (`workItems/{ticket_id}/comments/
+            {comment_id}`); omitting it returns a structured error.
 
         The body is rewritten so the first line is exactly one `#ai-*`
         marker matching the comment's authorship: `#ai-generated` if

@@ -245,6 +245,31 @@ def test_find_projects_non_empty_query_unchanged(configured: dict) -> None:
         assert m["score"] > 0
 
 
+def test_find_projects_no_match_hint_non_null(configured: dict) -> None:
+    """When state='ok' and no projects match a non-empty query, `hint` must
+    be a non-null string suggesting list_projects (ticket #63 item 5).
+    The global _STATE_HINTS['ok'] is None, so this is an inline override
+    specific to find_projects."""
+    # "zzznomatch" won't match any of the four configured project ids.
+    out = configured["find_projects"](query="zzznomatch")
+    assert out["state"] == "ok"
+    assert out["matches"] == []
+    assert out["hint"] is not None
+    assert isinstance(out["hint"], str)
+    assert "list_projects" in out["hint"]
+
+
+def test_find_projects_empty_query_hint_null_when_state_ok(configured: dict) -> None:
+    """An empty query returns all projects (state='ok', non-empty matches);
+    hint must remain None in that case — the override only fires when the
+    matches list is empty AND a query was actually supplied (ticket #63)."""
+    out = configured["find_projects"](query="")
+    assert out["state"] == "ok"
+    assert len(out["matches"]) > 0
+    # No hint needed when results are present.
+    assert out["hint"] is None
+
+
 def test_find_projects_empty_query_in_no_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

@@ -340,8 +340,8 @@ def test_github_remove_relation_blocked_by_404_when_link_missing(
         raise AssertionError(f"unexpected {req.method} {req.url}")
 
     _install_github_mock(monkeypatch, handler)
-    from lib_python_projects.providers.github import GitHubError
-    with pytest.raises(GitHubError, match="no blocks/blocked_by link"):
+    from lib_python_projects.providers.base import RelationNotFound
+    with pytest.raises(RelationNotFound, match="no 'blocked_by' relation"):
         GitHubProvider().remove_relation(
             _github_project(), "tok", "5", "blocked_by", "#7",
         )

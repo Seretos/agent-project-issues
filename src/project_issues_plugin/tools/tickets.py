@@ -212,12 +212,21 @@ def register(mcp: FastMCP) -> None:
                     omit_body=False,
                     body_max_chars=comments_body_max_chars,
                 )
+            # `relations` / `truncated` come back as None (not [] / False)
+            # when include_relations=False — the lib distinguishes None
+            # (skipped) from [] (fetched but empty). The MCP surface always
+            # exposes a list + bool, so normalise the skipped case here
+            # instead of iterating None.
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
                 "comments": comment_rows,
-                "relations": [asdict(rel) for rel in relations],
-                "relations_truncated": truncated,
+                "relations": (
+                    [asdict(rel) for rel in relations]
+                    if relations is not None
+                    else []
+                ),
+                "relations_truncated": bool(truncated),
             }
         return _safe(go)
 
@@ -225,7 +234,7 @@ def register(mcp: FastMCP) -> None:
     def create_ticket(
         project_id: str,
         title: str,
-        body: str,
+        body: str = "",
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
         status: str | None = None,
@@ -239,6 +248,9 @@ def register(mcp: FastMCP) -> None:
 
         The label `ai-generated` is added automatically by the server.
         Do not pass it yourself.
+
+        `body` is optional. When omitted, the ticket is created with an
+        empty body. Provide it when the user has supplied a description.
 
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When

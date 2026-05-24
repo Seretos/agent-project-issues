@@ -382,3 +382,116 @@ def test_get_comment_tool_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "error" not in result, result
     assert result["comment"]["id"] == "777"
     assert result["comment"]["body"] == "from get"
+
+
+# ---------- ticket #63: ticket_id=None for GitHub (repo-wide comment ids) ----
+
+
+def test_get_comment_tool_github_omits_ticket_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub comment ids are repo-wide; ticket_id=None (or omitted) must
+    succeed — the schema now reflects this optional nature (ticket #63)."""
+    project = _project(modify=False)
+    tools = _register_tools_with(monkeypatch, project)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/issues/comments/777":
+            return _json(_comment_payload(777, body="no ticket id needed"))
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    # ticket_id omitted entirely (uses the None default).
+    result = tools["get_comment"](project_id="acme", comment_id="777")
+    assert "error" not in result, result
+    assert result["comment"]["id"] == "777"
+    assert result["comment"]["body"] == "no ticket id needed"
+
+
+def test_update_comment_tool_github_omits_ticket_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub update_comment with ticket_id=None succeeds — repo-wide ids
+    need no ticket scope (ticket #63)."""
+    project = _project(modify=True)
+    tools = _register_tools_with(monkeypatch, project)
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            return _json(_comment_payload(777, body="original human body"))
+        if (
+            req.method == "PATCH"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            captured["body"] = json.loads(req.content)
+            return _json(_comment_payload(777, body=captured["body"]["body"]))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    # ticket_id omitted (defaults to None).
+    result = tools["update_comment"](
+        project_id="acme", comment_id="777", body="updated content"
+    )
+    assert "error" not in result, result
+    assert result["comment"]["body"].startswith("#ai-modified\n\n")
+
+
+def test_update_comment_tool_azure_no_ticket_id_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Azure DevOps requires ticket_id; a fake Azure provider that raises
+    when ticket_id is None must surface a structured error via _safe
+    (ticket #63)."""
+    from lib_python_projects import ProjectConfig, ProjectsLoadResult
+    from project_issues_plugin.tools import _providers as providers_mod
+    from project_issues_plugin.tools import comments as comment_tools
+
+    azure_project = ProjectConfig(
+        id="ado-proj",
+        provider="azuredevops",
+        path="myorg/myproject/myrepo",
+        token_env="ADO_TOKEN",
+        permissions={"issues": {"create": True, "modify": True}},
+    )
+
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(
+            projects=[azure_project],
+            state="ok",
+            search_root="/tmp",
+        )
+
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
+    monkeypatch.setattr(comment_tools, "load_projects", fake_load_projects)
+    monkeypatch.setenv("ADO_TOKEN", "tok")
+
+    class _FakeAzureProvider:
+        """Mimics Azure DevOps: raises when ticket_id is None."""
+        def update_comment(self, project, token, comment_id, body, *, ticket_id=None):
+            if ticket_id is None:
+                from lib_python_projects.providers.azuredevops import AzureDevOpsError
+                raise AzureDevOpsError(
+                    400,
+                    "work-item comment requires a ticket_id (work item id)",
+                )
+            return None  # pragma: no cover
+
+    monkeypatch.setitem(providers_mod._PROVIDERS, "azuredevops", _FakeAzureProvider())
+
+    stub = _StubMCP()
+    comment_tools.register(stub)
+
+    # Call without ticket_id — provider raises, _safe wraps it.
+    result = stub.tools["update_comment"](
+        project_id="ado-proj", comment_id="5", body="hello"
+    )
+    assert "error" in result, result
+    assert "ticket_id" in result["error"] or "work item" in result["error"]

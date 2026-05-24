@@ -48,6 +48,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
+      - name: Sync floating libs to release/0.x HEAD
+        # The libs float on @release/0.x; the pip cache (keyed on
+        # pyproject.toml) can otherwise serve a stale built wheel when the
+        # branch HEAD moves without the version string changing. Force a
+        # fresh re-fetch so the pipeline always tests against the current
+        # released lib -- the same step devs run locally (scripts/test.ps1).
+        shell: pwsh
+        run: ./scripts/sync-libs.ps1
+
       - name: Run pytest
         shell: pwsh
         run: python -m pytest

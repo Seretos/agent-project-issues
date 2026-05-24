@@ -212,12 +212,21 @@ def register(mcp: FastMCP) -> None:
                     omit_body=False,
                     body_max_chars=comments_body_max_chars,
                 )
+            # `relations` / `truncated` come back as None (not [] / False)
+            # when include_relations=False — the lib distinguishes None
+            # (skipped) from [] (fetched but empty). The MCP surface always
+            # exposes a list + bool, so normalise the skipped case here
+            # instead of iterating None.
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
                 "comments": comment_rows,
-                "relations": [asdict(rel) for rel in relations],
-                "relations_truncated": truncated,
+                "relations": (
+                    [asdict(rel) for rel in relations]
+                    if relations is not None
+                    else []
+                ),
+                "relations_truncated": bool(truncated),
             }
         return _safe(go)
 

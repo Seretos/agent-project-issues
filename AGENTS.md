@@ -41,6 +41,14 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
   **green run ≠ verified against a live provider** — real HTTP is exercised in the lib / manually.
 - Installing test deps (`pip install -e ".[test]"`) pulls `lib-python-config` /
   `lib-python-projects` from GitHub (`@release/0.x`), so it needs network + git access.
+- **The libs float on `@release/0.x` — keep local in sync, or local pytest lies.** The deps track
+  a moving branch, but pip won't re-pull a branch dep whose version is unchanged ("already
+  satisfied"), and a local `pip install -e <lib>` checkout *shadows* the released package
+  entirely. Either way your local suite can pass against a stale/local lib while CI fails against
+  the current `release/0.x`. **Never depend on a local lib branch for this repo.** Run
+  `pwsh scripts/test.ps1` (force-refreshes both libs to `release/0.x` HEAD, then runs pytest) — or
+  `pwsh scripts/sync-libs.ps1` before a bare `python -m pytest`. CI runs the same sync step so the
+  pipeline can't be fooled by a cached wheel.
 
 ## More
 

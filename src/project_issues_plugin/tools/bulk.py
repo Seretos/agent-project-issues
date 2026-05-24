@@ -47,10 +47,14 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """List tickets across multiple projects in a single call.
 
-        `project_ids=None` (the default) fans out to ALL configured
-        projects from `list_projects`. Otherwise restricts to the given
-        ids; unknown ids are surfaced as `{"error": "unknown project"}`
-        for that entry rather than raising.
+        WARNING: `project_ids=None` (the default) fans out to ALL
+        configured projects, including any production projects. Pass
+        explicit `project_ids` for targeted queries to avoid unexpected
+        fan-out to production systems.
+
+        Otherwise restricts to the given ids; unknown ids are surfaced
+        as `{"error": "unknown project"}` for that entry rather than
+        raising.
 
         Filters (`status`, `labels`, `not_labels`, `assignee`, `author`,
         `search`) and `limit_per_project` are applied per-project with
@@ -75,6 +79,10 @@ def register(mcp: FastMCP) -> None:
         still queried. `total_tickets` counts only successful projects;
         `project_count` is the number of projects attempted including
         failed ones.
+
+        Each per-project result carries `has_more: bool` from the
+        provider's pagination header, indicating whether additional
+        pages are available beyond `limit_per_project`.
         """
         loaded = load_projects(
             config_filename="projects.yml",
@@ -113,11 +121,15 @@ def register(mcp: FastMCP) -> None:
                     omit_body=omit_body,
                     body_max_chars=body_max_chars,
                 )
-                results[pid] = {"tickets": ticket_dicts, "error": None}
+                results[pid] = {
+                    "tickets": ticket_dicts,
+                    "has_more": _has_more,
+                    "error": None,
+                }
                 total_tickets += len(ticket_dicts)
             except (LookupError, PermissionError, NotImplementedError, GitHubError) as exc:
                 msg = str(exc)
-                results[pid] = {"tickets": [], "error": msg}
+                results[pid] = {"tickets": [], "has_more": False, "error": msg}
                 errors.append({"project_id": pid, "error": msg})
 
         return {

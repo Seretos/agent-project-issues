@@ -60,6 +60,7 @@ import os
 import re
 import sys
 import time
+from typing import Literal
 
 # Compiled separator pattern reused by `_score()` for sub-token splitting.
 # Splits on any run of non-alphanumeric characters (hyphens, underscores,
@@ -234,6 +235,16 @@ def _project_to_dict(p: ProjectConfig) -> dict:
     }
 
 
+def _project_to_light(p: ProjectConfig) -> dict:
+    """Return the minimal project representation for ``fields="light"``.
+
+    Contains only ``id`` and ``provider`` — just enough for the agent to
+    identify a project and pass it to other tools.  The ``runtime`` block
+    and all permission / token fields are omitted.
+    """
+    return {"id": p.id, "provider": p.provider}
+
+
 def _runtime_block(result: ProjectsLoadResult) -> dict:
     """Top-level diagnostic block.
 
@@ -320,7 +331,9 @@ _STATE_HINTS = {
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
-    def list_projects() -> dict:
+    def list_projects(
+        fields: Literal["full", "light"] = "full",
+    ) -> dict:
         """List projects available to this server.
 
         All configured projects are always returned — this tool is not
@@ -381,11 +394,23 @@ def register(mcp: FastMCP) -> None:
         Raw config-paths are hidden by default to keep the agent from
         learning the location of the permissions file. Start the
         server with `PROJECT_ISSUES_DEBUG=1` to expose them.
+
+        Token-cheap knob:
+          - `fields="light"`: return only ``{id, provider}`` per project
+            and omit the ``runtime`` block. Useful for quickly obtaining
+            a list of project IDs to pass to other tools.
+          - `fields="full"` (default): full behaviour as described above.
         """
         result = load_projects(
             config_filename="projects.yml",
             config_filename_alt="projects.yaml",
         )
+        if fields == "light":
+            return {
+                "projects": [_project_to_light(p) for p in result.projects],
+                "state": result.state,
+                "hint": _STATE_HINTS.get(result.state),
+            }
         return {
             "projects": [_project_to_dict(p) for p in result.projects],
             "state": result.state,
@@ -394,7 +419,11 @@ def register(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
-    def find_projects(query: str, limit: int = 10) -> dict:
+    def find_projects(
+        query: str,
+        limit: int = 10,
+        fields: Literal["full", "light"] = "full",
+    ) -> dict:
         """Fuzzy-search the available projects by id / description / path.
 
         Use whenever the user names a project naturally ("the mobile
@@ -426,6 +455,12 @@ def register(mcp: FastMCP) -> None:
         Same diagnostic fields as `list_projects` (`runtime.os`,
         debug-gated `runtime.config_files_searched` /
         `config_file_loaded`, per-match `token_error`).
+
+        Token-cheap knob:
+          - `fields="light"`: return only ``{id, provider, score}`` per
+            match and omit the ``runtime`` block. Useful when you only
+            need project IDs.
+          - `fields="full"` (default): full behaviour as described above.
         """
         result = load_projects(
             config_filename="projects.yml",
@@ -433,6 +468,41 @@ def register(mcp: FastMCP) -> None:
         )
         cap = max(1, limit)
         q_trimmed = (query or "").strip()
+        if fields == "light":
+            if not q_trimmed:
+                sorted_projects = sorted(result.projects, key=lambda p: p.id.lower())
+                total = len(sorted_projects)
+                results = [
+                    {**_project_to_light(p), "score": 0}
+                    for p in sorted_projects[:cap]
+                ]
+            else:
+                scored_light: list[tuple[int, ProjectConfig]] = []
+                for p in result.projects:
+                    s = _score(query, p)
+                    if s > 0:
+                        scored_light.append((s, p))
+                scored_light.sort(key=lambda pair: pair[0], reverse=True)
+                total = len(scored_light)
+                results = [
+                    {**_project_to_light(p), "score": s}
+                    for s, p in scored_light[:cap]
+                ]
+            truncated = total > cap
+            hint = _STATE_HINTS.get(result.state)
+            if result.state == "ok" and not results and q_trimmed:
+                hint = (
+                    "No projects matched the query. "
+                    "Use list_projects to see all available projects."
+                )
+            return {
+                "query": query,
+                "matches": results,
+                "total": total,
+                "truncated": truncated,
+                "state": result.state,
+                "hint": hint,
+            }
         if not q_trimmed:
             sorted_projects = sorted(result.projects, key=lambda p: p.id.lower())
             total = len(sorted_projects)

@@ -76,6 +76,9 @@ def register(mcp: FastMCP) -> None:
           - `omit_body=True`: drop the `body` field from every row.
           - `body_max_chars=N`: truncate each comment body to N chars
             and add `body_truncated: bool` per row.
+            `body_max_chars=N` measures N chars of content after the
+            `#ai-generated`/`#ai-modified` marker prefix (if present),
+            so the total stored body may be up to ~15 chars longer than N.
 
         Read-only: requires a token only if the repo is private.
         """

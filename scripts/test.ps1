@@ -1,8 +1,9 @@
 # Canonical local test entrypoint.
 #
-# Refreshes the floating release/0.x libs to their branch HEAD (so local
-# results match CI and any lib drift surfaces here, not only in the
-# pipeline), then runs pytest. Any extra args are forwarded to pytest.
+# Syncs the lib-python-* deps to the refs in pyproject.toml (lib-python-config
+# floats on release/0.x — this surfaces any branch drift locally rather than
+# only in CI; lib-python-projects is tag-pinned at v0.1.5 — this overrides any
+# local editable-install shadow), then runs pytest. Extra args go to pytest.
 #
 # Usage (from anywhere):
 #   pwsh -File scripts/test.ps1

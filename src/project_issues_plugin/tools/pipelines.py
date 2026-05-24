@@ -11,7 +11,9 @@ All reads are token-gated only; there is no permission flag (mirrors
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -148,7 +150,7 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def get_pipeline_run(
         project_id: str,
-        run_id: str,
+        run_id: Annotated[str, Field(description="Numeric string identifying the pipeline run. GitHub: Actions workflow_run id (e.g. '9876543210'); GitLab: pipeline id (e.g. '12345'); Azure DevOps: build id (e.g. '678'). Obtain from list_pipeline_runs.")],
         include_failure_excerpt: bool = True,
     ) -> dict:
         """Get a single pipeline run's details.

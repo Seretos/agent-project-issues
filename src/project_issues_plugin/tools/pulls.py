@@ -15,7 +15,9 @@ prefix) are applied transparently by the provider.
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -319,7 +321,7 @@ def register(mcp: FastMCP) -> None:
         line: int | None = None,
         side: Literal["LEFT", "RIGHT"] = "RIGHT",
         commit_sha: str | None = None,
-        in_reply_to: str | None = None,
+        in_reply_to: Annotated[str | None, Field(description="Opaque discussion identifier — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric).")] = None,
     ) -> dict:
         """Add an inline code-review comment to a pull request.
 
@@ -334,10 +336,8 @@ def register(mcp: FastMCP) -> None:
             positional args unset. Read `discussion_id` off any
             `review_comment` you got from `get_pr` (or off the return
             value of a fresh `add_pr_review_comment` new-thread call);
-            it's provider-uniform — same shape and same usage on
-            GitHub and GitLab. (Internally GitHub uses the top-of-thread
-            note id and GitLab uses the actual discussion id, but the
-            field hides that split.)
+            the identifier is opaque and provider-specific — pass it
+            back verbatim without parsing or constructing it.
 
         `side` is `"RIGHT"` (default) for the post-change side of the
         diff or `"LEFT"` for the pre-change side. GitLab ignores it and
@@ -385,7 +385,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         pr_id: str,
         state: Literal["approve", "request_changes", "comment"],
-        body: str | None = None,
+        body: Annotated[str | None, Field(description="Required when state is 'request_changes' or 'comment'; optional for 'approve'. Do not prepend '#ai-generated' — added automatically.")] = None,
         commit_sha: str | None = None,
     ) -> dict:
         """Submit a review on a pull request.

@@ -167,6 +167,8 @@ def test_list_pipeline_runs_branch_happy_path(
     captured: dict[str, str] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/branches/main":
+            return _json({"commit": {"sha": "deadbeef"}})
         if req.url.path == "/repos/acme/backend/actions/runs":
             captured["branch"] = req.url.params.get("branch", "")
             captured["per_page"] = req.url.params.get("per_page", "")
@@ -211,6 +213,8 @@ def test_list_pipeline_runs_commit_sha_happy_path(
     captured: dict[str, str] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/commits/abc123":
+            return _json({"sha": "abc123"})
         if req.url.path == "/repos/acme/backend/actions/runs":
             captured["head_sha"] = req.url.params.get("head_sha", "")
             return _json({

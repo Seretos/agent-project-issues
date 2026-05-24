@@ -103,7 +103,7 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)   # optional — public repos work without
-            tickets = provider.list_tickets(
+            tickets, has_more = provider.list_tickets(
                 project, token,
                 TicketFilters(
                     status=status,
@@ -132,6 +132,7 @@ def register(mcp: FastMCP) -> None:
             payload: dict[str, Any] = {
                 "project_id": project.id,
                 "tickets": rows,
+                "has_more": has_more,
             }
             if applied_limit != limit:
                 payload["applied_limit"] = applied_limit

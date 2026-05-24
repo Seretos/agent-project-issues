@@ -104,9 +104,8 @@ def register(mcp: FastMCP) -> None:
                 "comments": rows,
                 "page": page,
                 "has_more": has_more,
+                "applied_limit": applied_limit,
             }
-            if applied_limit != limit:
-                result["applied_limit"] = applied_limit
             return result
         return _safe(go)
 

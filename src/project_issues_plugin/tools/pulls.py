@@ -101,9 +101,8 @@ def register(mcp: FastMCP) -> None:
             payload: dict = {
                 "project_id": project.id,
                 "prs": rows,
+                "applied_limit": applied_limit,
             }
-            if applied_limit != limit:
-                payload["applied_limit"] = applied_limit
             return payload
         return _safe(go)
 

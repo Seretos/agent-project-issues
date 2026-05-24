@@ -106,7 +106,7 @@ def register(mcp: FastMCP) -> None:
                 project = _resolve_local(pid, all_projects)
                 provider = _provider_for(project)
                 token = resolve_token(project)
-                tickets = provider.list_tickets(project, token, filters)
+                tickets, _has_more = provider.list_tickets(project, token, filters)
                 ticket_dicts = [asdict(t) for t in tickets]
                 ticket_dicts = apply_body_knobs(
                     ticket_dicts,

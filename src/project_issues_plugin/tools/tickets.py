@@ -81,7 +81,12 @@ def register(mcp: FastMCP) -> None:
           - `updated_after` / `updated_before`: same, for `updated_at`.
           - `sort_by`: `"created"` (default), `"updated"`, or `"comments"`.
           - `sort_order`: `"desc"` (default) or `"asc"`.
-          - `limit`: capped at the provider's max page size (100).
+          - `limit`: capped at the provider's max page size (100). The
+            response carries `has_more: bool` from the provider's
+            pagination header (GitHub `Link rel=next`, GitLab
+            `X-Next-Page`) and `applied_limit: int` — the effective
+            cap actually used (equal to `limit` when no clamping
+            occurs, 100 when `limit` exceeded the cap).
 
         Token-cheap knobs (ticket #50):
           - `omit_body=True`: drop the `body` field from every row.
@@ -103,7 +108,7 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)   # optional — public repos work without
-            tickets = provider.list_tickets(
+            tickets, has_more = provider.list_tickets(
                 project, token,
                 TicketFilters(
                     status=status,
@@ -125,16 +130,15 @@ def register(mcp: FastMCP) -> None:
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
             )
-            # Echo `applied_limit` only when the provider's cap kicked in
-            # (ticket #48 finding 11). Silent provider-side clamping was
-            # invisible — now the caller can see they hit the 100-row cap.
+            # Always echo `applied_limit` so callers can see what cap was
+            # applied, whether or not clamping occurred (ticket #62).
             applied_limit = min(max(1, limit), 100)
             payload: dict[str, Any] = {
                 "project_id": project.id,
                 "tickets": rows,
+                "has_more": has_more,
+                "applied_limit": applied_limit,
             }
-            if applied_limit != limit:
-                payload["applied_limit"] = applied_limit
             return payload
         return _safe(go)
 
@@ -464,6 +468,8 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_id = _normalize_id(project, ticket_id)
+            if not body or not body.strip():
+                raise ValueError("comment body must be non-empty")
             comment = provider.add_comment(project, token, normalized_id, body)
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

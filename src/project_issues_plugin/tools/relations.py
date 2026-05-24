@@ -19,7 +19,7 @@ from mcp.server.fastmcp import FastMCP
 from lib_python_projects.providers.azuredevops import (
     SUPPORTED_RELATION_KINDS as _AZURE_SUPPORTED_RELATION_KINDS,
 )
-from lib_python_projects.providers.base import WRITABLE_RELATION_KINDS
+from lib_python_projects.providers.base import READ_ONLY_RELATION_KINDS, WRITABLE_RELATION_KINDS
 from lib_python_projects.providers.github import GitHubProvider
 from lib_python_projects.providers.gitlab import GitLabProvider
 from project_issues_plugin.tools._providers import (
@@ -81,6 +81,30 @@ def register(mcp: FastMCP) -> None:
             marker helper.
 
         Requires the project's `issues.modify` permission.
+
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "relation": {
+            "kind":             str,
+            "ticket_id":        str,
+            "title":            str,
+            "url":              str,
+            "state":            str,
+            "is_pull_request":  bool,
+            "resolved":         bool | null
+          }
+        }
+        ```
+
+        `resolved` documents how the relation metadata was obtained:
+          - `true`  — target was fetched from the provider API; title /
+            state / url are live.
+          - `false` — target was inferred from body or text scanning;
+            title / state may be empty.
+          - `null`  — liveness is unknown (provider did not indicate).
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -143,6 +167,7 @@ def register(mcp: FastMCP) -> None:
         ```
         {
           "kinds": [kind, ...],
+          "read_only_kinds": [kind, ...],
           "provider_support": {
             "github":      [kind, ...],
             "gitlab":      [kind, ...],
@@ -151,13 +176,23 @@ def register(mcp: FastMCP) -> None:
         }
         ```
 
-        `kinds` is the universal write-side vocabulary. `provider_support`
-        tells the agent which kinds each provider actually accepts before
-        it ever calls `add_relation` — no need to learn provider quirks
-        via failed calls.
+        `kinds` is the universal write-side vocabulary — these are the
+        values accepted by `add_relation` and `remove_relation`.
+
+        `read_only_kinds` lists relation kinds that appear in
+        `get_ticket` responses but cannot be passed to `add_relation`
+        or `remove_relation` — they are derived automatically from body
+        content or from the inverse side of a write operation (e.g.
+        `mentions`, `mentioned_by`, `closed_by`, `duplicated_by`,
+        `closes`).
+
+        `provider_support` tells the agent which kinds each provider
+        actually accepts before it ever calls `add_relation` — no need
+        to learn provider quirks via failed calls.
         """
         return {
             "kinds": list(WRITABLE_RELATION_KINDS),
+            "read_only_kinds": list(READ_ONLY_RELATION_KINDS),
             "provider_support": {
                 "github": list(GitHubProvider._SUPPORTED_RELATION_KINDS),
                 "gitlab": list(GitLabProvider._SUPPORTED_RELATION_KINDS),

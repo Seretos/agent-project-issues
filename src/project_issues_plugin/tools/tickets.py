@@ -384,12 +384,18 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_id = _normalize_id(project, ticket_id)
-            ticket = provider.update_ticket(
-                project, token, normalized_id,
-                title=title, body=body, status=status,
-                labels_add=labels_add, labels_remove=labels_remove,
-                assignees_add=assignees_add, assignees_remove=assignees_remove,
-            )
+            try:
+                ticket = provider.update_ticket(
+                    project, token, normalized_id,
+                    title=title, body=body, status=status,
+                    labels_add=labels_add, labels_remove=labels_remove,
+                    assignees_add=assignees_add, assignees_remove=assignees_remove,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="ticket",
+                    ident=normalized_id,
+                )
             return {
                 "project_id": project.id,
                 "ticket": {
@@ -470,6 +476,12 @@ def register(mcp: FastMCP) -> None:
             normalized_id = _normalize_id(project, ticket_id)
             if not body or not body.strip():
                 raise ValueError("comment body must be non-empty")
-            comment = provider.add_comment(project, token, normalized_id, body)
+            try:
+                comment = provider.add_comment(project, token, normalized_id, body)
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="ticket",
+                    ident=normalized_id,
+                )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

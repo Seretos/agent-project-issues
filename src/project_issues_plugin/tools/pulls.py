@@ -39,6 +39,7 @@ from project_issues_plugin.tools._providers import (
 )
 from project_issues_plugin.tools._slicing import (
     apply_body_knobs,
+    apply_omit_nulls,
     apply_order,
 )
 
@@ -56,6 +57,7 @@ def register(mcp: FastMCP) -> None:
         limit: int = 30,
         omit_body: bool = False,
         body_max_chars: int | None = None,
+        omit_nulls: bool = False,
     ) -> dict:
         """List pull requests in a project. Default: open PRs, limit 30.
 
@@ -72,6 +74,14 @@ def register(mcp: FastMCP) -> None:
           - `omit_body=True`: drop the `body` field from every row.
           - `body_max_chars=N`: truncate each row's body to N chars
             and add `body_truncated: bool`.
+            `body_max_chars=N` measures N chars of content after the
+            `#ai-generated`/`#ai-modified` marker prefix (if present),
+            so the total stored body may be up to ~15 chars longer than N.
+          - `omit_nulls=True`: drop top-level keys whose value is ``None``
+            from every row (shallow strip — nested dicts such as ``head``
+            and ``base`` are preserved intact). Combine with
+            ``omit_body=True`` for the minimum-payload recipe when
+            scanning titles / labels only.
 
         Routing caveat: when `labels`, `assignee`, or `search` are set
         the provider switches from the cheap `/repos/.../pulls` endpoint
@@ -99,6 +109,8 @@ def register(mcp: FastMCP) -> None:
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
             )
+            if omit_nulls:
+                rows = apply_omit_nulls(rows)
             applied_limit = min(max(1, limit), 100)
             payload: dict = {
                 "project_id": project.id,
@@ -116,6 +128,8 @@ def register(mcp: FastMCP) -> None:
         comments_limit: int | None = None,
         comments_order: Literal["asc", "desc"] = "asc",
         comments_body_max_chars: int | None = None,
+        include_review_comments: bool = True,
+        review_comments_limit: int | None = None,
     ) -> dict:
         """Get a pull request's details, discussion, and inline review comments.
 
@@ -138,22 +152,45 @@ def register(mcp: FastMCP) -> None:
           - `comments_limit=N`: cap to N (0 == include_comments=False).
           - `comments_order="asc"|"desc"`: reverse the list.
           - `comments_body_max_chars=N`: truncate each comment body.
+            `comments_body_max_chars=N` measures N chars of content after
+            the `#ai-generated`/`#ai-modified` marker prefix (if present),
+            so the total stored body may be up to ~15 chars longer than N.
 
         When comments are fetched, the response includes
         `comments_fetched: true` alongside the `comments` list.
         When skipped, the `comments` key is absent and
         `comments_fetched: false` is emitted instead.
+
+        Review-comment-slicing knobs — apply to the inline `review_comments`
+        list only. They do not affect the discussion `comments`:
+          - `include_review_comments=False`: omits the `review_comments`
+            key entirely and emits `review_comments_fetched: false`.
+            Skips the provider `list_pr_review_comments` call entirely.
+            `review_comments_limit=0` is an alias for this flag — both
+            forms skip the provider call and omit the key.
+          - `review_comments_limit=N`: cap to N (0 == include_review_comments=False).
+
+        When review comments are fetched, the response includes
+        `review_comments_fetched: true` alongside the `review_comments`
+        list. When skipped, the `review_comments` key is absent and
+        `review_comments_fetched: false` is emitted instead.
         """
         def go() -> dict:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_pr = _normalize_id(project, pr_id)
+            drop_review_comments = (
+                (not include_review_comments) or review_comments_limit == 0
+            )
             try:
                 pr, comments = provider.get_pr(project, token, normalized_pr)
-                review_comments = provider.list_pr_review_comments(
-                    project, token, normalized_pr,
-                )
+                if not drop_review_comments:
+                    review_comments = provider.list_pr_review_comments(
+                        project, token, normalized_pr,
+                    )
+                else:
+                    review_comments = None
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
                     exc, project_id=project.id, kind="pr",
@@ -176,11 +213,21 @@ def register(mcp: FastMCP) -> None:
                     "comments": comment_rows,
                     "comments_fetched": True,
                 }
+            if drop_review_comments:
+                review_block: dict = {"review_comments_fetched": False}
+            else:
+                rc_list = list(review_comments)  # type: ignore[arg-type]
+                if review_comments_limit is not None and review_comments_limit > 0:
+                    rc_list = rc_list[:review_comments_limit]
+                review_block = {
+                    "review_comments": [asdict(c) for c in rc_list],
+                    "review_comments_fetched": True,
+                }
             return {
                 "project_id": project.id,
                 "pull_request": asdict(pr),
                 **comments_block,
-                "review_comments": [asdict(c) for c in review_comments],
+                **review_block,
             }
         return _safe(go)
 

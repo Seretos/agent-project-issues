@@ -9,6 +9,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
+# AI-attribution marker prefixes that `apply_body_knobs` strips before
+# measuring `body_max_chars`.  The markers are always followed by a
+# blank line (`\n\n`), giving two-character overhead per prefix.
+_AI_MARKER_PREFIXES = ("#ai-generated\n\n", "#ai-modified\n\n")
+
 
 def _parse_iso(value: str) -> datetime:
     """Parse an ISO-8601 timestamp tolerating the `Z` suffix.
@@ -61,6 +66,11 @@ def apply_body_knobs(
       sibling is NOT set (callers detect omission via `body_attr not in row`).
     - `body_max_chars=N`: truncate `body` to N characters and add
       `body_truncated: bool` so callers can tell the body is a prefix.
+      When the body starts with an `#ai-generated` or `#ai-modified`
+      marker prefix (followed by ``\\n\\n``), the cap is applied to the
+      content *after* the marker, so the marker itself is always
+      preserved.  The total stored body may therefore be up to ~15 chars
+      longer than N.
 
     Defaults (`omit_body=False`, `body_max_chars=None`) are a pass-through.
     """
@@ -75,8 +85,17 @@ def apply_body_knobs(
             continue
         body = new.get(body_attr)
         if body_max_chars is not None and isinstance(body, str):
-            if len(body) > body_max_chars:
-                new[body_attr] = body[:body_max_chars]
+            # Detect an AI-attribution marker prefix and measure the cap
+            # against the content portion only, so the marker is preserved.
+            marker = ""
+            content = body
+            for prefix in _AI_MARKER_PREFIXES:
+                if body.startswith(prefix):
+                    marker = prefix
+                    content = body[len(prefix):]
+                    break
+            if len(content) > body_max_chars:
+                new[body_attr] = marker + content[:body_max_chars]
                 new["body_truncated"] = True
             else:
                 new["body_truncated"] = False
@@ -84,8 +103,20 @@ def apply_body_knobs(
     return out
 
 
+def apply_omit_nulls(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop top-level keys whose value is ``None`` from each row.
+
+    Shallow only — nested dicts (e.g. ``head``, ``base``) are left
+    intact, including any ``None`` values they contain.  This avoids
+    stripping structural fields that providers return as ``None`` rather
+    than omitting entirely (e.g. ``head.sha`` before a push).
+    """
+    return [{k: v for k, v in row.items() if v is not None} for row in rows]
+
+
 __all__ = [
     "apply_body_knobs",
+    "apply_omit_nulls",
     "apply_order",
     "filter_since",
 ]

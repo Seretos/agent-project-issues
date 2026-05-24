@@ -32,6 +32,7 @@ from project_issues_plugin.tools._providers import (
 )
 from project_issues_plugin.tools._slicing import (
     apply_body_knobs,
+    apply_omit_nulls,
     apply_order,
 )
 
@@ -67,6 +68,7 @@ def register(mcp: FastMCP) -> None:
         sort_order: Literal["asc", "desc"] = "desc",
         omit_body: bool = False,
         body_max_chars: int | None = None,
+        omit_nulls: bool = False,
     ) -> dict:
         """List tickets in a project. Default: open tickets, limit 30.
 
@@ -93,14 +95,21 @@ def register(mcp: FastMCP) -> None:
             of returned items equals `limit`, because Azure DevOps
             returns work-item IDs without a continuation header.
 
-        Token-cheap knobs:
+        Token-cheap knobs (for discovery passes — finding IDs / titles /
+        labels before deciding which tickets to `get_ticket`):
           - `omit_body=True`: drop the `body` field from every row.
-            Use this when discovering ticket ids / titles / labels
-            before deciding which ones to `get_ticket` — the response
-            is ~10x smaller for bodies in the 2-10 KB range.
+            Recommended as the default for discovery passes — the
+            response is ~10x smaller for bodies in the 2-10 KB range.
           - `body_max_chars=N`: truncate each row's body to N chars
             and add `body_truncated: bool` so you can tell the body
-            is a prefix.
+            is a prefix. `body_max_chars=N` measures N chars of content
+            after the `#ai-generated`/`#ai-modified` marker prefix (if
+            present), so the total stored body may be up to ~15 chars
+            longer than N.
+          - `omit_nulls=True`: drop top-level keys whose value is ``None``
+            from every row (shallow strip — nested dicts are preserved
+            intact). Combine with `omit_body=True` for the
+            minimum-payload recipe when scanning titles / labels only.
 
         Routing caveat: when any of `not_labels`, `author`,
         `created_*`, `updated_*`, or `search` is set, the provider
@@ -135,6 +144,8 @@ def register(mcp: FastMCP) -> None:
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
             )
+            if omit_nulls:
+                rows = apply_omit_nulls(rows)
             # Always echo `applied_limit` so callers can see what cap was
             # applied, whether or not clamping occurred (ticket #62).
             applied_limit = min(max(1, limit), 100)
@@ -193,7 +204,12 @@ def register(mcp: FastMCP) -> None:
             for the "give me the most recent N" recipe.
           - `comments_body_max_chars=N`: truncate each comment body to
             N chars and add `body_truncated: bool`. Highest-leverage
-            saving for dense threads.
+            saving for dense threads. **Unbounded by default** — dense
+            threads can produce very large payloads; recommend e.g.
+            `comments_body_max_chars=500` for summary reads.
+            `comments_body_max_chars=N` measures N chars of content after
+            the `#ai-generated`/`#ai-modified` marker prefix (if present),
+            so the total stored body may be up to ~15 chars longer than N.
 
         When comments are fetched, the response includes
         `comments_fetched: true` alongside the `comments` list.

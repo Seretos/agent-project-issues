@@ -99,12 +99,12 @@ def register(mcp: FastMCP) -> None:
             resolved_refs: list[str] | None = None
 
             if branch:
-                runs = provider.list_runs_for_branch(
+                runs, _ = provider.list_runs_for_branch(
                     project, token, branch, status=status, limit=limit
                 )
                 addressed_by = "branch"
             elif commit_sha:
-                runs = provider.list_runs_for_commit(
+                runs, _ = provider.list_runs_for_commit(
                     project, token, commit_sha, status=status, limit=limit
                 )
                 addressed_by = "commit"

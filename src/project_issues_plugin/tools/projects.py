@@ -407,10 +407,20 @@ def register(mcp: FastMCP) -> None:
                     scored.append((s, p))
             scored.sort(key=lambda pair: pair[0], reverse=True)
             results = [{**_project_to_dict(p), "score": s} for s, p in scored[:cap]]
+        # When the config loaded fine but nothing matched the query,
+        # the global `_STATE_HINTS["ok"]` is None (no hint is right for
+        # `list_projects` in the ok case). Override locally so the agent
+        # gets a useful nudge rather than `hint: null` (ticket #63 item 5).
+        hint = _STATE_HINTS.get(result.state)
+        if result.state == "ok" and not results and q_trimmed:
+            hint = (
+                "No projects matched the query. "
+                "Use list_projects to see all available projects."
+            )
         return {
             "query": query,
             "matches": results,
             "state": result.state,
-            "hint": _STATE_HINTS.get(result.state),
+            "hint": hint,
             "runtime": _runtime_block(result),
         }

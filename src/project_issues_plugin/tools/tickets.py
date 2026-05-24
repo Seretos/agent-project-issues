@@ -225,7 +225,7 @@ def register(mcp: FastMCP) -> None:
     def create_ticket(
         project_id: str,
         title: str,
-        body: str,
+        body: str = "",
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
         status: str | None = None,
@@ -239,6 +239,9 @@ def register(mcp: FastMCP) -> None:
 
         The label `ai-generated` is added automatically by the server.
         Do not pass it yourself.
+
+        `body` is optional. When omitted, the ticket is created with an
+        empty body. Provide it when the user has supplied a description.
 
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When

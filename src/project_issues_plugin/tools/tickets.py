@@ -88,7 +88,10 @@ def register(mcp: FastMCP) -> None:
             pagination header (GitHub `Link rel=next`, GitLab
             `X-Next-Page`) and `applied_limit: int` — the effective
             cap actually used (equal to `limit` when no clamping
-            occurs, 100 when `limit` exceeded the cap).
+            occurs, 100 when `limit` exceeded the cap). For Azure
+            DevOps, `has_more` is a heuristic: `true` when the number
+            of returned items equals `limit`, because Azure DevOps
+            returns work-item IDs without a continuation header.
 
         Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row.
@@ -177,8 +180,11 @@ def register(mcp: FastMCP) -> None:
         when relation context is not needed.
 
         Comment-slicing knobs:
-          - `include_comments=False`: skip the `comments` list entirely
-            (returns `[]`). Use when you only need the ticket header.
+          - `include_comments=False`: canonical "header-only" flag —
+            omits the `comments` key from the response entirely and
+            emits `comments_fetched: false`. Use when you only need
+            the ticket header. `comments_limit=0` is an alias for
+            this flag (not the reverse).
           - `comments_limit=N`: cap the returned comments to N. Combined
             with `comments_order="desc"` gives the last N comments.
             `comments_limit=0` is an alias for `include_comments=False`.
@@ -188,6 +194,18 @@ def register(mcp: FastMCP) -> None:
           - `comments_body_max_chars=N`: truncate each comment body to
             N chars and add `body_truncated: bool`. Highest-leverage
             saving for dense threads.
+
+        When comments are fetched, the response includes
+        `comments_fetched: true` alongside the `comments` list.
+        When skipped (via `include_comments=False` or
+        `comments_limit=0`), the `comments` key is absent and
+        `comments_fetched: false` is emitted instead.
+
+        When `include_relations=False` (or the provider skips the
+        relation fetch), the `relations` and `relations_truncated` keys
+        are absent and `relations_fetched: false` is emitted. When
+        `include_relations=True` (default), `relations_fetched: true`
+        is present alongside the `relations` list.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -207,7 +225,7 @@ def register(mcp: FastMCP) -> None:
             # Apply the comment-slicing knobs.
             drop_comments = (not include_comments) or comments_limit == 0
             if drop_comments:
-                comment_rows: list[dict] = []
+                comments_block: dict = {"comments_fetched": False}
             else:
                 ordered = apply_order(comments, comments_order)
                 if comments_limit is not None and comments_limit > 0:
@@ -218,21 +236,27 @@ def register(mcp: FastMCP) -> None:
                     omit_body=False,
                     body_max_chars=comments_body_max_chars,
                 )
-            # `relations` / `truncated` come back as None (not [] / False)
-            # when include_relations=False — the lib distinguishes None
-            # (skipped) from [] (fetched but empty). The MCP surface always
-            # exposes a list + bool, so normalise the skipped case here
-            # instead of iterating None.
+                comments_block = {
+                    "comments": comment_rows,
+                    "comments_fetched": True,
+                }
+            # The lib returns `truncated=None` (not `relations=None`) when
+            # include_relations=False — `None` signals "skipped", while
+            # `False` means "fetched but empty". `relations` is always a
+            # list. Use `truncated is None` to detect the skipped case.
+            if truncated is None:
+                relations_block: dict = {"relations_fetched": False}
+            else:
+                relations_block = {
+                    "relations": [asdict(rel) for rel in relations],
+                    "relations_truncated": bool(truncated),
+                    "relations_fetched": True,
+                }
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
-                "comments": comment_rows,
-                "relations": (
-                    [asdict(rel) for rel in relations]
-                    if relations is not None
-                    else []
-                ),
-                "relations_truncated": bool(truncated),
+                **comments_block,
+                **relations_block,
             }
         return _safe(go)
 

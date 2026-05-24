@@ -348,7 +348,8 @@ def test_get_ticket_include_comments_false(monkeypatch):
         include_relations=False,
     )
     assert "error" not in result
-    assert result["comments"] == []
+    assert "comments" not in result
+    assert result["comments_fetched"] is False
 
 
 def test_get_ticket_comments_limit_zero_aliases_include_false(monkeypatch):
@@ -367,7 +368,8 @@ def test_get_ticket_comments_limit_zero_aliases_include_false(monkeypatch):
         project_id="acme", ticket_id="1", comments_limit=0,
         include_relations=False,
     )
-    assert result["comments"] == []
+    assert "comments" not in result
+    assert result["comments_fetched"] is False
 
 
 def test_get_ticket_comments_limit_and_order_tail(monkeypatch):
@@ -437,7 +439,8 @@ def test_get_pr_include_comments_false(monkeypatch):
     result = tools["get_pr"](
         project_id="acme", pr_id="5", include_comments=False,
     )
-    assert result["comments"] == []
+    assert "comments" not in result
+    assert result["comments_fetched"] is False
     # review_comments not affected by the comment knobs
     assert "review_comments" in result
 

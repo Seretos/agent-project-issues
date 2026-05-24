@@ -130,13 +130,19 @@ def register(mcp: FastMCP) -> None:
             discussion notes on GitLab). Each carries `path`, `line`,
             `commit_sha`, and an `in_reply_to` for threaded replies.
 
-        Comment-slicing knobs — apply to the discussion
-        `comments` list, not the inline `review_comments`:
-          - `include_comments=False`: returns `comments: []` and skips
-            the per-comment body fetch entirely.
+        Comment-slicing knobs — apply to the discussion `comments`
+        list only. They do not affect `review_comments` in any way:
+          - `include_comments=False`: omits the `comments` key entirely
+            and emits `comments_fetched: false`. Skips the per-comment
+            body fetch. `comments_limit=0` is an alias.
           - `comments_limit=N`: cap to N (0 == include_comments=False).
           - `comments_order="asc"|"desc"`: reverse the list.
           - `comments_body_max_chars=N`: truncate each comment body.
+
+        When comments are fetched, the response includes
+        `comments_fetched: true` alongside the `comments` list.
+        When skipped, the `comments` key is absent and
+        `comments_fetched: false` is emitted instead.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -155,7 +161,7 @@ def register(mcp: FastMCP) -> None:
                 )
             drop_comments = (not include_comments) or comments_limit == 0
             if drop_comments:
-                comment_rows: list[dict] = []
+                comments_block: dict = {"comments_fetched": False}
             else:
                 ordered = apply_order(comments, comments_order)
                 if comments_limit is not None and comments_limit > 0:
@@ -166,10 +172,14 @@ def register(mcp: FastMCP) -> None:
                     omit_body=False,
                     body_max_chars=comments_body_max_chars,
                 )
+                comments_block = {
+                    "comments": comment_rows,
+                    "comments_fetched": True,
+                }
             return {
                 "project_id": project.id,
                 "pull_request": asdict(pr),
-                "comments": comment_rows,
+                **comments_block,
                 "review_comments": [asdict(c) for c in review_comments],
             }
         return _safe(go)
@@ -344,7 +354,8 @@ def register(mcp: FastMCP) -> None:
         uses the supplied `line` as the new-side anchor.
 
         Body is marker-prefixed automatically. Requires the project's
-        `pulls.modify` permission.
+        `pulls.modify` permission. To post a discussion-level comment
+        (not anchored to a diff line), use `add_pr_comment` instead.
         """
         new_thread = (path is not None) or (line is not None) or (
             commit_sha is not None

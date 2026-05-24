@@ -323,6 +323,11 @@ def register(mcp: FastMCP) -> None:
     def list_projects() -> dict:
         """List projects available to this server.
 
+        All configured projects are always returned — this tool is not
+        paginated and the response carries no `total` or `truncated`
+        fields. When you need a relevance-ranked subset or want to apply
+        a `limit`, use `find_projects` instead.
+
         Each entry has an `id`, `provider`, `path`, `web_url`, and
         `permissions`. A project with `source="git-remote"` was inferred
         from the local git repository and is read-only.

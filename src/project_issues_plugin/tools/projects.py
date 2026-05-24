@@ -57,8 +57,15 @@ Two extra per-project fields document the source:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
+
+# Compiled separator pattern reused by `_score()` for sub-token splitting.
+# Splits on any run of non-alphanumeric characters (hyphens, underscores,
+# dots, slashes, etc.) so that e.g. "proj-iss" and "agent-project-issues"
+# share common sub-tokens.
+_TOKEN_SEP = re.compile(r"[^a-z0-9]+")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -264,12 +271,32 @@ def _score(query: str, project: ProjectConfig) -> int:
     if q in desc_lc:
         score = max(score, 100)
     for token in q.split():
-        if token and token in id_lc:
+        if len(token) < 3:
+            continue
+        if token in id_lc:
             score += 30
-        if token and token in desc_lc:
+        if token in desc_lc:
             score += 15
-        if token and token in path_lc:
+        if token in path_lc:
             score += 10
+    # F19: sub-token matching for hyphenated / compound queries and ids.
+    # Split both query and candidate fields on non-alphanumeric separators,
+    # keeping only parts of length >= 3 to avoid noise from short tokens.
+    q_parts = [p for p in _TOKEN_SEP.split(q) if len(p) >= 3]
+    if q_parts:
+        id_parts = [p for p in _TOKEN_SEP.split(id_lc) if len(p) >= 3]
+        path_parts = [p for p in _TOKEN_SEP.split(path_lc) if len(p) >= 3]
+        desc_parts = [p for p in _TOKEN_SEP.split(desc_lc) if len(p) >= 3]
+        for qp in q_parts:
+            for cp in id_parts:
+                if qp in cp or cp in qp:
+                    score += 50
+            for cp in path_parts:
+                if qp in cp or cp in qp:
+                    score += 20
+            for cp in desc_parts:
+                if qp in cp or cp in qp:
+                    score += 10
     return score
 
 
@@ -375,6 +402,14 @@ def register(mcp: FastMCP) -> None:
           - Non-empty query → fuzzy match by id / description / path,
             sorted by relevance descending.
 
+        **Pagination fields (always present):**
+          - `total: int` — total number of candidates before the `limit`
+            cap is applied (all projects for an empty query; all projects
+            that scored > 0 for a non-empty query).
+          - `truncated: bool` — `true` when `total > limit`, meaning
+            some matches were omitted. Increase `limit` or refine the
+            query to see more.
+
         If `matches` is empty, INSPECT `state` first — do not say "the
         project doesn't exist" when the cause is missing or broken
         configuration:
@@ -395,6 +430,7 @@ def register(mcp: FastMCP) -> None:
         q_trimmed = (query or "").strip()
         if not q_trimmed:
             sorted_projects = sorted(result.projects, key=lambda p: p.id.lower())
+            total = len(sorted_projects)
             results = [
                 {**_project_to_dict(p), "score": 0}
                 for p in sorted_projects[:cap]
@@ -406,7 +442,9 @@ def register(mcp: FastMCP) -> None:
                 if s > 0:
                     scored.append((s, p))
             scored.sort(key=lambda pair: pair[0], reverse=True)
+            total = len(scored)
             results = [{**_project_to_dict(p), "score": s} for s, p in scored[:cap]]
+        truncated = total > cap
         # When the config loaded fine but nothing matched the query,
         # the global `_STATE_HINTS["ok"]` is None (no hint is right for
         # `list_projects` in the ok case). Override locally so the agent
@@ -420,6 +458,8 @@ def register(mcp: FastMCP) -> None:
         return {
             "query": query,
             "matches": results,
+            "total": total,
+            "truncated": truncated,
             "state": result.state,
             "hint": hint,
             "runtime": _runtime_block(result),

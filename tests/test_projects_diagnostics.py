@@ -620,3 +620,139 @@ def test_probe_failure_records_error_and_keeps_defaults(
     assert p["permissions_probe_error"] == "repo_invisible_to_token"
     assert p["permissions"]["issues"]["create"] is False
     assert p["permissions"]["pulls"]["merge"] is False
+
+
+# ---------- ticket #60: F17 — truncated / total fields ----------------------
+
+
+def test_find_projects_truncation_fields_present(configured: dict) -> None:
+    """Empty query with default limit (10) on 4 projects → truncated=False, total=4."""
+    out = configured["find_projects"](query="")
+    assert "truncated" in out
+    assert "total" in out
+    assert out["truncated"] is False
+    assert out["total"] == 4
+
+
+def test_find_projects_truncated_when_limit_below_total(configured: dict) -> None:
+    """limit=2 on 4 projects → truncated=True, total=4, 2 matches returned."""
+    out = configured["find_projects"](query="", limit=2)
+    assert out["truncated"] is True
+    assert out["total"] == 4
+    assert len(out["matches"]) == 2
+
+
+def test_find_projects_scored_path_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scored path: stub 5 projects that all match 't', limit=3 → truncated=True."""
+    from lib_python_projects import ProjectsLoadResult
+
+    projects_5 = [
+        ProjectConfig(
+            id=f"test-project-{i}",
+            description="a test project",
+            provider="github",
+            path=f"org/test-project-{i}",
+        )
+        for i in range(5)
+    ]
+    fake_result = ProjectsLoadResult(
+        projects=projects_5,
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    captured: dict = {}
+
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    proj_tools.register(_Stub())
+    out = captured["find_projects"](query="test", limit=3)
+    # All 5 projects contain "test" in their id; scored count should be 5.
+    assert out["total"] == 5
+    assert out["truncated"] is True
+    assert len(out["matches"]) == 3
+
+
+# ---------- ticket #60: F19 — hyphenated query sub-token matching ------------
+
+
+def test_score_hyphenated_query_matches_hyphenated_id() -> None:
+    """_score('proj-iss', project(id='agent-project-issues')) must be > 0."""
+    p = ProjectConfig(
+        id="agent-project-issues",
+        description="MCP server for issue management",
+        provider="github",
+        path="seretos/agent-project-issues",
+    )
+    assert proj_tools._score("proj-iss", p) > 0
+
+
+def test_find_projects_hyphenated_query_returns_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """find_projects(query='proj-iss') finds 'agent-project-issues'."""
+    from lib_python_projects import ProjectsLoadResult
+
+    p = ProjectConfig(
+        id="agent-project-issues",
+        description="MCP server for issue management",
+        provider="github",
+        path="seretos/agent-project-issues",
+    )
+    fake_result = ProjectsLoadResult(
+        projects=[p],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+
+    captured: dict = {}
+
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    proj_tools.register(_Stub())
+    out = captured["find_projects"](query="proj-iss")
+    ids = [m["id"] for m in out["matches"]]
+    assert "agent-project-issues" in ids
+
+
+# ---------- ticket #60: UX7 — short tokens skipped in scoring ----------------
+
+
+def test_find_projects_adversarial_sql_query_no_results(configured: dict) -> None:
+    """SQL injection-style query returns no matches.
+
+    Short tokens like `'`, `or`, and `--` are skipped by the UX7 length guard
+    (< 3 chars). The remaining token `1=1` (length 3, passes the guard) does
+    not appear in any configured project id, path, or description, so the
+    result is still empty."""
+    out = configured["find_projects"](query="' OR 1=1 --")
+    assert out["matches"] == []
+
+
+def test_score_two_char_token_not_added() -> None:
+    """_score('or x', project(id='worktree')) must be 0 — both tokens are < 3 chars."""
+    p = ProjectConfig(
+        id="worktree",
+        description="a worktree helper",
+        provider="github",
+        path="org/worktree",
+    )
+    assert proj_tools._score("or x", p) == 0

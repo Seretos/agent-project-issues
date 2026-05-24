@@ -55,7 +55,7 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """List comments on a ticket. Default: oldest-first, limit 30 (cap 100).
 
-        Args (ticket #47):
+        Args:
           - `order`: `"asc"` (default, chronological) or `"desc"`
             (reverse). For the "give me the most recent N comments"
             use-case, pass `order="desc", limit=N` — the page is fetched
@@ -72,7 +72,7 @@ def register(mcp: FastMCP) -> None:
             provider's pagination header (GitHub `Link rel=next`,
             GitLab `X-Next-Page`).
 
-        Token-cheap knobs (ticket #50):
+        Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row.
           - `body_max_chars=N`: truncate each comment body to N chars
             and add `body_truncated: bool` per row.
@@ -119,8 +119,7 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Get a single comment by id.
 
-        `ticket_id` carries consistent semantics across providers
-        (ticket #41 addendum):
+        `ticket_id` carries consistent semantics across providers:
           - GitHub: unused (comment ids are repo-wide). May be omitted
             or set to `None`.
           - GitLab: required when `comment_id` is a bare note id (as
@@ -160,8 +159,7 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Update an existing comment's body.
 
-        `ticket_id` carries consistent semantics across providers
-        (ticket #41 addendum):
+        `ticket_id` carries consistent semantics across providers:
           - GitHub: unused (comment ids are repo-wide). May be omitted
             or set to `None`.
           - GitLab: required when `comment_id` is a bare note id (as

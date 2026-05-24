@@ -90,7 +90,7 @@ def register(mcp: FastMCP) -> None:
             cap actually used (equal to `limit` when no clamping
             occurs, 100 when `limit` exceeded the cap).
 
-        Token-cheap knobs (ticket #50):
+        Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row.
             Use this when discovering ticket ids / titles / labels
             before deciding which ones to `get_ticket` — the response
@@ -176,7 +176,7 @@ def register(mcp: FastMCP) -> None:
         Set `include_relations=False` to save two API calls per request
         when relation context is not needed.
 
-        Comment-slicing knobs (ticket #50):
+        Comment-slicing knobs:
           - `include_comments=False`: skip the `comments` list entirely
             (returns `[]`). Use when you only need the ticket header.
           - `comments_limit=N`: cap the returned comments to N. Combined
@@ -315,11 +315,10 @@ def register(mcp: FastMCP) -> None:
         Agents that don't know the provider's state-space should call
         `list_ticket_statuses(project_id)` first and read
         `hints.terminal_completed` / `hints.terminal_declined` /
-        `hints.default_open`. The legacy 3-value enum
-        (`open`/`completed`/`not_planned`) is **no longer accepted** —
-        unknown values raise an error so an agent can re-discover the
-        state-space via `list_ticket_statuses` instead of silently
-        succeeding with the wrong outcome.
+        `hints.default_open`. Only values returned by
+        `list_ticket_statuses` are valid; unknown values raise an error
+        so the agent is directed to re-discover the state-space rather
+        than silently succeeding with the wrong outcome.
 
         Label and assignee changes are add/remove operations relative to
         the current set; pass arrays of names. The label `ai-modified`
@@ -355,7 +354,7 @@ def register(mcp: FastMCP) -> None:
         supplied them (or they didn't change). To re-read the full
         ticket including body, call `get_ticket`. This trim avoids
         re-streaming multi-kB bodies for status-only or label-only
-        updates (ticket #36).
+        updates.
 
         Requires the project's `issues.modify` permission.
         """

@@ -152,9 +152,9 @@ def register(mcp: FastMCP) -> None:
         ```
 
         `kinds` is the universal write-side vocabulary. `provider_support`
-        (ticket #48 finding 5) tells the agent which kinds each provider
-        actually accepts before it ever calls `add_relation` — no need
-        to learn provider quirks via failed calls.
+        tells the agent which kinds each provider actually accepts before
+        it ever calls `add_relation` — no need to learn provider quirks
+        via failed calls.
         """
         return {
             "kinds": list(WRITABLE_RELATION_KINDS),

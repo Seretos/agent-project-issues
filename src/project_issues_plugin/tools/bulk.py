@@ -57,11 +57,11 @@ def register(mcp: FastMCP) -> None:
         the same semantics as `list_tickets`. `limit_per_project` caps
         the result count for each project independently.
 
-        Default `limit_per_project` is `10` (ticket #50) — the fan-out
-        shape multiplies the body-row cost, so this is the conservative
+        Default `limit_per_project` is `10` — the fan-out shape
+        multiplies the body-row cost, so this is the conservative
         default. Bump it explicitly when you need more.
 
-        Token-cheap knobs (ticket #50):
+        Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row
             across every project. Recommended when enumerating titles
             / labels to decide which tickets to drill into.

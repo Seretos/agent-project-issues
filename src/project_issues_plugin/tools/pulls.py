@@ -68,7 +68,7 @@ def register(mcp: FastMCP) -> None:
           - `search`: free-text query (GitHub search syntax, scoped to PRs).
           - `limit`: capped at the provider's max page size (100).
 
-        Token-cheap knobs (ticket #50):
+        Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row.
           - `body_max_chars=N`: truncate each row's body to N chars
             and add `body_truncated: bool`.
@@ -130,7 +130,7 @@ def register(mcp: FastMCP) -> None:
             discussion notes on GitLab). Each carries `path`, `line`,
             `commit_sha`, and an `in_reply_to` for threaded replies.
 
-        Comment-slicing knobs (ticket #50) — apply to the discussion
+        Comment-slicing knobs — apply to the discussion
         `comments` list, not the inline `review_comments`:
           - `include_comments=False`: returns `comments: []` and skips
             the per-comment body fetch entirely.

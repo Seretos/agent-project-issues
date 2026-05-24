@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -461,7 +463,7 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
-    def add_comment(project_id: str, ticket_id: str, body: str) -> dict:
+    def add_comment(project_id: str, ticket_id: str, body: Annotated[str, Field(description="Comment content. Do not include '#ai-generated' — the server prepends it automatically.")]) -> dict:
         """Add a comment to a ticket.
 
         The body is automatically prefixed with `#ai-generated\\n\\n`.

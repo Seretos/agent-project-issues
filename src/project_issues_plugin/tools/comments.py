@@ -16,7 +16,9 @@ The shared `_PROVIDERS`/`_resolve`/`_safe`/permission helpers live in
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -113,7 +115,7 @@ def register(mcp: FastMCP) -> None:
     def get_comment(
         project_id: str,
         comment_id: str,
-        ticket_id: str | None = None,
+        ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
     ) -> dict:
         """Get a single comment by id.
 
@@ -154,7 +156,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         comment_id: str,
         body: str,
-        ticket_id: str | None = None,
+        ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
     ) -> dict:
         """Update an existing comment's body.
 

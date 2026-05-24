@@ -455,61 +455,25 @@ def test_github_add_relation_relates_to_raises_unsupported(
 def test_gitlab_add_relation_blocked_by_posts_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        # Ticket #49 finding 2 follow-up: the issue-links POST needs
-        # the target project's numeric id; resolved via this GET first.
-        if req.method == "GET" and req.url.path == "/api/v4/projects/acme/backend":
-            return _json({"id": 4242, "path_with_namespace": "acme/backend"})
-        if (
-            req.method == "POST"
-            and "/issues/5/links" in req.url.path
-        ):
-            captured["body"] = json.loads(req.content.decode())
-            return _json({
-                "iid": 7, "title": "Other", "state": "opened",
-                "web_url": "https://gitlab.com/acme/backend/-/issues/7",
-            })
-        return _json({}, status_code=404)
-
-    _install_gitlab_mock(monkeypatch, handler)
-    rel = GitLabProvider().add_relation(
-        _gitlab_project(), "tok", "5", "blocked_by", "#7",
-    )
-    assert rel.kind == "blocked_by"
-    assert rel.ticket_id == "#7"
-    assert captured["body"]["link_type"] == "is_blocked_by"
-    assert captured["body"]["target_issue_iid"] == "7"
-    # The body MUST carry the numeric project id, not the URL-encoded path
-    # (the original bug fix — see ticket #49 finding 2 follow-up).
-    assert captured["body"]["target_project_id"] == 4242
+    _install_gitlab_mock(monkeypatch, lambda r: _json({}, 200))
+    with pytest.raises(RelationKindUnsupported) as ei:
+        GitLabProvider().add_relation(
+            _gitlab_project(), "tok", "5", "blocked_by", "#7",
+        )
+    assert ei.value.kind == "blocked_by"
+    assert ei.value.provider == "gitlab"
 
 
 def test_gitlab_add_relation_blocks_uses_blocks_link_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        if req.method == "GET" and req.url.path == "/api/v4/projects/acme/backend":
-            return _json({"id": 4242})
-        if (
-            req.method == "POST"
-            and "/issues/5/links" in req.url.path
-        ):
-            captured["body"] = json.loads(req.content.decode())
-            return _json({
-                "iid": 7, "title": "Other", "state": "opened",
-                "web_url": "https://gitlab.com/acme/backend/-/issues/7",
-            })
-        return _json({}, status_code=404)
-
-    _install_gitlab_mock(monkeypatch, handler)
-    GitLabProvider().add_relation(
-        _gitlab_project(), "tok", "5", "blocks", "#7",
-    )
-    assert captured["body"]["link_type"] == "blocks"
+    _install_gitlab_mock(monkeypatch, lambda r: _json({}, 200))
+    with pytest.raises(RelationKindUnsupported) as ei:
+        GitLabProvider().add_relation(
+            _gitlab_project(), "tok", "5", "blocks", "#7",
+        )
+    assert ei.value.kind == "blocks"
+    assert ei.value.provider == "gitlab"
 
 
 def test_gitlab_add_relation_relates_to_uses_relates_to_link_type(
@@ -538,26 +502,13 @@ def test_gitlab_add_relation_relates_to_uses_relates_to_link_type(
 def test_gitlab_remove_relation_blocked_by_deletes_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen: list[str] = []
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        path = req.url.path
-        seen.append(f"{req.method} {path}")
-        if req.method == "GET" and path.endswith("/issues/5/links"):
-            return _json([
-                {"iid": 7, "issue_link_id": 99,
-                 "web_url": "x"},
-            ])
-        if req.method == "DELETE" and path.endswith("/issues/5/links/99"):
-            return _json({})
-        return _json({}, status_code=404)
-
-    _install_gitlab_mock(monkeypatch, handler)
-    result = GitLabProvider().remove_relation(
-        _gitlab_project(), "tok", "5", "blocked_by", "#7",
-    )
-    assert result == {"removed": True}
-    assert any("DELETE" in s and "/links/99" in s for s in seen)
+    _install_gitlab_mock(monkeypatch, lambda r: _json({}, 200))
+    with pytest.raises(RelationKindUnsupported) as ei:
+        GitLabProvider().remove_relation(
+            _gitlab_project(), "tok", "5", "blocked_by", "#7",
+        )
+    assert ei.value.kind == "blocked_by"
+    assert ei.value.provider == "gitlab"
 
 
 # ---------- GitLab: parent / child unsupported ------------------------------

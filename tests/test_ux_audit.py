@@ -326,7 +326,8 @@ def test_list_tickets_applied_limit_echoed_when_clamped(monkeypatch):
     assert result.get("applied_limit") == 100
 
 
-def test_list_tickets_applied_limit_not_echoed_when_unchanged(monkeypatch):
+def test_list_tickets_applied_limit_always_present(monkeypatch):
+    """applied_limit is always returned, even when no clamping occurs (ticket #62)."""
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
     tools = _register(monkeypatch, ticket_tools)
 
@@ -335,7 +336,7 @@ def test_list_tickets_applied_limit_not_echoed_when_unchanged(monkeypatch):
 
     _install_github_mock(monkeypatch, handler)
     result = tools["list_tickets"](project_id="acme", limit=20)
-    assert "applied_limit" not in result
+    assert result.get("applied_limit") == 20
 
 
 def test_list_prs_applied_limit_echoed(monkeypatch):
@@ -362,3 +363,87 @@ def test_list_comments_applied_limit_echoed(monkeypatch):
         project_id="acme", ticket_id="5", limit=200,
     )
     assert result.get("applied_limit") == 100
+
+
+def test_list_prs_applied_limit_always_present(monkeypatch):
+    """applied_limit is always returned for list_prs, even when no clamping occurs (ticket #62)."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, pull_tools)
+
+    def handler(req):
+        return _resp([])
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["list_prs"](project_id="acme", limit=15)
+    assert result.get("applied_limit") == 15
+
+
+def test_list_comments_applied_limit_always_present(monkeypatch):
+    """applied_limit is always returned for list_comments, even when no clamping occurs (ticket #62)."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, comment_tools)
+
+    def handler(req):
+        return _resp([])
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["list_comments"](
+        project_id="acme", ticket_id="5", limit=10,
+    )
+    assert result.get("applied_limit") == 10
+
+
+# ---------- ticket #62: add_comment empty body rejection --------------------
+
+
+def test_add_comment_empty_body_rejected(monkeypatch):
+    """add_comment with body="" returns an error, not a silent AI-marker-only post."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, ticket_tools)
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["add_comment"](project_id="acme", ticket_id="5", body="")
+    assert "error" in result
+    assert "non-empty" in result["error"]
+
+
+def test_add_comment_whitespace_body_rejected(monkeypatch):
+    """add_comment with body of only whitespace is also rejected."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, ticket_tools)
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["add_comment"](project_id="acme", ticket_id="5", body="   ")
+    assert "error" in result
+    assert "non-empty" in result["error"]
+
+
+def test_add_comment_valid_body_succeeds(monkeypatch):
+    """Regression guard: a non-empty body still reaches the provider and succeeds."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, ticket_tools)
+
+    def handler(req):
+        if req.method == "POST" and "/comments" in req.url.path:
+            return _resp({
+                "id": 42,
+                "body": "#ai-generated\n\nThis is a real comment.",
+                "user": {"login": "bot"},
+                "html_url": "https://github.com/acme/backend/issues/5#issuecomment-42",
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+            })
+        raise AssertionError(f"unexpected HTTP call: {req.method} {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["add_comment"](
+        project_id="acme", ticket_id="5", body="This is a real comment.",
+    )
+    assert "error" not in result, result
+    assert "comment" in result

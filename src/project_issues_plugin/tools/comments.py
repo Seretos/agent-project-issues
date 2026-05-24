@@ -136,14 +136,15 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             token = resolve_token(project)
             normalized_ticket = _normalize_id(project, ticket_id)
+            normalized_comment = _normalize_id(project, comment_id)
             try:
                 comment = provider.get_comment(
-                    project, token, comment_id, ticket_id=normalized_ticket,
+                    project, token, normalized_comment, ticket_id=normalized_ticket,
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
                     exc, project_id=project.id, kind="comment",
-                    ident=comment_id,
+                    ident=normalized_comment,
                 )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

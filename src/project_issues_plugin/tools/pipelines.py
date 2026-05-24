@@ -16,10 +16,14 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 from lib_python_projects import resolve_token
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
+from lib_python_projects.providers.github import GitHubError
+from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
     _resolve,
+    _rewrap_404,
     _safe,
 )
 
@@ -184,9 +188,15 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            run = provider.get_run(
-                project, token, run_id,
-                include_failure_excerpt=include_failure_excerpt,
-            )
+            try:
+                run = provider.get_run(
+                    project, token, run_id,
+                    include_failure_excerpt=include_failure_excerpt,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="pipeline run",
+                    ident=run_id,
+                )
             return {"project_id": project.id, "run": asdict(run)}
         return _safe(go)

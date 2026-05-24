@@ -25,6 +25,7 @@ from lib_python_projects.providers.github import (
 )
 from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import comments as comment_tools
+from project_issues_plugin.tools import pipelines as pipeline_tools
 from project_issues_plugin.tools import pulls as pull_tools
 from project_issues_plugin.tools import relations as relation_tools
 from project_issues_plugin.tools import tickets as ticket_tools
@@ -447,3 +448,80 @@ def test_add_comment_valid_body_succeeds(monkeypatch):
     )
     assert "error" not in result, result
     assert "comment" in result
+
+
+# ---------- ticket #59: 404 echoes id+project for update/add_comment, pipeline run ----
+
+
+def test_update_ticket_404_echoes_id_and_project(monkeypatch):
+    """update_ticket 404 surfaces project#id context in the error message."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, ticket_tools)
+
+    def handler(req):
+        return _resp({"message": "Not Found"}, status_code=404)
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["update_ticket"](
+        project_id="acme", ticket_id="999999", title="new title",
+    )
+    assert "error" in result
+    assert "acme#999999" in result["error"]
+    assert "GitHub 404" in result["error"]
+
+
+def test_add_comment_404_echoes_id_and_project(monkeypatch):
+    """add_comment 404 surfaces project#id (ticket id) context in the error message."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, ticket_tools)
+
+    def handler(req):
+        return _resp({"message": "Not Found"}, status_code=404)
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["add_comment"](
+        project_id="acme", ticket_id="999999", body="some comment",
+    )
+    assert "error" in result
+    assert "acme#999999" in result["error"]
+    assert "GitHub 404" in result["error"]
+
+
+def test_get_pipeline_run_404_echoes_run_id(monkeypatch):
+    """get_pipeline_run 404 surfaces run_id context in the error message."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def fake_load_projects(*_args, **_kwargs):
+        from lib_python_projects import ProjectsLoadResult
+        return ProjectsLoadResult(
+            projects=[_project()], state="ok", search_root="/tmp",
+        )
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
+
+    stub = _StubMCP()
+    pipeline_tools.register(stub)
+    tools = stub.tools
+
+    def handler(req):
+        return _resp({"message": "Not Found"}, status_code=404)
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["get_pipeline_run"](project_id="acme", run_id="99999999999")
+    assert "error" in result
+    assert "99999999999" in result["error"]
+    assert "GitHub 404" in result["error"]
+
+
+def test_get_comment_invalid_id_local_short_circuit(monkeypatch):
+    """get_comment with a non-numeric comment_id short-circuits locally, no HTTP."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, comment_tools)
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["get_comment"](
+        project_id="acme", comment_id="not-a-number", ticket_id="5",
+    )
+    assert "error" in result

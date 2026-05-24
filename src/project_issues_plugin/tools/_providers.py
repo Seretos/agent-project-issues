@@ -170,9 +170,10 @@ def _rewrap_404(exc, *, project_id: str, kind: str, ident: str):
 
     Ticket #48 finding 6: bare `"GitHub 404: Not Found"` is hostile to
     agents because it doesn't say which lookup failed. Wrappers around
-    `get_ticket` / `get_comment` / `get_pr` catch the raw 404, run it
-    through this helper, and re-raise with the context the agent needs
-    to fix the call (or report it to the user).
+    `get_ticket` / `get_comment` / `get_pr` / `update_ticket` /
+    `add_comment` / `get_pipeline_run` catch the raw 404, run it through
+    this helper, and re-raise with the context the agent needs to fix
+    the call (or report it to the user).
 
     For non-404 errors the original exception is returned unchanged so
     callers can `raise _rewrap_404(exc, ...)` unconditionally.

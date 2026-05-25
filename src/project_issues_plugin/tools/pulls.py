@@ -93,7 +93,7 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            prs = provider.list_prs(
+            prs, has_more = provider.list_prs(
                 project, token,
                 PRFilters(
                     status=status,
@@ -116,6 +116,7 @@ def register(mcp: FastMCP) -> None:
                 "project_id": project.id,
                 "prs": rows,
                 "applied_limit": applied_limit,
+                "has_more": has_more,
             }
             return payload
         return _safe(go)

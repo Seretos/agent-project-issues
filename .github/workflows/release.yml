@@ -247,6 +247,7 @@ jobs:
           cp -a bin             "$STAGE/"
           [ -f README.md ] && cp README.md "$STAGE/"
           [ -f LICENSE   ] && cp LICENSE   "$STAGE/"
+          [ -d assets    ] && cp -a assets "$STAGE/"
 
           python3 - "$STAGE" "$ZIP_PATH" <<'PYEOF'
           import os, sys, time, zipfile
@@ -293,6 +294,7 @@ jobs:
           cp -a bin             "$STAGE_DIR/"
           [ -f README.md ] && cp README.md "$STAGE_DIR/"
           [ -f LICENSE   ] && cp LICENSE   "$STAGE_DIR/"
+          [ -d assets    ] && cp -a assets "$STAGE_DIR/"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

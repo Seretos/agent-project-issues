@@ -343,7 +343,7 @@ def register(mcp: FastMCP) -> None:
         """Update an existing ticket. Only specified fields change.
 
         `status` is the **provider-native** status string. For GitHub
-        the accepted values are `open`, `closed`, `closed:completed`,
+        the accepted values are `open`, `closed:completed`,
         and `closed:not_planned` (where the `state:state_reason`
         suffix carries GitHub's "done as planned" vs "not planned"
         distinction). For Azure DevOps the value is whatever the

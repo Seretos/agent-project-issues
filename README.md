@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="96" alt="agent-project-issues icon">
+
 # agent-project-issues
 
 Let your AI coding agent read and write **GitHub / GitLab / Azure DevOps issues** safely. MCP tools for listing/creating/updating tickets and adding comments, with automatic safety markers (`ai-generated` / `ai-modified` labels, `#ai-generated` comment prefix). Per-project permissions and read-only auto-discovery from the local git remote when no config exists.

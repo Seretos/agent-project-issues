@@ -16,6 +16,7 @@ from typing import Callable
 
 from project_issues_plugin.tools import bulk as bulk_tools
 from project_issues_plugin.tools import comments as comment_tools
+from project_issues_plugin.tools import labels as label_tools
 from project_issues_plugin.tools import pulls as pull_tools
 from project_issues_plugin.tools import relations as relation_tools
 from project_issues_plugin.tools import tickets as ticket_tools
@@ -48,6 +49,7 @@ _ALL_MODULES = [
     ("bulk", bulk_tools),
     ("pulls", pull_tools),
     ("relations", relation_tools),
+    ("labels", label_tools),
 ]
 
 

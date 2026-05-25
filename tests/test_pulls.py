@@ -194,6 +194,53 @@ def test_list_prs_with_labels_switches_to_search(
     assert [pr["id"] for pr in result["prs"]] == ["5"]
 
 
+def test_list_prs_has_more_false_when_page_is_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_prs response has `has_more=False` when fewer items than `limit` are returned.
+
+    The lib uses a count-based heuristic: `has_more` is True only when
+    the number of returned items equals `per_page`. Returning fewer items
+    than the limit means the page is the last one.
+    """
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/pulls":
+            # 2 items returned, per_page=30 (default limit) → 2 < 30 → has_more=False.
+            return _json([_pr_payload(1), _pr_payload(2)])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_prs"](project_id="acme")
+    assert "error" not in result, result
+    assert result["has_more"] is False
+
+
+def test_list_prs_has_more_true_when_page_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_prs response has `has_more=True` when the provider returns exactly `limit` items.
+
+    GitHub's /pulls endpoint does not expose a Link header that the lib
+    reads — instead, `list_prs` uses a count-based heuristic: if the
+    number of returned items equals `per_page`, `has_more` is True.
+    We use `limit=2` and return exactly 2 PRs to trigger the flag.
+    """
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/pulls":
+            # Return exactly `per_page` (= limit=2) items — triggers has_more.
+            return _json([_pr_payload(1), _pr_payload(2)])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_prs"](project_id="acme", limit=2)
+    assert "error" not in result, result
+    assert result["has_more"] is True
+
+
 # ---------- create_pr -------------------------------------------------------
 
 

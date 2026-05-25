@@ -430,7 +430,11 @@ def test_github_remove_relation_duplicate_of_reopens(
     GitHubProvider().remove_relation(
         _github_project(), "tok", "5", "duplicate_of", "#7",
     )
-    assert captured["body"] == {"state": "open"}
+    # v0.1.6: remove_relation for duplicate_of now also rewrites the body
+    # (strips the "Duplicate of #N" marker and re-applies the AI marker) in
+    # the same PATCH request that reopens the issue.
+    assert captured["body"]["state"] == "open"  # type: ignore[index]
+    assert captured["body"]["body"].startswith("#ai-")  # type: ignore[union-attr]
 
 
 # ---------- GitHub: relates_to unsupported ----------------------------------

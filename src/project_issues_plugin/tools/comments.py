@@ -3,9 +3,9 @@
 Mirrors the shape of `tools/tickets.py`:
   - read-only ops (`list_comments`, `get_comment`) only require a token
     when the repo is private; no permission flag is needed.
-  - write ops (`update_comment`) are gated by the project's
-    `issues.modify` permission, the same flag that gates `update_ticket`
-    and `add_comment`.
+  - write ops (`update_comment`, `delete_comment`) are gated by the
+    project's `issues.modify` permission, the same flag that gates
+    `update_ticket` and `add_comment`.
 
 The AI-marker prefix on `update_comment` is applied transparently by the
 provider — the agent must NOT pass `#ai-generated` itself.
@@ -189,8 +189,53 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_ticket = _normalize_id(project, ticket_id)
+            normalized_comment = _normalize_id(project, comment_id)
             comment = provider.update_comment(
-                project, token, comment_id, body, ticket_id=normalized_ticket,
+                project, token, normalized_comment, body, ticket_id=normalized_ticket,
             )
             return {"project_id": project.id, "comment": asdict(comment)}
+        return _safe(go)
+
+    @mcp.tool()
+    def delete_comment(
+        project_id: str,
+        comment_id: str,
+        ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
+    ) -> dict:
+        """Delete an existing comment by id.
+
+        `ticket_id` carries consistent semantics across providers:
+          - GitHub: unused (comment ids are repo-wide). May be omitted
+            or set to `None`.
+          - GitLab: required when `comment_id` is a bare note id (as
+            returned by `add_comment`). Composite `"<iid>/<note_id>"`
+            in `comment_id` keeps working too — `ticket_id` is then
+            ignored.
+          - Azure DevOps: always required — work-item comment ids are
+            scoped to a work item (`workItems/{ticket_id}/comments/
+            {comment_id}`); omitting it returns a structured error.
+
+        Requires the project's `issues.modify` permission.
+
+        Returns `{"project_id": ..., "deleted": True, "comment_id": ...}`
+        on success. Raises a structured 404 error if the comment does not
+        exist.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            _require_issues_modify(project)
+            token = _require_token(project)
+            provider = _provider_for(project)
+            normalized_ticket = _normalize_id(project, ticket_id)
+            normalized_comment = _normalize_id(project, comment_id)
+            try:
+                provider.delete_comment(
+                    project, token, normalized_comment, ticket_id=normalized_ticket,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="comment",
+                    ident=normalized_comment,
+                )
+            return {"project_id": project.id, "deleted": True, "comment_id": normalized_comment}
         return _safe(go)

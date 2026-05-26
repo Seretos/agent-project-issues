@@ -348,6 +348,80 @@ def test_list_pipeline_runs_ticket_no_linked_refs_returns_hint(
     assert "no linked PR/branch" in result["hint"]
 
 
+# ---------- list_pipeline_runs: recent ---------------------------------------
+
+
+def test_list_pipeline_runs_recent_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recent=True with no other args lists runs without ref filter."""
+    tools = _register_tools_with(monkeypatch, _project())
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            captured["per_page"] = req.url.params.get("per_page", "")
+            # Must not have branch or head_sha filter.
+            assert "branch" not in req.url.params, "branch param should not be set for recent mode"
+            assert "head_sha" not in req.url.params, "head_sha param should not be set for recent mode"
+            return _json({
+                "workflow_runs": [
+                    _run_payload(9001),
+                    _run_payload(9002),
+                ]
+            })
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](project_id="acme", recent=True, limit=5)
+    assert "error" not in result, result
+    assert result["addressed_by"] == "recent"
+    assert result["resolved_refs"] is None
+    assert [r["id"] for r in result["runs"]] == ["9001", "9002"]
+    assert captured["per_page"] == "5"
+
+
+def test_list_pipeline_runs_recent_with_status_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recent=True with status='completed' passes the status filter to provider."""
+    tools = _register_tools_with(monkeypatch, _project())
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    captured: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            captured["status"] = req.url.params.get("status", "")
+            return _json({"workflow_runs": [_run_payload(9003)]})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](
+        project_id="acme", recent=True, status="completed"
+    )
+    assert "error" not in result, result
+    assert result["addressed_by"] == "recent"
+    assert captured["status"] == "completed"
+
+
+def test_list_pipeline_runs_recent_plus_branch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recent=True combined with branch= is an error (exactly one addressing arg)."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](
+        project_id="acme", recent=True, branch="main"
+    )
+    assert "error" in result
+    assert "exactly one" in result["error"]
+
+
 # ---------- get_pipeline_run -------------------------------------------------
 
 

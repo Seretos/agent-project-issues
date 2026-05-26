@@ -1,9 +1,9 @@
 """Pipeline / CI-run tools exposed to the agent.
 
-Single unified `list_pipeline_runs` with four addressing modes
-(`branch` / `tag` / `commit_sha` / `ticket_id`) plus a `get_pipeline_run`
-detail tool that can also surface failure context (annotations + log
-excerpt) for failed runs.
+Single unified `list_pipeline_runs` with five addressing modes
+(`branch` / `tag` / `commit_sha` / `ticket_id` / `recent`) plus a
+`get_pipeline_run` detail tool that can also surface failure context
+(annotations + log excerpt) for failed runs.
 
 All reads are token-gated only; there is no permission flag (mirrors
 `list_tickets` / `get_ticket` / `list_prs`).
@@ -34,10 +34,11 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_pipeline_runs(
         project_id: str,
-        branch: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Filter runs by branch name (e.g. 'main').")] = None,
-        tag: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Resolves tag to commit SHA, then lists runs for that SHA.")] = None,
-        commit_sha: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Lists runs filtered by head_sha.")] = None,
-        ticket_id: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Walks the ticket's timeline to collect head_shas and aggregates runs.")] = None,
+        branch: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set. Filter runs by branch name (e.g. 'main').")] = None,
+        tag: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set. Resolves tag to commit SHA, then lists runs for that SHA.")] = None,
+        commit_sha: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set. Lists runs filtered by head_sha.")] = None,
+        ticket_id: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set. Walks the ticket's timeline to collect head_shas and aggregates runs.")] = None,
+        recent: Annotated[bool, Field(description="One-of addressing argument. When True (and no other addressing arg is set), lists the most recent runs across the project with no ref filter. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set.")] = False,
         status: Literal["queued", "in_progress", "completed", "all"] = "all",
         limit: int = 10,
     ) -> dict:
@@ -51,6 +52,10 @@ def register(mcp: FastMCP) -> None:
             collect head_shas, then aggregates runs across them. When a
             ticket has no linked PR / branch, returns `runs=[]` and a
             `hint` asking the user for a branch or commit.
+          - `recent`: when `True`, lists the most recent runs across the
+            project with no ref filter. Use this when you have no branch,
+            tag, commit, or ticket to anchor on and just need to see the
+            latest CI activity.
 
         `status` filters runs by run-status (`queued` / `in_progress` /
         `completed`); `"all"` (default) returns runs regardless of state.
@@ -60,7 +65,7 @@ def register(mcp: FastMCP) -> None:
         ```
         {
           "project_id": str,
-          "addressed_by": "branch"|"tag"|"commit"|"ticket",
+          "addressed_by": "branch"|"tag"|"commit"|"ticket"|"recent",
           "resolved_refs": list | None,  # only set for tag/ticket modes
           "runs": [PipelineRun, ...],
           "hint": str | None,
@@ -82,11 +87,13 @@ def register(mcp: FastMCP) -> None:
             "ticket_id": ticket_id,
         }
         set_args = [k for k, v in addr_args.items() if v]
+        if recent:
+            set_args.append("recent")
         if len(set_args) == 0:
             return {
                 "error": (
                     "list_pipeline_runs requires exactly one of "
-                    "branch/tag/commit_sha/ticket_id."
+                    "branch/tag/commit_sha/ticket_id/recent."
                 )
             }
         if len(set_args) > 1:
@@ -104,7 +111,12 @@ def register(mcp: FastMCP) -> None:
             hint: str | None = None
             resolved_refs: list[str] | None = None
 
-            if branch:
+            if recent:
+                runs, _ = provider.list_runs_recent(
+                    project, token, status=status, limit=limit
+                )
+                addressed_by = "recent"
+            elif branch:
                 runs, _ = provider.list_runs_for_branch(
                     project, token, branch, status=status, limit=limit
                 )

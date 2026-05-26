@@ -189,8 +189,9 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_ticket = _normalize_id(project, ticket_id)
+            normalized_comment = _normalize_id(project, comment_id)
             comment = provider.update_comment(
-                project, token, comment_id, body, ticket_id=normalized_ticket,
+                project, token, normalized_comment, body, ticket_id=normalized_ticket,
             )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)

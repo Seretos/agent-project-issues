@@ -67,6 +67,29 @@ def test_normalize_id_rejects_wrong_type():
         normalize_id([1, 2], _github_project())  # type: ignore[arg-type]
 
 
+# ---------- normalize_id: GitLab composite comment id -----------------------
+
+
+def test_normalize_id_passes_through_gitlab_composite():
+    # `<iid>/<note_id>` is the self-contained comment-id form get/update/
+    # delete_comment document; it must survive normalisation unchanged.
+    assert normalize_id("5/123", _gitlab_project()) == "5/123"
+
+
+def test_normalize_id_composite_trims_inner_whitespace():
+    assert normalize_id("  5 / 123  ", _gitlab_project()) == "5/123"
+
+
+def test_normalize_id_rejects_three_segment_path():
+    with pytest.raises(ValueError, match="bare number"):
+        normalize_id("1/2/3", _gitlab_project())
+
+
+def test_normalize_id_rejects_non_numeric_composite():
+    with pytest.raises(ValueError, match="bare number"):
+        normalize_id("a/b", _gitlab_project())
+
+
 # ---------- normalize_id: GitHub URLs ---------------------------------------
 
 

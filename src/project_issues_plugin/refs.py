@@ -200,6 +200,7 @@ def normalize_id(raw: str | int | None, project: ProjectConfig) -> str | None:
     Accepted shapes:
       - bare numeric: `12`, `"12"`              → `"12"`
       - hash-prefixed: `"#12"`, `"  #12  "`     → `"12"`
+      - GitLab composite comment id `"5/123"`    → `"5/123"` (pass-through)
       - GitHub issue/PR URL                      → `"12"`
       - GitLab issue / work-item / MR URL        → `"12"`
     """
@@ -229,10 +230,18 @@ def normalize_id(raw: str | int | None, project: ProjectConfig) -> str | None:
         return result
     if stripped.startswith("#"):
         stripped = stripped[1:].strip()
+    # GitLab composite comment id "<iid>/<note_id>" (both numeric): pass it
+    # through unchanged so the provider's composite parsing handles it —
+    # get/update/delete_comment document this self-contained form. It is not
+    # a valid ticket/PR id, but passing it through (rather than raising) is
+    # harmless there: the provider just returns a clean 404.
+    composite = [seg.strip() for seg in stripped.split("/")]
+    if len(composite) == 2 and all(seg.isdigit() for seg in composite):
+        return "/".join(composite)
     if not stripped.isdigit():
         raise ValueError(
             f"id {raw!r} could not be normalised — expected a bare number, "
-            "'#N', or a full issue/PR URL"
+            "'#N', a '<iid>/<note_id>' comment id, or a full issue/PR URL"
         )
     return stripped
 

@@ -528,6 +528,38 @@ def test_delete_comment_tool_404_echoes_id(monkeypatch: pytest.MonkeyPatch) -> N
     assert "777" in result["error"]
 
 
+def test_update_comment_tool_normalizes_comment_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `#`-prefixed comment id is normalised before reaching the provider
+    (parity with get_comment/delete_comment). Without normalisation the
+    raw `#777` would corrupt the request path and never match the handler."""
+    project = _project(modify=True)
+    tools = _register_tools_with(monkeypatch, project)
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            return _json(_comment_payload(777, body="human original"))
+        if (
+            req.method == "PATCH"
+            and req.url.path == "/repos/acme/backend/issues/comments/777"
+        ):
+            return _json(_comment_payload(777, body=json.loads(req.content)["body"]))
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    result = tools["update_comment"](
+        project_id="acme", comment_id="#777", body="updated text"
+    )
+    assert "error" not in result, result
+    assert result["comment"]["id"] == "777"
+
+
 def test_update_comment_tool_azure_no_ticket_id_returns_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

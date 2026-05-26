@@ -283,7 +283,7 @@ def register(mcp: FastMCP) -> None:
         # Plain `str` (not Literal) so the tool-layer guard below can
         # produce the merge_pr hint instead of pydantic's generic
         # literal_error wall-of-text (ticket #48 finding 9).
-        status: str | None = None,
+        status: Annotated[str | None, Field(description="Accepted values: 'open' (reopen) or 'closed' (close without merging). Must not be 'merged' — use merge_pr instead. Kept as str (not Literal) so invalid values return a friendly error rather than a Pydantic literal_error.")] = None,
         base: str | None = None,
         labels_add: list[str] | None = None,
         labels_remove: list[str] | None = None,
@@ -445,7 +445,7 @@ def register(mcp: FastMCP) -> None:
     def submit_pr_review(
         project_id: str,
         pr_id: str,
-        state: str,
+        state: Annotated[str, Field(description="Required. One of: 'approve', 'request_changes', 'comment'. A non-empty body is required when state is 'request_changes' or 'comment'; optional for 'approve'. Kept as str (not Literal) so invalid values return a friendly error.")],
         body: Annotated[str | None, Field(description="Required when state is 'request_changes' or 'comment'; optional for 'approve'. Do not prepend '#ai-generated' — added automatically.")] = None,
         commit_sha: str | None = None,
     ) -> dict:

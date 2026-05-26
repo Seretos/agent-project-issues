@@ -81,6 +81,23 @@ def test_update_comment_ticket_id_description_mentions_azure():
 
 
 # ---------------------------------------------------------------------------
+# comments.delete_comment — ticket_id
+# ---------------------------------------------------------------------------
+
+
+def test_delete_comment_ticket_id_description_mentions_gitlab():
+    tools = _register(comment_tools)
+    desc = _param_description(tools["delete_comment"], "ticket_id")
+    assert "GitLab" in desc, f"Expected 'GitLab' in description, got: {desc!r}"
+
+
+def test_delete_comment_ticket_id_description_mentions_azure():
+    tools = _register(comment_tools)
+    desc = _param_description(tools["delete_comment"], "ticket_id")
+    assert "Azure" in desc, f"Expected 'Azure' in description, got: {desc!r}"
+
+
+# ---------------------------------------------------------------------------
 # tickets.add_comment — body
 # ---------------------------------------------------------------------------
 

@@ -47,14 +47,9 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """List tickets across multiple projects in a single call.
 
-        WARNING: `project_ids=None` (the default) fans out to ALL
-        configured projects, including any production projects. Pass
-        explicit `project_ids` for targeted queries to avoid unexpected
-        fan-out to production systems.
-
-        Otherwise restricts to the given ids; unknown ids are surfaced
+        Restricts to the given `project_ids`; unknown ids are surfaced
         as `{"error": "unknown project"}` for that entry rather than
-        raising.
+        raising. Use `list_projects` to discover available project IDs.
 
         Filters (`status`, `labels`, `not_labels`, `assignee`, `author`,
         `search`) and `limit_per_project` are applied per-project with
@@ -84,16 +79,21 @@ def register(mcp: FastMCP) -> None:
         provider's pagination header, indicating whether additional
         pages are available beyond `limit_per_project`.
         """
+        if project_ids is None:
+            return {
+                "error": (
+                    "project_ids is required. Pass an explicit list of project IDs. "
+                    "Use list_projects to discover available IDs."
+                )
+            }
+
         loaded = load_projects(
             config_filename="projects.yml",
             config_filename_alt="projects.yaml",
         )
         all_projects = loaded.projects
 
-        if project_ids is None:
-            target_ids = [p.id for p in all_projects]
-        else:
-            target_ids = list(project_ids)
+        target_ids = list(project_ids)
 
         results: dict[str, dict] = {}
         errors: list[dict] = []

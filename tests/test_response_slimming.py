@@ -291,7 +291,7 @@ def test_bulk_default_limit_lowered_to_10(monkeypatch):
         return _json_response([_issue(1)])
 
     _install_mock(monkeypatch, handler)
-    _ = tools["list_tickets_across_projects"]()
+    _ = tools["list_tickets_across_projects"](project_ids=["acme"])
     assert captured["per_page"] == "10"
 
 
@@ -305,7 +305,7 @@ def test_bulk_explicit_limit_per_project_overrides(monkeypatch):
         return _json_response([_issue(1)])
 
     _install_mock(monkeypatch, handler)
-    _ = tools["list_tickets_across_projects"](limit_per_project=50)
+    _ = tools["list_tickets_across_projects"](project_ids=["acme"], limit_per_project=50)
     assert captured["per_page"] == "50"
 
 
@@ -317,7 +317,7 @@ def test_bulk_omit_body_drops_across_projects(monkeypatch):
         return _json_response([_issue(1, body="payload")])
 
     _install_mock(monkeypatch, handler)
-    result = tools["list_tickets_across_projects"](omit_body=True)
+    result = tools["list_tickets_across_projects"](project_ids=["acme"], omit_body=True)
     for entry in result["results"].values():
         for row in entry["tickets"]:
             assert "body" not in row

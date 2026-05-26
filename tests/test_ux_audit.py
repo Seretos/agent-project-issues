@@ -525,3 +525,140 @@ def test_get_comment_invalid_id_local_short_circuit(monkeypatch):
         project_id="acme", comment_id="not-a-number", ticket_id="5",
     )
     assert "error" in result
+
+
+# ---------- ticket #93: PL7 — get_pipeline_run non-numeric run_id -----------
+
+
+def test_get_pipeline_run_non_numeric_run_id_rejected(monkeypatch):
+    """get_pipeline_run with a non-numeric run_id short-circuits, no HTTP call."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    monkeypatch.setattr(providers_mod, "load_projects", lambda *_a, **_k: (
+        __import__(
+            "lib_python_projects",
+            fromlist=["ProjectsLoadResult"],
+        ).ProjectsLoadResult(
+            projects=[_project()], state="ok", search_root="/tmp",
+        )
+    ))
+    stub = _StubMCP()
+    pipeline_tools.register(stub)
+    tools = stub.tools
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["get_pipeline_run"](project_id="acme", run_id="not-a-number")
+    assert "error" in result
+    assert "numeric" in result["error"]
+
+
+# ---------- ticket #93: D5 — list_tickets_across_projects None project_ids ---
+
+
+def test_list_tickets_across_projects_none_project_ids_rejected(monkeypatch):
+    """list_tickets_across_projects() with no args returns an error, no HTTP."""
+    from project_issues_plugin.tools import bulk as bulk_tools
+
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    monkeypatch.setattr(providers_mod, "load_projects", lambda *_a, **_k: (
+        __import__(
+            "lib_python_projects",
+            fromlist=["ProjectsLoadResult"],
+        ).ProjectsLoadResult(
+            projects=[_project()], state="ok", search_root="/tmp",
+        )
+    ))
+    monkeypatch.setattr(bulk_tools, "load_projects", lambda *_a, **_k: (
+        __import__(
+            "lib_python_projects",
+            fromlist=["ProjectsLoadResult"],
+        ).ProjectsLoadResult(
+            projects=[_project()], state="ok", search_root="/tmp",
+        )
+    ))
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+
+    stub = _StubMCP()
+    bulk_tools.register(stub)
+    result = stub.tools["list_tickets_across_projects"]()
+    assert "error" in result
+    assert "project_ids" in result["error"]
+
+
+def test_list_tickets_across_projects_empty_list_allowed(monkeypatch):
+    """list_tickets_across_projects(project_ids=[]) must succeed with project_count==0."""
+    from project_issues_plugin.tools import bulk as bulk_tools
+
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    monkeypatch.setattr(providers_mod, "load_projects", lambda *_a, **_k: (
+        __import__(
+            "lib_python_projects",
+            fromlist=["ProjectsLoadResult"],
+        ).ProjectsLoadResult(
+            projects=[_project()], state="ok", search_root="/tmp",
+        )
+    ))
+    monkeypatch.setattr(bulk_tools, "load_projects", lambda *_a, **_k: (
+        __import__(
+            "lib_python_projects",
+            fromlist=["ProjectsLoadResult"],
+        ).ProjectsLoadResult(
+            projects=[_project()], state="ok", search_root="/tmp",
+        )
+    ))
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+
+    stub = _StubMCP()
+    bulk_tools.register(stub)
+    result = stub.tools["list_tickets_across_projects"](project_ids=[])
+    assert "error" not in result
+    assert result["project_count"] == 0
+
+
+# ---------- ticket #93: P2 — submit_pr_review invalid state ------------------
+
+
+def test_submit_pr_review_invalid_state_rejected_cleanly(monkeypatch):
+    """submit_pr_review with state='APPROVED' returns a clean error, no HTTP, no literal_error."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, pull_tools)
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["submit_pr_review"](
+        project_id="acme", pr_id="5", state="APPROVED",
+    )
+    assert "error" in result
+    assert "literal_error" not in result["error"]
+    assert "approve" in result["error"]
+
+
+# ---------- ticket #93: P5 — create_pr same head and base -------------------
+
+
+def test_create_pr_same_head_and_base_rejected(monkeypatch):
+    """create_pr with head == base returns an error, no HTTP."""
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+    tools = _register(monkeypatch, pull_tools)
+
+    def handler(req):
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
+
+    _install_github_mock(monkeypatch, handler)
+    result = tools["create_pr"](
+        project_id="acme", title="T", body="B", head="main", base="main",
+    )
+    assert "error" in result
+    assert "head and base must differ" in result["error"]

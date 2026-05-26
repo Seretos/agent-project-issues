@@ -203,6 +203,12 @@ def test_normalize_target_passes_through_cross_repo_gitlab():
     assert normalize_target("group/project!3", project) == "group/project!3"
 
 
+def test_normalize_target_passes_through_gitlab_composite():
+    """`<iid>/<note_id>` has a `/` but no `#`/`!`, so it falls through the
+    cross-repo guard to `normalize_id`, which now passes it through."""
+    assert normalize_target("5/123", _gitlab_project()) == "5/123"
+
+
 def test_normalize_target_returns_none_on_none():
     assert normalize_target(None, _github_project()) is None
 

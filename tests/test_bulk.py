@@ -168,7 +168,9 @@ def test_bulk_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _install_mock(monkeypatch, handler)
 
-    result = tools["list_tickets_across_projects"]()
+    result = tools["list_tickets_across_projects"](
+        project_ids=["proj-ok", "proj-fail", "proj-empty"]
+    )
 
     # All three projects appear in results.
     assert set(result["results"].keys()) == {"proj-ok", "proj-fail", "proj-empty"}
@@ -197,35 +199,25 @@ def test_bulk_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["project_count"] == 3
 
 
-def test_bulk_none_resolves_to_all_configured(
+def test_bulk_none_project_ids_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`project_ids=None` must fan out to every configured project."""
+    """`project_ids=None` (the default) must return an error, not fan out."""
     a = _project("a", repo="repo-a")
     b = _project("b", repo="repo-b")
     tools = _register_tools_with(monkeypatch, [a, b])
 
-    seen_paths: list[str] = []
-
     def handler(req: httpx.Request) -> httpx.Response:
-        seen_paths.append(req.url.path)
-        if req.url.path == "/repos/acme/repo-a/issues":
-            return _json([_issue_payload(10)])
-        if req.url.path == "/repos/acme/repo-b/issues":
-            return _json([_issue_payload(20), _issue_payload(21)])
-        raise AssertionError(f"unexpected request: {req.url}")
+        raise AssertionError(f"unexpected HTTP call: {req.url}")
 
     _install_mock(monkeypatch, handler)
 
     result = tools["list_tickets_across_projects"](project_ids=None)
 
-    assert set(result["results"].keys()) == {"a", "b"}
-    assert result["project_count"] == 2
-    assert result["total_tickets"] == 3
-    assert result["errors"] == []
-    # Both projects were queried.
-    assert "/repos/acme/repo-a/issues" in seen_paths
-    assert "/repos/acme/repo-b/issues" in seen_paths
+    assert "error" in result
+    assert "project_ids" in result["error"]
+    # No results key — the guard fires before any provider call.
+    assert "results" not in result
 
 
 def test_bulk_unknown_project_id_surfaces_error(

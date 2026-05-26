@@ -34,10 +34,10 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_pipeline_runs(
         project_id: str,
-        branch: str | None = None,
-        tag: str | None = None,
-        commit_sha: str | None = None,
-        ticket_id: str | None = None,
+        branch: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Filter runs by branch name (e.g. 'main').")] = None,
+        tag: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Resolves tag to commit SHA, then lists runs for that SHA.")] = None,
+        commit_sha: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Lists runs filtered by head_sha.")] = None,
+        ticket_id: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id must be set. Walks the ticket's timeline to collect head_shas and aggregates runs.")] = None,
         status: Literal["queued", "in_progress", "completed", "all"] = "all",
         limit: int = 10,
     ) -> dict:
@@ -186,6 +186,14 @@ def register(mcp: FastMCP) -> None:
 
         Read-only: no permission flag required.
         """
+        if not run_id.strip().isdigit():
+            return {
+                "error": (
+                    f"run_id must be a numeric string (got {run_id!r}). "
+                    "Obtain from list_pipeline_runs."
+                )
+            }
+
         def go() -> dict:
             project = _resolve(project_id)
             provider = _provider_for(project)

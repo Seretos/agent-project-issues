@@ -260,6 +260,8 @@ def register(mcp: FastMCP) -> None:
         don't. Requires the project's `pulls.create` permission.
         """
         def go() -> dict:
+            if head == base:
+                return {"error": "head and base must differ"}
             project = _resolve(project_id)
             _require_pulls_create(project)
             token = _require_token(project)
@@ -375,11 +377,11 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         pr_id: str,
         body: str,
-        path: str | None = None,
-        line: int | None = None,
+        path: Annotated[str | None, Field(description="New-thread mode: file path in the diff (e.g. 'src/foo.py'). Set together with line and commit_sha. Leave unset in reply mode.")] = None,
+        line: Annotated[int | None, Field(description="New-thread mode: line number in the diff to anchor the comment to. Set together with path and commit_sha. Leave unset in reply mode.")] = None,
         side: Literal["LEFT", "RIGHT"] = "RIGHT",
-        commit_sha: str | None = None,
-        in_reply_to: Annotated[str | None, Field(description="Opaque discussion identifier — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric).")] = None,
+        commit_sha: Annotated[str | None, Field(description="New-thread mode: the commit SHA the comment is anchored to. Set together with path and line. Leave unset in reply mode.")] = None,
+        in_reply_to: Annotated[str | None, Field(description="Reply mode: opaque discussion id from get_pr review_comments — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric). Leave path/line/commit_sha unset.")] = None,
     ) -> dict:
         """Add an inline code-review comment to a pull request.
 
@@ -443,7 +445,7 @@ def register(mcp: FastMCP) -> None:
     def submit_pr_review(
         project_id: str,
         pr_id: str,
-        state: Literal["approve", "request_changes", "comment"],
+        state: str,
         body: Annotated[str | None, Field(description="Required when state is 'request_changes' or 'comment'; optional for 'approve'. Do not prepend '#ai-generated' — added automatically.")] = None,
         commit_sha: str | None = None,
     ) -> dict:
@@ -466,6 +468,10 @@ def register(mcp: FastMCP) -> None:
         should NOT prepend `#ai-generated` themselves. Requires the
         project's `pulls.modify` permission.
         """
+        if state not in ("approve", "request_changes", "comment"):
+            return {
+                "error": "state must be one of: approve, request_changes, comment"
+            }
         if state in ("request_changes", "comment") and not body:
             return {
                 "error": (

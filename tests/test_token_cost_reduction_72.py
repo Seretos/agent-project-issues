@@ -673,15 +673,16 @@ def test_bulk_has_more_true_when_provider_signals_more(monkeypatch):
     assert entry["has_more"] is True
 
 
-def test_bulk_docstring_warns_about_fanout_to_all(monkeypatch):
-    """list_tickets_across_projects docstring must warn about ALL configured
-    projects including production projects."""
+def test_bulk_docstring_describes_targeted_query(monkeypatch):
+    """list_tickets_across_projects docstring must describe targeted-query
+    behaviour (project_ids required) rather than the removed fan-out warning."""
     tools = _get_registered_tools(monkeypatch, bulk_tools)
     doc = tools["list_tickets_across_projects"].__doc__ or ""
-    # Plan requires the docstring to mention ALL and production
-    assert "ALL" in doc or "all" in doc.lower(), (
-        "docstring should warn that project_ids=None fans out to ALL projects"
+    # Docstring should reference project_ids as a required/explicit argument.
+    assert "project_ids" in doc, (
+        "docstring should mention project_ids"
     )
-    assert "production" in doc.lower(), (
-        "docstring should warn about production projects"
+    # Docstring should reference list_projects so users can discover IDs.
+    assert "list_projects" in doc, (
+        "docstring should reference list_projects to discover project IDs"
     )

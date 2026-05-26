@@ -13,6 +13,9 @@ cannot model natively surface as `RelationKindUnsupported`
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Annotated
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -38,7 +41,7 @@ def register(mcp: FastMCP) -> None:
     def add_relation(
         project_id: str,
         ticket_id: str,
-        kind: str,
+        kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix.")],
         target: str,
     ) -> dict:
         """Create a typed relation from `ticket_id` to `target`.
@@ -126,7 +129,7 @@ def register(mcp: FastMCP) -> None:
     def remove_relation(
         project_id: str,
         ticket_id: str,
-        kind: str,
+        kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix.")],
         target: str,
     ) -> dict:
         """Remove a typed relation between `ticket_id` and `target`.

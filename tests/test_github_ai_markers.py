@@ -262,6 +262,9 @@ def test_create_ticket_caller_labels_preserved_when_marker_denied(
 
     def handler(req: httpx.Request) -> httpx.Response:
         path = req.url.path
+        # v0.1.8: _assert_labels_exist GETs each caller-supplied label.
+        if req.method == "GET" and path == "/repos/acme/backend/labels/bug":
+            return _json({"name": "bug"}, status_code=200)
         if req.method == "POST" and path == "/repos/acme/backend/labels":
             return _json({"message": "no permission"}, status_code=403)
         if req.method == "POST" and path == "/repos/acme/backend/issues":

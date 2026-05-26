@@ -381,6 +381,7 @@ def test_merge_pr_succeeds_when_pulls_merge_true(
     tools = _register_tools_with(monkeypatch, _project(pulls_merge=True))
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
     captured_merge: dict[str, object] = {}
+    get_call_count: dict[str, int] = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
         path = req.url.path
@@ -388,6 +389,11 @@ def test_merge_pr_succeeds_when_pulls_merge_true(
             captured_merge["body"] = json.loads(req.content)
             return _json({"merged": True, "message": "Pull Request successfully merged"})
         if req.method == "GET" and path == "/repos/acme/backend/pulls/7":
+            # v0.1.8: first GET is the pre-flight (return open/unmerged so it
+            # proceeds); subsequent GET(s) are the post-merge re-fetch.
+            get_call_count["n"] += 1
+            if get_call_count["n"] == 1:
+                return _json(_pr_payload(7))  # open, not yet merged
             return _json(_pr_payload(7, state="closed", merged=True, merged_at="2024-02-01T00:00:00Z"))
         raise AssertionError(f"unexpected request: {req.method} {req.url}")
 

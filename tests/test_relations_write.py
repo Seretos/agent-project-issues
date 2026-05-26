@@ -153,6 +153,9 @@ def test_github_add_relation_child_posts_sub_issue(
         # Resolve target B's internal id.
         if req.method == "GET" and path == "/repos/acme/backend/issues/7":
             return _json(_gh_issue(7))
+        # v0.1.8 pre-flight: check existing sub-issues before POST.
+        if req.method == "GET" and path == "/repos/acme/backend/issues/5/sub_issues":
+            return _json([])
         if (
             req.method == "POST"
             and path == "/repos/acme/backend/issues/5/sub_issues"
@@ -183,6 +186,9 @@ def test_github_add_relation_parent_swaps_to_child_on_wire(
             return _json(_gh_issue(7))
         if req.method == "GET" and path == "/repos/acme/backend/issues/5":
             return _json(_gh_issue(5))
+        # v0.1.8 pre-flight: check existing sub-issues before POST.
+        if req.method == "GET" and path == "/repos/acme/backend/issues/7/sub_issues":
+            return _json([])
         if (
             req.method == "POST"
             and path == "/repos/acme/backend/issues/7/sub_issues"
@@ -237,6 +243,12 @@ def test_github_add_relation_blocked_by_posts_dependency(
         path = req.url.path
         if req.method == "GET" and path == "/repos/acme/backend/issues/7":
             return _json(_gh_issue(7))
+        # v0.1.8 pre-flight: check existing blocked_by deps before POST.
+        if (
+            req.method == "GET"
+            and path == "/repos/acme/backend/issues/5/dependencies/blocked_by"
+        ):
+            return _json([])
         if (
             req.method == "POST"
             and path == "/repos/acme/backend/issues/5"
@@ -266,6 +278,12 @@ def test_github_add_relation_blocks_swaps_to_blocked_by_on_wire(
             return _json(_gh_issue(7))
         if req.method == "GET" and path == "/repos/acme/backend/issues/5":
             return _json(_gh_issue(5))
+        # v0.1.8 pre-flight: check existing blocked_by deps on B before POST.
+        if (
+            req.method == "GET"
+            and path == "/repos/acme/backend/issues/7/dependencies/blocked_by"
+        ):
+            return _json([])
         if (
             req.method == "POST"
             and path == "/repos/acme/backend/issues/7"
@@ -599,6 +617,9 @@ def test_gitlab_remove_relation_duplicate_of_reopens_and_deletes_link(
             ])
         if req.method == "DELETE" and path.endswith("/issues/5/links/99"):
             return _json({})
+        # v0.1.8: GET current issue body before stripping dup line and PUT reopen.
+        if req.method == "GET" and path.endswith("/issues/5"):
+            return _json(_gl_issue(5, description="Duplicate of #7\n\nsrc body"))
         if req.method == "PUT" and path.endswith("/issues/5"):
             return _json(_gl_issue(5))
         return _json({}, status_code=404)

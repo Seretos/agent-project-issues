@@ -136,10 +136,8 @@ def register(mcp: FastMCP) -> None:
         that doesn't exist raises `{"error": "..."}` rather than a
         silent success so the agent can branch on the failure.
 
-        For `duplicate_of`, removal reopens the source ticket but does
-        NOT strip the `Duplicate of #N` line from the body — history
-        is preserved deliberately. If the caller wants to clean up the
-        body, follow up with `update_ticket(body=...)`.
+        For `duplicate_of`, removal reopens the source ticket and the
+        `Duplicate of #N` line is removed from the body automatically.
 
         Requires the project's `issues.modify` permission.
         """

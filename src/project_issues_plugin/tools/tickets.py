@@ -301,12 +301,14 @@ def register(mcp: FastMCP) -> None:
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When
         supplied, it must be a value from the provider's state-space —
-        the same vocabulary `update_ticket.status` accepts. Use this
-        when importing already-resolved tickets or filing documentation
-        tickets that should be born closed, instead of a two-step
-        create-then-close that emits a spurious `opened → closed` pair
-        in the timeline. Unknown values raise the same error type as
-        `update_ticket` with a hint to call `list_ticket_statuses`.
+        the same vocabulary `update_ticket.status` accepts. Pass the
+        value exactly as returned by `list_ticket_statuses` — do not
+        normalise casing or whitespace. Use this when importing
+        already-resolved tickets or filing documentation tickets that
+        should be born closed, instead of a two-step create-then-close
+        that emits a spurious `opened → closed` pair in the timeline.
+        Unknown values raise the same error type as `update_ticket`
+        with a hint to call `list_ticket_statuses`.
 
         Requires the project's `issues.create` permission.
         """
@@ -350,7 +352,9 @@ def register(mcp: FastMCP) -> None:
         project's process template defines (Basic: `To Do`/`Doing`/`Done`;
         Agile: `New`/`Active`/`Resolved`/`Closed`/`Removed`; Scrum: ...).
         Call `list_ticket_statuses(project_id)` to enumerate the valid
-        values for the current project.
+        values for the current project. Pass these values exactly as
+        returned by `list_ticket_statuses` — do not normalise casing
+        or whitespace (e.g. `"To Do"` must not become `"to do"`).
 
         Agents that don't know the provider's state-space should call
         `list_ticket_statuses(project_id)` first and read
@@ -475,6 +479,9 @@ def register(mcp: FastMCP) -> None:
         given project, especially when the provider has a customisable
         workflow (Azure DevOps, Jira). For GitHub the state-space is
         static so the response is identical for every GitHub project.
+        The strings in `values` are provider-literal (exact casing and
+        whitespace) and must be passed to `update_ticket` or
+        `create_ticket` verbatim — do not normalise casing or whitespace.
 
         Results are cached server-side for ~1h per `(project_id, token)`
         pair (workflow definitions change rarely). Read-only: no

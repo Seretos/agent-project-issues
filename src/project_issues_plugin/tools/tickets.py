@@ -215,13 +215,19 @@ def register(mcp: FastMCP) -> None:
         `comments_fetched: true` alongside the `comments` list.
         When skipped (via `include_comments=False` or
         `comments_limit=0`), the `comments` key is absent and
-        `comments_fetched: false` is emitted instead.
+        `comments_fetched: false` is emitted instead. The
+        `comments_fetched: false` key is present even when the caller
+        explicitly opted out via `include_comments=False` — an
+        intentional confirmation signal, not an oversight.
 
         When `include_relations=False` (or the provider skips the
         relation fetch), the `relations` and `relations_truncated` keys
         are absent and `relations_fetched: false` is emitted. When
         `include_relations=True` (default), `relations_fetched: true`
-        is present alongside the `relations` list.
+        is present alongside the `relations` list. The
+        `relations_fetched: false` key is present even when the caller
+        explicitly opted out via `include_relations=False` — an
+        intentional confirmation signal, not an oversight.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -297,6 +303,13 @@ def register(mcp: FastMCP) -> None:
 
         `body` is optional. When omitted, the ticket is created with an
         empty body. Provide it when the user has supplied a description.
+        `body` must contain real newline characters (U+000A), not the
+        two-character literal sequence `\n`; the server performs no
+        escape-sequence normalisation.
+
+        The server also prepends `#ai-generated\n\n` to the body
+        automatically. Do not prepend it yourself; if you do, the marker
+        is deduplicated (no stacking).
 
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When
@@ -398,7 +411,14 @@ def register(mcp: FastMCP) -> None:
         supplied them (or they didn't change). To re-read the full
         ticket including body, call `get_ticket`. This trim avoids
         re-streaming multi-kB bodies for status-only or label-only
-        updates.
+        updates. Unlike `create_ticket`, which echoes the full ticket
+        including `title` and `body`, this response is intentionally
+        lean — call `get_ticket` if you need those fields after an
+        update.
+
+        When `body` is supplied, it must contain real newline characters
+        (U+000A), not the two-character literal sequence `\n`; the
+        server performs no escape-sequence normalisation.
 
         Requires the project's `issues.modify` permission.
         """

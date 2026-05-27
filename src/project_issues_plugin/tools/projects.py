@@ -397,8 +397,14 @@ def register(mcp: FastMCP) -> None:
 
         Token-cheap knob:
           - `fields="light"`: return only ``{id, provider}`` per project
+            (dropping `description` / `path` / `web_url` / `permissions`)
             and omit the ``runtime`` block. Useful for quickly obtaining
-            a list of project IDs to pass to other tools.
+            a list of project IDs to pass to other tools. Prefer this
+            over `find_projects(query="", fields="light")` when you just
+            want every project's id cheaply: `list_projects` returns the
+            full set in one shot with no relevance scoring and no
+            pagination. Use `find_projects` only when you actually want
+            ranking or a bounded `limit`.
           - `fields="full"` (default): full behaviour as described above.
         """
         result = load_projects(
@@ -432,9 +438,25 @@ def register(mcp: FastMCP) -> None:
         **Query behavior:**
           - Empty or whitespace-only query returns **all** projects
             (alphabetical by id), each with `score: 0`. Use this to
-            enumerate without a separate `list_projects` call.
+            enumerate without a separate `list_projects` call — though
+            for a plain unranked dump of every project, `list_projects`
+            (non-paginated, no `limit`) is the simpler choice. Reach for
+            `find_projects` when you want relevance ranking or a bounded
+            `limit` over a large set.
           - Non-empty query → fuzzy match by id / description / path,
             sorted by relevance descending.
+
+        **Interpreting `score` (this is a FUZZY matcher — read before
+        treating a match as real):** a non-empty query can return
+        incidental low-score hits — e.g. the query and an unrelated
+        project sharing a common sub-token like "project". Higher is
+        more confident: `>= 300` means the query is a substring of the
+        id; `>= 200` a substring of the path; a score `< 100` is usually
+        an incidental description / sub-token hit rather than a real
+        match. So "no real match" does NOT reliably show up as an empty
+        `matches` list. For a plain "does project X exist?" check, prefer
+        an exact-id comparison (or enumerate via `list_projects`) instead
+        of relying on `matches` being empty.
 
         **Pagination fields (always present):**
           - `total: int` — total number of candidates before the `limit`

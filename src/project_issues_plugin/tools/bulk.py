@@ -60,6 +60,13 @@ def register(mcp: FastMCP) -> None:
         multiplies the body-row cost, so this is the conservative
         default. Bump it explicitly when you need more.
 
+        There is no aggregate `limit` across projects — only the
+        per-project cap. The total row count can therefore reach
+        `len(project_ids) × limit_per_project`. Bound the fan-out
+        yourself: keep `limit_per_project` low and the `project_ids`
+        list short, and page a single project with `list_tickets` when
+        you need more than the per-project cap from it.
+
         Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row
             across every project. Recommended when enumerating titles

@@ -66,6 +66,7 @@ def register(mcp: FastMCP) -> None:
         {
           "project_id": str,
           "addressed_by": "branch"|"tag"|"commit"|"ticket"|"recent",
+            # "commit" corresponds to the commit_sha input param
           "resolved_refs": list | None,  # only set for tag/ticket modes
           "runs": [PipelineRun, ...],
           "hint": str | None,

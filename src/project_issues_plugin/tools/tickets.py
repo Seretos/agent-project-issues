@@ -113,8 +113,16 @@ def register(mcp: FastMCP) -> None:
             longer than N.
           - `omit_nulls=True`: drop top-level keys whose value is ``None``
             from every row (shallow strip — nested dicts are preserved
-            intact). Combine with `omit_body=True` for the
-            minimum-payload recipe when scanning titles / labels only.
+            intact). Note: a ticket row's top-level fields (`id`, `title`,
+            `body`, `status`, `author`, `assignees`, `labels`, `url`,
+            `created_at`, `updated_at`) are normally all populated, so
+            this knob is usually a no-op for `list_tickets` — `omit_body`
+            is the lever that actually shrinks ticket payloads. It earns
+            its keep on row shapes that carry genuinely optional fields
+            (e.g. `list_prs`, whose `mergeable` / `mergeable_state` /
+            `merge_commit_sha` can be `null`). Combine with
+            `omit_body=True` for the minimum-payload recipe when scanning
+            titles / labels only.
 
         Routing caveat: when any of `not_labels`, `author`,
         `created_*`, `updated_*`, or `search` is set, the provider
@@ -187,6 +195,19 @@ def register(mcp: FastMCP) -> None:
         For outgoing relations parsed from the queried ticket's own body
         (`mentions`, `closes`, `duplicate_of`) we don't fetch the target,
         so `title` may be empty and `state` may be `""`.
+
+        Each relation carries `resolved` (`bool | null`), which records
+        HOW the relation's metadata was obtained — it is NOT a flag for
+        whether the linked ticket is closed:
+          - `true`  — the target was fetched live from the provider, so
+            `title` / `url` / `state` are populated and current.
+          - `false` — the relation was inferred from body / text, so
+            empty `title` / `url` / `state` are expected. Empty here
+            means "intentionally not fetched", NOT "fetch failed".
+          - `null`  — liveness is unknown (the provider didn't signal).
+        So a body-parsed `duplicate_of` reading `resolved: false,
+        state: ""` is the normal, complete answer — do not retry it as
+        if the lookup had failed.
         The boolean `relations_truncated` is true when the underlying
         timeline had more pages than we fetched. The comment-scan depth
         for `mentions` / `closes` is controlled by the
@@ -506,6 +527,15 @@ def register(mcp: FastMCP) -> None:
           }
         }
         ```
+
+        Any `hints` value can be `null` when the workflow has no state
+        that fills that role — e.g. an Azure DevOps process with no
+        dedicated declined/abandoned terminal reports
+        `terminal_declined: null`. A `null` here is a stable fact about
+        the project's workflow ("this process has no such state"), not
+        "unsupported", "misconfigured", or "retry later" — don't call
+        again hoping it resolves. Pick a real value from `values` /
+        `transitions` instead.
 
         Use this to discover what `update_ticket.status` accepts for a
         given project, especially when the provider has a customisable

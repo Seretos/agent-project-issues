@@ -63,10 +63,10 @@ def register(mcp: FastMCP) -> None:
             threads longer than `limit`, the reversed slice covers only
             the FIRST page; pass an explicit `page` to walk older
             comments.
-          - `since`: ISO-8601 timestamp. Comments with `created_at`
-            (GitHub) / `updated_after` (GitLab) at or after this
-            instant are returned. Useful for "what changed since my
-            last check".
+          - `since`: ISO-8601 timestamp. Comments updated at or after
+            this instant are returned — GitHub filters by `updated_at`,
+            GitLab uses `updated_after`. Useful for "what changed since
+            my last check".
           - `page`: 1-based page number; combine with `limit` (=
             per_page). The response carries `has_more: bool` from the
             provider's pagination header (GitHub `Link rel=next`,
@@ -126,8 +126,10 @@ def register(mcp: FastMCP) -> None:
           - GitHub: unused (comment ids are repo-wide). May be omitted
             or set to `None`.
           - GitLab: required when `comment_id` is a bare note id (as
-            returned by `add_comment`). Composite `"<iid>/<note_id>"`
-            in `comment_id` keeps working too — `ticket_id` is then
+            returned by `add_comment`). Prefer passing the bare note
+            id with `ticket_id` set. The composite `"<iid>/<note_id>"`
+            format in `comment_id` is accepted at this layer but may
+            not work correctly in all cases; `ticket_id` is then
             ignored.
           - Azure DevOps: always required — work-item comment ids are
             scoped to a work item (`workItems/{ticket_id}/comments/
@@ -166,8 +168,10 @@ def register(mcp: FastMCP) -> None:
           - GitHub: unused (comment ids are repo-wide). May be omitted
             or set to `None`.
           - GitLab: required when `comment_id` is a bare note id (as
-            returned by `add_comment`). Composite `"<iid>/<note_id>"`
-            in `comment_id` keeps working too — `ticket_id` is then
+            returned by `add_comment`). Prefer passing the bare note
+            id with `ticket_id` set. The composite `"<iid>/<note_id>"`
+            format in `comment_id` is accepted at this layer but may
+            not work correctly in all cases; `ticket_id` is then
             ignored.
           - Azure DevOps: always required — work-item comment ids are
             scoped to a work item (`workItems/{ticket_id}/comments/
@@ -190,9 +194,15 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             normalized_ticket = _normalize_id(project, ticket_id)
             normalized_comment = _normalize_id(project, comment_id)
-            comment = provider.update_comment(
-                project, token, normalized_comment, body, ticket_id=normalized_ticket,
-            )
+            try:
+                comment = provider.update_comment(
+                    project, token, normalized_comment, body, ticket_id=normalized_ticket,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="comment",
+                    ident=normalized_comment,
+                )
             return {"project_id": project.id, "comment": asdict(comment)}
         return _safe(go)
 
@@ -208,8 +218,10 @@ def register(mcp: FastMCP) -> None:
           - GitHub: unused (comment ids are repo-wide). May be omitted
             or set to `None`.
           - GitLab: required when `comment_id` is a bare note id (as
-            returned by `add_comment`). Composite `"<iid>/<note_id>"`
-            in `comment_id` keeps working too — `ticket_id` is then
+            returned by `add_comment`). Prefer passing the bare note
+            id with `ticket_id` set. The composite `"<iid>/<note_id>"`
+            format in `comment_id` is accepted at this layer but may
+            not work correctly in all cases; `ticket_id` is then
             ignored.
           - Azure DevOps: always required — work-item comment ids are
             scoped to a work item (`workItems/{ticket_id}/comments/

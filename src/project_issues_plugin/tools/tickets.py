@@ -73,7 +73,12 @@ def register(mcp: FastMCP) -> None:
         """List tickets in a project. Default: open tickets, limit 30.
 
         Filter args:
-          - `status`: "open" (default), "closed", or "any".
+          - `status`: "open" (default), "closed", or "any". This filter
+            uses a normalised vocabulary that the server maps to
+            provider-native states — do NOT pass Azure DevOps native
+            state names (e.g. `"To Do"`, `"Active"`) here. Use
+            `list_ticket_statuses` to understand the state-space mapping,
+            and pass native values only to `update_ticket`.
           - `labels`: only tickets carrying ALL of these labels.
           - `not_labels`: exclude tickets carrying ANY of these labels
             (e.g. `["test"]` filters out test issues).
@@ -311,6 +316,11 @@ def register(mcp: FastMCP) -> None:
         automatically. Do not prepend it yourself; if you do, the marker
         is deduplicated (no stacking).
 
+        `labels` sets the initial label set as a flat list on creation.
+        To add or remove labels on an existing ticket after creation,
+        use `update_ticket`'s `labels_add` / `labels_remove` parameters
+        instead.
+
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When
         supplied, it must be a value from the provider's state-space —
@@ -380,7 +390,9 @@ def register(mcp: FastMCP) -> None:
         Label and assignee changes are add/remove operations relative to
         the current set; pass arrays of names. The label `ai-modified`
         is added automatically when the ticket wasn't previously
-        `ai-generated`. Do not pass the marker labels yourself.
+        `ai-generated`. Do not pass the marker labels yourself. For
+        initial label assignment at creation time, use `create_ticket`'s
+        `labels` parameter (a flat list, not add/remove).
 
         When `body` is supplied, it is rewritten so the first line is
         exactly one `#ai-*` marker matching the ticket's post-update
@@ -535,6 +547,13 @@ def register(mcp: FastMCP) -> None:
         The body is automatically prefixed with `#ai-generated\\n\\n`.
         Do not add that prefix yourself. Requires the project's
         `issues.modify` permission.
+
+        Warning: the `comment.body` in the response includes the
+        `#ai-generated` prefix prepended by the server. If you pass
+        that body directly to `update_comment`, you must strip the
+        marker first — `update_comment` re-applies the correct marker
+        automatically and will deduplicate it, but relying on that
+        behaviour is fragile.
         """
         def go() -> dict:
             project = _resolve(project_id)

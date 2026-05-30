@@ -16,7 +16,11 @@ Provider color format notes:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
+from typing import Annotated
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
@@ -28,6 +32,37 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _safe,
 )
+
+# GitHub label colors are a bare 6-digit hex string (no leading '#').
+_GITHUB_HEX_COLOR = re.compile(r"^[0-9a-fA-F]{6}$")
+
+
+def _validate_label_name(name: str) -> None:
+    """Reject an empty/whitespace label name before the provider does.
+
+    Without this guard a blank name reaches GitHub and comes back as a
+    raw 422 leaking internal field names (e.g. ``Label.name
+    (missing_field)``); validating here returns a plain rule instead.
+    """
+    if not name or not name.strip():
+        raise ValueError("label name must be non-empty")
+
+
+def _validate_github_color(color: str) -> None:
+    """Reject a malformed GitHub label color before the provider does.
+
+    GitHub wants a bare 6-digit hex string without a leading ``#`` (e.g.
+    ``"ededed"``). A wrong value otherwise surfaces as a raw GitHub 422
+    that leaks internal field names (``Label.color (invalid)``); this
+    restates the documented rule the caller can act on. Only applied to
+    the GitHub provider — GitLab (``#RRGGBB``) and Azure DevOps have
+    their own handling.
+    """
+    if not _GITHUB_HEX_COLOR.match(color):
+        raise ValueError(
+            f"color must be a 6-digit hex string without '#' "
+            f"(e.g. 'ededed') on GitHub; got {color!r}"
+        )
 
 
 def register(mcp: FastMCP) -> None:
@@ -55,6 +90,12 @@ def register(mcp: FastMCP) -> None:
           - GitHub: bare 6-hex string, e.g. ``"ededed"``.
           - GitLab: ``#RRGGBB``, e.g. ``"#ff0000"``.
           - Azure DevOps: always ``""`` (tags have no color concept).
+
+        `description` is always a string. An empty string ``""`` is a
+        sentinel that conflates two cases the payload does not
+        distinguish: "no description set" (GitHub / GitLab) and
+        "descriptions are unsupported" (Azure DevOps, which has no
+        description concept). Treat ``""`` as "absent".
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -107,6 +148,9 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            _validate_label_name(name)
+            if color is not None and project.provider == "github":
+                _validate_github_color(color)
             label = provider.create_label(
                 project, token, name, color=color, description=description,
             )
@@ -119,8 +163,8 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def update_label(
         project_id: str,
-        name: str,
-        new_name: str | None = None,
+        name: Annotated[str, Field(description="Current name of the label to look up. This is NOT changed by the call — to rename, pass the new name as new_name.")],
+        new_name: Annotated[str | None, Field(description="New name for the label (renames it). Leave unset to keep the current name.")] = None,
         color: str | None = None,
         description: str | None = None,
     ) -> dict:
@@ -128,7 +172,10 @@ def register(mcp: FastMCP) -> None:
 
         Requires the project's `issues.modify` permission.
 
-        `name` identifies the label to update (required).
+        `name` is the label's **current** name, used only to look it up
+        — it is never changed by this call. To rename the label, pass the
+        desired name as `new_name`; leave `new_name` unset to keep the
+        current name and only change `color` / `description`.
 
         At least one of `new_name`, `color`, or `description` must be
         supplied; passing none returns ``{"error": "..."}`` without making
@@ -154,6 +201,11 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            _validate_label_name(name)
+            if new_name is not None:
+                _validate_label_name(new_name)
+            if color is not None and project.provider == "github":
+                _validate_github_color(color)
             label = provider.update_label(
                 project, token, name,
                 new_name=new_name, color=color, description=description,

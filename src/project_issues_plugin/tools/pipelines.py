@@ -78,6 +78,13 @@ def register(mcp: FastMCP) -> None:
         match the GitHub Actions `workflow_run` shape. `conclusion` is
         `None` for runs still in progress.
 
+        For a single run's full detail — notably the `run.failure` block
+        (failing jobs, annotations, log excerpt) that only
+        `get_pipeline_run` returns and only for failed runs — pass a
+        row's `id` to `get_pipeline_run`. These two tools document
+        complementary halves of the run shape: the per-run fields here,
+        the failure block there.
+
         Read-only: no permission flag required (token-gated like
         `list_tickets` / `list_prs`).
         """
@@ -163,10 +170,17 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def get_pipeline_run(
         project_id: str,
-        run_id: Annotated[str, Field(description="Numeric string identifying the pipeline run. GitHub: Actions workflow_run id (e.g. '9876543210'); GitLab: pipeline id (e.g. '12345'); Azure DevOps: build id (e.g. '678'). Obtain from list_pipeline_runs.")],
+        run_id: Annotated[str, Field(description="Numeric string identifying the pipeline run. GitHub: Actions workflow_run id (e.g. '9876543210'); GitLab: pipeline id (e.g. '12345'); Azure DevOps: build id (e.g. '678'). Obtain from list_pipeline_runs. The value is numeric but the type is string — always pass it quoted (\"9876543210\"), never as a bare integer.")],
         include_failure_excerpt: bool = True,
     ) -> dict:
         """Get a single pipeline run's details.
+
+        `run_id` is a numeric identifier but is typed as a string —
+        always pass it quoted (e.g. `"9876543210"`), never as a bare
+        integer. The base `run` fields (`name`, `branch`, `head_sha`,
+        `status`, `conclusion`, ...) are documented on
+        `list_pipeline_runs`; this tool adds the `run.failure` block on
+        top.
 
         When `include_failure_excerpt=True` (default) AND the run
         concluded as `failure`, the response also carries a

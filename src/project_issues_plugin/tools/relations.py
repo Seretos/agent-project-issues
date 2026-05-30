@@ -44,10 +44,22 @@ def register(mcp: FastMCP) -> None:
         kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix.")],
         target: str,
     ) -> dict:
-        """Create a typed relation from `ticket_id` to `target`.
+        """Create a typed relation from `ticket_id` (the source) to
+        `target` (the destination).
+
+        Direction matters for the asymmetric kinds. `ticket_id` is
+        always the "from" end and `target` the "to" end:
+          - `blocks`:     `ticket_id` blocks `target`.
+          - `blocked_by`: `ticket_id` is blocked by `target`.
+          - `parent`:     `ticket_id` is the parent of `target`.
+          - `child`:      `ticket_id` is a child of `target`.
+        (`relates_to` and `duplicate_of` read the same either way.)
 
         `kind` is one of: `parent`, `child`, `blocks`, `blocked_by`,
-        `duplicate_of`, `relates_to`. The read-only inverse kinds
+        `duplicate_of`, `relates_to`. Not every provider models every
+        kind — call `list_relation_kinds` for the per-provider support
+        matrix before adding one, rather than discovering gaps via
+        failed calls. The read-only inverse kinds
         (`closed_by`, `duplicated_by`, `mentioned_by`, `mentions`) are
         not directly settable — they emerge from the other side of a
         write or from body content scanned by the read path.
@@ -142,7 +154,14 @@ def register(mcp: FastMCP) -> None:
         For `duplicate_of`, removal reopens the source ticket and the
         `Duplicate of #N` line is removed from the body automatically.
 
+        `kind` accepts the same vocabulary as `add_relation` — call
+        `list_relation_kinds` for the per-provider support matrix.
+
         Requires the project's `issues.modify` permission.
+
+        Returns `{"project_id": str, "removed": true}` on success. (A
+        relation that did not exist surfaces as `{"error": "..."}`
+        rather than a silent `removed: true`.)
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -163,6 +182,11 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_relation_kinds() -> dict:
         """List all relation kinds the write-side tools accept.
+
+        Global — not project-scoped, and takes no arguments. The
+        universal `kinds` vocabulary is identical for every project; the
+        per-provider differences live in `provider_support`. There is no
+        `project_id` parameter.
 
         Response shape:
         ```

@@ -185,6 +185,10 @@ def register(mcp: FastMCP) -> None:
         themselves; if they do, the existing marker line is stripped
         and the correct one is prepended.
 
+        An empty or whitespace-only `body` is rejected before any HTTP
+        call, with the same wording `add_comment` uses
+        (`"comment body must be non-empty"`).
+
         Requires the project's `issues.modify` permission.
         """
         def go() -> dict:
@@ -194,6 +198,11 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             normalized_ticket = _normalize_id(project, ticket_id)
             normalized_comment = _normalize_id(project, comment_id)
+            # Reject empty bodies here so the wording matches add_comment
+            # exactly (the provider's own message differs) and we skip a
+            # doomed round-trip.
+            if not body or not body.strip():
+                raise ValueError("comment body must be non-empty")
             try:
                 comment = provider.update_comment(
                     project, token, normalized_comment, body, ticket_id=normalized_ticket,

@@ -62,7 +62,12 @@ def register(mcp: FastMCP) -> None:
         """List pull requests in a project. Default: open PRs, limit 30.
 
         Filter args:
-          - `status`: "open" (default), "closed", or "any".
+          - `status`: "open" (default), "closed", or "any". `"closed"`
+            also returns merged PRs — GitHub treats a merged PR as a
+            closed one — so a row matched by `status="closed"` may carry
+            `status: "merged"` and `merged: true`. There is no
+            `"merged"` filter value; for closed-but-not-merged only,
+            request `"closed"` and drop rows where `merged` is true.
           - `labels`: only PRs carrying ALL of these labels.
           - `assignee`: only PRs assigned to this user.
           - `head`: filter by source branch (`branch` or `owner:branch`).
@@ -144,6 +149,13 @@ def register(mcp: FastMCP) -> None:
             comments (`/pulls/{n}/comments` on GitHub, positional MR
             discussion notes on GitLab). Each carries `path`, `line`,
             `commit_sha`, and an `in_reply_to` for threaded replies.
+
+        `mergeable` (and `mergeable_state`) can be `null` for a short
+        window right after `create_pr` — and again after a push — because
+        GitHub computes mergeability asynchronously. `null` means "not
+        computed yet", NOT "not mergeable": re-fetch a moment later to
+        get the real `true` / `false` instead of branching on the
+        transient `null`.
 
         Comment-slicing knobs — apply to the discussion `comments`
         list only. They do not affect `review_comments` in any way:
@@ -354,11 +366,15 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def add_pr_comment(project_id: str, pr_id: str, body: str) -> dict:
-        """Add a discussion comment to a pull request.
+        """Add a discussion (issue-style) comment to a pull request.
 
         Uses the shared issue-comments endpoint; the body is
-        automatically prefixed with `#ai-generated\\n\\n`. Inline
-        code-review comments are not supported by this tool.
+        automatically prefixed with `#ai-generated\\n\\n`. This posts a
+        top-level discussion comment — it is NOT anchored to a diff
+        line. To attach a comment to a specific file + line in the PR's
+        diff, or to reply to an existing review thread, use
+        `add_pr_review_comment` instead (the inline / code-review
+        variant).
 
         Requires the project's `pulls.modify` permission.
         """
@@ -461,8 +477,11 @@ def register(mcp: FastMCP) -> None:
             changing approval state (a body is required).
 
         `commit_sha`, when set, pins the review to a specific commit on
-        GitHub (`commit_id`). GitLab doesn't pin reviews to commits and
-        ignores the parameter — passed for surface symmetry.
+        GitHub (`commit_id`). GitLab cannot pin a review to a commit: it
+        ignores `commit_sha` and the returned review always has
+        `commit_sha: null` regardless of what you pass. Only set it for
+        GitHub commit-pinning — it has no effect on GitLab, so don't read
+        the response `commit_sha` there as confirmation.
 
         The review body is marker-prefixed automatically — callers
         should NOT prepend `#ai-generated` themselves. Requires the
@@ -520,6 +539,11 @@ def register(mcp: FastMCP) -> None:
         Requires the project's `pulls.merge` permission. This flag has
         no flat-form equivalent and defaults to False on existing
         configs — the user must explicitly opt in.
+
+        Returns `{"project_id": str, "pull_request": {...}}` where
+        `pull_request` is the full post-merge PR snapshot — the same
+        shape `get_pr` returns — so `merged: true` and
+        `merge_commit_sha` are available without a follow-up `get_pr`.
         """
         def go() -> dict:
             project = _resolve(project_id)

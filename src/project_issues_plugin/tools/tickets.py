@@ -78,7 +78,10 @@ def register(mcp: FastMCP) -> None:
             provider-native states — do NOT pass Azure DevOps native
             state names (e.g. `"To Do"`, `"Active"`) here. Use
             `list_ticket_statuses` to understand the state-space mapping,
-            and pass native values only to `update_ticket`.
+            and pass native values only to `update_ticket`. The values
+            `open`/`closed`/`any` are normalised by this tool — they are
+            NOT valid inputs for `update_ticket` or `create_ticket`, which
+            require provider-native strings from `list_ticket_statuses`.
           - `labels`: only tickets carrying ALL of these labels.
           - `not_labels`: exclude tickets carrying ANY of these labels
             (e.g. `["test"]` filters out test issues).
@@ -312,7 +315,7 @@ def register(mcp: FastMCP) -> None:
     def create_ticket(
         project_id: str,
         title: str,
-        body: str = "",
+        body: Annotated[str, Field(description="Ticket body. Use real U+000A newlines — the literal \\n escape is NOT normalised by the server. The #ai-generated marker is prepended automatically; do not include it.")] = "",
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
         status: str | None = None,
@@ -379,7 +382,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         ticket_id: str,
         title: str | None = None,
-        body: str | None = None,
+        body: Annotated[str | None, Field(description="New body text. Use real U+000A newlines — the literal \\n escape is NOT normalised by the server. The correct #ai-generated/#ai-modified marker is prepended automatically; do not include it.")] = None,
         status: str | None = None,
         labels_add: list[str] | None = None,
         labels_remove: list[str] | None = None,
@@ -567,16 +570,16 @@ def register(mcp: FastMCP) -> None:
     def add_comment(project_id: str, ticket_id: str, body: Annotated[str, Field(description="Comment content. Do not include '#ai-generated' — the server prepends it automatically.")]) -> dict:
         """Add a comment to a ticket.
 
+        CAUTION: do NOT include `#ai-generated` in `body` — the server
+        prepends it automatically. If you are doing a read-modify-write
+        loop (get body → edit → update), you must strip the marker from
+        the stored body before passing it here; `update_comment`
+        re-applies the correct marker and will deduplicate it, but
+        relying on deduplication is fragile.
+
         The body is automatically prefixed with `#ai-generated\\n\\n`.
         Do not add that prefix yourself. Requires the project's
         `issues.modify` permission.
-
-        Warning: the `comment.body` in the response includes the
-        `#ai-generated` prefix prepended by the server. If you pass
-        that body directly to `update_comment`, you must strip the
-        marker first — `update_comment` re-applies the correct marker
-        automatically and will deduplicate it, but relying on that
-        behaviour is fragile.
         """
         def go() -> dict:
             project = _resolve(project_id)

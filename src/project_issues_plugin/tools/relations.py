@@ -42,7 +42,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         ticket_id: str,
         kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix.")],
-        target: str,
+        target: Annotated[str, Field(description="Target issue reference. Preferred form: '#N' (e.g. '#7'). Also accepts a bare integer ('7') or a full issue URL. Cross-repo 'owner/repo#N' references are rejected by the provider.")],
     ) -> dict:
         """Create a typed relation from `ticket_id` (the source) to
         `target` (the destination).

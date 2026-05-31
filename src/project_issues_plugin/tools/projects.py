@@ -1,4 +1,4 @@
-"""list_projects / find_projects — discovery tools for the agent.
+"""list_projects / search_projects — discovery tools for the agent.
 
 These tool responses intentionally do NOT reveal where projects are
 configured or how permissions are stored. The agent only needs to know
@@ -7,7 +7,7 @@ underlying configuration is a privileged detail the user manages.
 
 **Diagnostic fields (ticket #15)**
 
-`list_projects` and `find_projects` carry a top-level `runtime` block
+`list_projects` and `search_projects` carry a top-level `runtime` block
 plus a per-project `token_error` field so agents can diagnose setup
 problems without a separate tool:
 
@@ -339,7 +339,7 @@ def register(mcp: FastMCP) -> None:
         All configured projects are always returned — this tool is not
         paginated and the response carries no `total` or `truncated`
         fields. When you need a relevance-ranked subset or want to apply
-        a `limit`, use `find_projects` instead.
+        a `limit`, use `search_projects` instead.
 
         Each entry has an `id`, `provider`, `path`, `web_url`, and
         `permissions`. A project with `source="git-remote"` was inferred
@@ -400,10 +400,10 @@ def register(mcp: FastMCP) -> None:
             (dropping `description` / `path` / `web_url` / `permissions`)
             and omit the ``runtime`` block. Useful for quickly obtaining
             a list of project IDs to pass to other tools. Prefer this
-            over `find_projects(query="", fields="light")` when you just
+            over `search_projects(query="", fields="light")` when you just
             want every project's id cheaply: `list_projects` returns the
             full set in one shot with no relevance scoring and no
-            pagination. Use `find_projects` only when you actually want
+            pagination. Use `search_projects` only when you actually want
             ranking or a bounded `limit`.
           - `fields="full"` (default): full behaviour as described above.
         """
@@ -425,7 +425,7 @@ def register(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
-    def find_projects(
+    def search_projects(
         query: str,
         limit: int = 10,
         fields: Literal["full", "light"] = "full",
@@ -441,7 +441,7 @@ def register(mcp: FastMCP) -> None:
             enumerate without a separate `list_projects` call — though
             for a plain unranked dump of every project, `list_projects`
             (non-paginated, no `limit`) is the simpler choice. Reach for
-            `find_projects` when you want relevance ranking or a bounded
+            `search_projects` when you want relevance ranking or a bounded
             `limit` over a large set.
           - Non-empty query → fuzzy match by id / description / path,
             sorted by relevance descending.
@@ -481,7 +481,8 @@ def register(mcp: FastMCP) -> None:
         Token-cheap knob:
           - `fields="light"`: return only ``{id, provider, score}`` per
             match and omit the ``runtime`` block. Useful when you only
-            need project IDs.
+            need project IDs. Prefer `list_projects(fields="light")` when
+            you want every project cheaply without ranking.
           - `fields="full"` (default): full behaviour as described above.
         """
         result = load_projects(

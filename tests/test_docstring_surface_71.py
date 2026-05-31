@@ -333,8 +333,8 @@ def test_list_projects_docstring_not_paginated_note(monkeypatch):
     assert (
         "not paginated" in doc
         or ("total" in doc and "truncated" in doc)
-        or "find_projects" in doc
-    ), "list_projects docstring should mention that it is not paginated or reference find_projects"
+        or "search_projects" in doc
+    ), "list_projects docstring should mention that it is not paginated or reference search_projects"
 
 
 def test_add_pr_review_comment_docstring_mentions_add_pr_comment(monkeypatch):

@@ -242,7 +242,7 @@ def test_update_label_github_happy_path(monkeypatch: pytest.MonkeyPatch) -> None
     _install_github_mock(monkeypatch, handler)
 
     result = tools["update_label"](
-        project_id="acme", name="bug", new_name="bug-fixed", color="00ff00"
+        project_id="acme", current_name="bug", new_name="bug-fixed", color="00ff00"
     )
     assert "error" not in result, result
     assert result["project_id"] == "acme"
@@ -301,7 +301,7 @@ def test_update_label_no_modify_permission(monkeypatch: pytest.MonkeyPatch) -> N
 
     _install_github_mock(monkeypatch, handler)
 
-    result = tools["update_label"](project_id="acme", name="bug", new_name="defect")
+    result = tools["update_label"](project_id="acme", current_name="bug", new_name="defect")
     assert "error" in result
     assert "modify" in result["error"].lower() or "permission" in result["error"].lower()
 
@@ -352,7 +352,7 @@ def test_update_label_no_fields_supplied_returns_error(monkeypatch: pytest.Monke
 
     _install_github_mock(monkeypatch, handler)
 
-    result = tools["update_label"](project_id="acme", name="bug")
+    result = tools["update_label"](project_id="acme", current_name="bug")
     assert "error" in result
     # The ValueError message mentions the missing fields.
     assert "new_name" in result["error"] or "at least one" in result["error"]
@@ -426,7 +426,7 @@ def test_ado_update_label_unsupported_returns_error(monkeypatch: pytest.MonkeyPa
 
     _install_ado_mock(monkeypatch, handler)
 
-    result = tools["update_label"](project_id="acme-ado", name="mytag", new_name="newtag")
+    result = tools["update_label"](project_id="acme-ado", current_name="mytag", new_name="newtag")
     assert "error" in result
     assert "not supported" in result["error"] or "unsupported" in result["error"].lower()
 

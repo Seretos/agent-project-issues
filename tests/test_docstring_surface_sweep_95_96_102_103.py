@@ -237,7 +237,7 @@ def test_update_label_bad_github_color_rejected_no_http(monkeypatch):
         raise AssertionError(f"unexpected HTTP call: {req.url}")
 
     _install_github_mock(monkeypatch, handler)
-    result = tools["update_label"](project_id="acme", name="bug", color="xyz123zzz")
+    result = tools["update_label"](project_id="acme", current_name="bug", color="xyz123zzz")
     assert "error" in result
     assert "6-digit hex" in result["error"]
 
@@ -376,23 +376,23 @@ def test_add_pr_comment_docstring_references_review_comment():
 
 
 # ===========================================================================
-# #96 / #103 — list_projects <-> find_projects boundary (D2, D3) and
-# find_projects score semantics (D1)
+# #96 / #103 — list_projects <-> search_projects boundary (D2, D3) and
+# search_projects score semantics (D1)
 # ===========================================================================
 
 
-def test_list_projects_docstring_cross_references_find_projects():
+def test_list_projects_docstring_cross_references_search_projects():
     doc = _project_tools["list_projects"].__doc__ or ""
-    assert "find_projects" in doc
+    assert "search_projects" in doc
 
 
-def test_find_projects_docstring_cross_references_list_projects():
-    doc = _project_tools["find_projects"].__doc__ or ""
+def test_search_projects_docstring_cross_references_list_projects():
+    doc = _project_tools["search_projects"].__doc__ or ""
     assert "list_projects" in doc
 
 
-def test_find_projects_docstring_explains_score_bands():
-    doc = _project_tools["find_projects"].__doc__ or ""
+def test_search_projects_docstring_explains_score_bands():
+    doc = _project_tools["search_projects"].__doc__ or ""
     assert "score" in doc.lower()
     # Must warn that fuzzy matching yields incidental matches / non-empty.
     assert "incidental" in doc.lower() or "sub-token" in doc.lower()
@@ -424,9 +424,9 @@ def test_get_pipeline_run_run_id_description_says_quote_it():
 
 
 def test_update_label_name_description_clarifies_vs_new_name():
-    desc = _param_description(_label_tools["update_label"], "name")
+    desc = _param_description(_label_tools["update_label"], "current_name")
     assert "new_name" in desc
-    assert "not changed" in desc.lower() or "look it up" in desc.lower()
+    assert "never mutated" in desc.lower() or "lookup" in desc.lower() or "look up" in desc.lower()
 
 
 # ===========================================================================

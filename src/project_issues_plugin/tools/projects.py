@@ -517,6 +517,11 @@ def register(mcp: FastMCP) -> None:
                     "No projects matched the query. "
                     "Use list_projects to see all available projects."
                 )
+            if result.state == "ok" and truncated:
+                hint = (
+                    "Results were truncated — increase `limit` or use "
+                    "`list_projects` to see all projects."
+                )
             return {
                 "query": query,
                 "matches": results,
@@ -551,6 +556,11 @@ def register(mcp: FastMCP) -> None:
             hint = (
                 "No projects matched the query. "
                 "Use list_projects to see all available projects."
+            )
+        if result.state == "ok" and truncated:
+            hint = (
+                "Results were truncated — increase `limit` or use "
+                "`list_projects` to see all projects."
             )
         return {
             "query": query,

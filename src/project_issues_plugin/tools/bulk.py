@@ -128,6 +128,8 @@ def register(mcp: FastMCP) -> None:
                     omit_body=omit_body,
                     body_max_chars=body_max_chars,
                 )
+                for row in ticket_dicts:
+                    row["project_id"] = pid
                 results[pid] = {
                     "tickets": ticket_dicts,
                     "has_more": _has_more,

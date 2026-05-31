@@ -405,6 +405,56 @@ def test_list_pipeline_runs_recent_with_status_passthrough(
     assert captured["status"] == "completed"
 
 
+def test_list_pipeline_runs_recent_empty_returns_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recent=True with no runs returned must populate hint mentioning CI/workflow
+    (ticket #118 fix 6)."""
+    tools = _register_tools_with(monkeypatch, _project())
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            return _json({"workflow_runs": []})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](project_id="acme", recent=True)
+    assert "error" not in result, result
+    assert result["addressed_by"] == "recent"
+    assert result["runs"] == []
+    assert result["hint"] is not None
+    assert any(word in result["hint"] for word in ("CI", "workflow", "workflows"))
+
+
+def test_list_pipeline_runs_recent_empty_with_status_filter_no_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recent=True with a specific status filter (e.g. 'completed') and no
+    matching runs must NOT set hint — the empty list is a legitimate result
+    of the filter, not evidence of missing CI configuration (ticket #118 Fix 6
+    guard)."""
+    tools = _register_tools_with(monkeypatch, _project())
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            return _json({"workflow_runs": []})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](
+        project_id="acme", recent=True, status="completed"
+    )
+    assert "error" not in result, result
+    assert result["addressed_by"] == "recent"
+    assert result["runs"] == []
+    # hint must be absent when a status filter is active
+    assert result["hint"] is None, (
+        f"hint should be None for filtered-empty results, got: {result['hint']!r}"
+    )
+
+
 def test_list_pipeline_runs_recent_plus_branch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

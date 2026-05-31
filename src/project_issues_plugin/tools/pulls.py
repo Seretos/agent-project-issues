@@ -88,6 +88,10 @@ def register(mcp: FastMCP) -> None:
             ``omit_body=True`` for the minimum-payload recipe when
             scanning titles / labels only.
 
+        Note: `mergeable` and `mergeable_state` are always `null` in
+        list results — these fields are only computed on single-PR
+        fetches. Use `get_pr` for authoritative mergeability.
+
         Routing caveat: when `labels`, `assignee`, or `search` are set
         the provider switches from the cheap `/repos/.../pulls` endpoint
         to GitHub's Search API (`/search/issues`, `is:pr` qualifier),

@@ -423,31 +423,31 @@ def register(mcp: FastMCP) -> None:
         the existing marker line is stripped and the correct one is
         prepended (no stacking).
 
-        **Response shape:** lean by design. The returned `ticket` object
-        contains only fields the agent typically needs after an update:
+        **Response shape:** mirrors `create_ticket` — returns the full
+        `ticket` object as echoed by the provider after the update:
 
         ```
         {
           "project_id": str,
           "ticket": {
             "id":         str,
+            "title":      str,
+            "body":       str,
             "status":     str,
+            "author":     str,
             "labels":     [str, ...],
             "assignees":  [str, ...],
             "url":        str,
+            "created_at": str,
             "updated_at": str,
           }
         }
         ```
 
-        `title` and `body` are NOT echoed back — the caller already
-        supplied them (or they didn't change). To re-read the full
-        ticket including body, call `get_ticket`. This trim avoids
-        re-streaming multi-kB bodies for status-only or label-only
-        updates. Unlike `create_ticket`, which echoes the full ticket
-        including `title` and `body`, this response is intentionally
-        lean — call `get_ticket` if you need those fields after an
-        update.
+        All fields from the provider's post-update `Ticket` dataclass
+        are echoed back, including `title` and `body`. Server-side
+        mutations (e.g. auto-prepended `#ai-modified` marker in `body`,
+        auto-added `ai-modified` label) are reflected in the response.
 
         When `body` is supplied, it must contain real newline characters
         (U+000A), not the two-character literal sequence `\n`; the
@@ -496,14 +496,7 @@ def register(mcp: FastMCP) -> None:
                 )
             return {
                 "project_id": project.id,
-                "ticket": {
-                    "id": ticket.id,
-                    "status": ticket.status,
-                    "labels": list(ticket.labels),
-                    "assignees": list(ticket.assignees),
-                    "url": ticket.url,
-                    "updated_at": ticket.updated_at,
-                },
+                "ticket": asdict(ticket),
             }
         return _safe(go)
 

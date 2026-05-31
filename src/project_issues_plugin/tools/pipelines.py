@@ -124,6 +124,11 @@ def register(mcp: FastMCP) -> None:
                     project, token, status=status, limit=limit
                 )
                 addressed_by = "recent"
+                if not runs and status == "all":
+                    hint = (
+                        "no recent workflow runs found — the project may "
+                        "have no CI workflows configured"
+                    )
             elif branch:
                 runs, _ = provider.list_runs_for_branch(
                     project, token, branch, status=status, limit=limit

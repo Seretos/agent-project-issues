@@ -220,6 +220,46 @@ def test_bulk_none_project_ids_rejected(
     assert "results" not in result
 
 
+def test_bulk_tickets_carry_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each ticket row in a bulk response must have `project_id` equal to
+    its containing project key (ticket #118 fix 5)."""
+    proj_a = _project("proj-a", repo="repo-a")
+    proj_b = _project("proj-b", repo="repo-b")
+
+    tools = _register_tools_with(monkeypatch, [proj_a, proj_b])
+
+    monkeypatch.setenv("GITHUB_TOKEN_PROJ-A", "tok-a")
+    monkeypatch.setenv("GITHUB_TOKEN_PROJ-B", "tok-b")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/repo-a/issues":
+            return _json([
+                _issue_payload(10, title="alpha"),
+                _issue_payload(11, title="beta"),
+            ])
+        if path == "/repos/acme/repo-b/issues":
+            return _json([
+                _issue_payload(20, title="gamma"),
+            ])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    result = tools["list_tickets_across_projects"](
+        project_ids=["proj-a", "proj-b"]
+    )
+
+    for ticket in result["results"]["proj-a"]["tickets"]:
+        assert ticket["project_id"] == "proj-a", (
+            f"expected project_id='proj-a', got {ticket.get('project_id')!r}"
+        )
+    for ticket in result["results"]["proj-b"]["tickets"]:
+        assert ticket["project_id"] == "proj-b", (
+            f"expected project_id='proj-b', got {ticket.get('project_id')!r}"
+        )
+
+
 def test_bulk_unknown_project_id_surfaces_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

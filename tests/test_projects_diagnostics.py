@@ -756,3 +756,33 @@ def test_score_two_char_token_not_added() -> None:
         path="org/worktree",
     )
     assert proj_tools._score("or x", p) == 0
+
+
+# ---------- ticket #118: truncation hint -----------------------------------------
+
+
+def test_find_projects_truncation_hint_populated_full(configured: dict) -> None:
+    """fields='full' (default): when results are truncated, hint must be
+    non-null and mention 'limit' so the agent knows how to get more."""
+    # 4 configured projects, limit=2 → truncated=True
+    out = configured["find_projects"](query="", limit=2)
+    assert out["truncated"] is True
+    assert out["hint"] is not None
+    assert "limit" in out["hint"]
+
+
+def test_find_projects_truncation_hint_populated_light(configured: dict) -> None:
+    """fields='light': truncation hint must also be populated (same logic)."""
+    out = configured["find_projects"](query="", limit=2, fields="light")
+    assert out["truncated"] is True
+    assert out["hint"] is not None
+    assert "limit" in out["hint"]
+
+
+def test_find_projects_no_truncation_hint_null_when_state_ok(configured: dict) -> None:
+    """When all projects fit within the limit, hint stays None (state=ok,
+    non-empty results, not truncated — no special message needed)."""
+    # Default limit is 10, only 4 projects → not truncated
+    out = configured["find_projects"](query="")
+    assert out["truncated"] is False
+    assert out["hint"] is None

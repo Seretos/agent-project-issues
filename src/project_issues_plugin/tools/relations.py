@@ -159,9 +159,9 @@ def register(mcp: FastMCP) -> None:
 
         Requires the project's `issues.modify` permission.
 
-        Returns `{"project_id": str, "removed": true}` on success. (A
-        relation that did not exist surfaces as `{"error": "..."}`
-        rather than a silent `removed: true`.)
+        Returns `{"project_id": str, "kind": str, "target": str, "removed": true}`
+        on success. (A relation that did not exist surfaces as
+        `{"error": "..."}` rather than a silent `removed: true`.)
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -175,6 +175,8 @@ def register(mcp: FastMCP) -> None:
             )
             return {
                 "project_id": project.id,
+                "kind": kind,
+                "target": normalized_target,
                 **result,
             }
         return _safe(go)

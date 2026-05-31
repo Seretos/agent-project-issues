@@ -376,6 +376,7 @@ jobs:
               "description": "${DESC}",
               "repo":        "${{ github.repository }}",
               "category":    "mcp",
+              "tags":        ["git", "github", "gitlab", "organisation", "ticket"],
               "version":     "${VERSION}",
               "ref":         "${TAG}",
               "icon":            "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",

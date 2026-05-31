@@ -51,7 +51,7 @@ def register(mcp: FastMCP) -> None:
         since: str | None = None,
         page: int = 1,
         omit_body: bool = False,
-        body_max_chars: int | None = None,
+        body_max_chars: Annotated[int | None, Field(description="Truncate each comment body to N chars. The returned body can be up to ~15 chars longer than N because the #ai-generated/#ai-modified marker prefix is prepended before truncation is measured.")] = None,
     ) -> dict:
         """List comments on a ticket. Default: oldest-first, limit 30 (cap 100).
 
@@ -159,10 +159,15 @@ def register(mcp: FastMCP) -> None:
     def update_comment(
         project_id: str,
         comment_id: str,
-        body: str,
+        body: Annotated[str, Field(description="New comment body. Do NOT include '#ai-generated' — added automatically. Use real U+000A newlines, not the \\n escape.")],
         ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
     ) -> dict:
         """Update an existing comment's body.
+
+        CAUTION: do NOT include `#ai-generated` in `body` — the server
+        prepends the correct marker automatically. If implementing a
+        read-modify-write loop, strip the marker from the stored body
+        before passing it here.
 
         `ticket_id` carries consistent semantics across providers:
           - GitHub: unused (comment ids are repo-wide). May be omitted

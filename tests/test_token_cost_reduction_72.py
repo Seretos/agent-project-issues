@@ -3,7 +3,7 @@
 Covers items 1–5 of the approved plan:
   1. `apply_omit_nulls` helper + `omit_nulls` knob on list_prs / list_tickets.
   2. `include_review_comments` / `review_comments_limit` on get_pr.
-  3. `fields="light"` on list_projects / find_projects.
+  3. `fields="light"` on list_projects / search_projects.
   4. Post-marker `body_max_chars` measurement in apply_body_knobs.
   5. `has_more` per project in list_tickets_across_projects + fanout warning.
 
@@ -408,7 +408,7 @@ def test_get_pr_default_fetches_review_comments(monkeypatch):
 
 
 # ===========================================================================
-# Item 3 — fields="light" for list_projects / find_projects
+# Item 3 — fields="light" for list_projects / search_projects
 # ===========================================================================
 
 
@@ -472,7 +472,7 @@ def test_list_projects_default_is_full(monkeypatch):
     assert "permissions" in result["projects"][0]
 
 
-def test_find_projects_light_returns_id_provider_score(monkeypatch):
+def test_search_projects_light_returns_id_provider_score(monkeypatch):
     """fields='light' returns only {id, provider, score} per match, no runtime."""
     monkeypatch.setattr(
         project_tools, "load_projects",
@@ -482,7 +482,7 @@ def test_find_projects_light_returns_id_provider_score(monkeypatch):
     project_tools.register(stub)
     tools = stub.tools
 
-    result = tools["find_projects"](query="acme", fields="light")
+    result = tools["search_projects"](query="acme", fields="light")
     assert "runtime" not in result
     matches = result["matches"]
     assert len(matches) >= 1
@@ -493,7 +493,7 @@ def test_find_projects_light_returns_id_provider_score(monkeypatch):
     assert isinstance(m["score"], int)
 
 
-def test_find_projects_light_empty_query_no_runtime(monkeypatch):
+def test_search_projects_light_empty_query_no_runtime(monkeypatch):
     """Empty query with fields='light' also omits runtime."""
     monkeypatch.setattr(
         project_tools, "load_projects",
@@ -503,13 +503,13 @@ def test_find_projects_light_empty_query_no_runtime(monkeypatch):
     project_tools.register(stub)
     tools = stub.tools
 
-    result = tools["find_projects"](query="", fields="light")
+    result = tools["search_projects"](query="", fields="light")
     assert "runtime" not in result
     m = result["matches"][0]
     assert set(m.keys()) == {"id", "provider", "score"}
 
 
-def test_find_projects_full_unchanged(monkeypatch):
+def test_search_projects_full_unchanged(monkeypatch):
     """fields='full' (default) retains permissions and runtime block."""
     monkeypatch.setattr(
         project_tools, "load_projects",
@@ -519,7 +519,7 @@ def test_find_projects_full_unchanged(monkeypatch):
     project_tools.register(stub)
     tools = stub.tools
 
-    result = tools["find_projects"](query="acme", fields="full")
+    result = tools["search_projects"](query="acme", fields="full")
     assert "runtime" in result
     assert "permissions" in result["matches"][0]
 

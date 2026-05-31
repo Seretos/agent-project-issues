@@ -1,5 +1,5 @@
 """Tests for the new diagnostic fields surfaced by list_projects /
-find_projects (ticket #15).
+search_projects (ticket #15).
 
 Covers:
 
@@ -13,7 +13,7 @@ Covers:
   asked for this guard in the plan-comment follow-up.
 - Per-project `token_error` distinguishes
   None / no_token_env / env_var_unset / env_var_empty.
-- `find_projects` returns the same `runtime` block as `list_projects`
+- `search_projects` returns the same `runtime` block as `list_projects`
   so consumers don't have to switch tools to read diagnostics.
 """
 from __future__ import annotations
@@ -196,8 +196,8 @@ def test_no_config_state_still_has_runtime_block(
     assert out["runtime"]["config_files_searched"] is None
 
 
-def test_find_projects_includes_runtime_block(configured: dict) -> None:
-    out = configured["find_projects"](query="set")
+def test_search_projects_includes_runtime_block(configured: dict) -> None:
+    out = configured["search_projects"](query="set")
     assert "runtime" in out
     assert out["runtime"]["os"] in ("windows", "linux")
     # Matches carry token_error too.
@@ -208,12 +208,12 @@ def test_find_projects_includes_runtime_block(configured: dict) -> None:
 # ---------- ticket #38: empty-query lists all projects ----------------------
 
 
-def test_find_projects_empty_query_lists_all(configured: dict) -> None:
-    """`find_projects("")` returns every configured project (alphabetical
+def test_search_projects_empty_query_lists_all(configured: dict) -> None:
+    """`search_projects("")` returns every configured project (alphabetical
     by id) with `score: 0`. This replaces the previous no-match behaviour
     so agents asking "what projects are available?" don't get an
     empty list."""
-    out = configured["find_projects"](query="")
+    out = configured["search_projects"](query="")
     ids = [m["id"] for m in out["matches"]]
     assert ids == ["t-empty", "t-no-env", "t-set", "t-unset"]
     for m in out["matches"]:
@@ -221,22 +221,22 @@ def test_find_projects_empty_query_lists_all(configured: dict) -> None:
     assert out["state"] == "ok"
 
 
-def test_find_projects_whitespace_query_lists_all(configured: dict) -> None:
+def test_search_projects_whitespace_query_lists_all(configured: dict) -> None:
     """Whitespace-only queries behave the same as empty."""
-    out = configured["find_projects"](query="   ")
+    out = configured["search_projects"](query="   ")
     ids = [m["id"] for m in out["matches"]]
     assert ids == ["t-empty", "t-no-env", "t-set", "t-unset"]
 
 
-def test_find_projects_empty_query_respects_limit(configured: dict) -> None:
-    out = configured["find_projects"](query="", limit=2)
+def test_search_projects_empty_query_respects_limit(configured: dict) -> None:
+    out = configured["search_projects"](query="", limit=2)
     ids = [m["id"] for m in out["matches"]]
     assert ids == ["t-empty", "t-no-env"]
 
 
-def test_find_projects_non_empty_query_unchanged(configured: dict) -> None:
+def test_search_projects_non_empty_query_unchanged(configured: dict) -> None:
     """Non-empty queries still use the fuzzy scorer."""
-    out = configured["find_projects"](query="set")
+    out = configured["search_projects"](query="set")
     ids = [m["id"] for m in out["matches"]]
     # "set" is a substring of "t-set" — should match it.
     assert "t-set" in ids
@@ -245,13 +245,13 @@ def test_find_projects_non_empty_query_unchanged(configured: dict) -> None:
         assert m["score"] > 0
 
 
-def test_find_projects_no_match_hint_non_null(configured: dict) -> None:
+def test_search_projects_no_match_hint_non_null(configured: dict) -> None:
     """When state='ok' and no projects match a non-empty query, `hint` must
     be a non-null string suggesting list_projects (ticket #63 item 5).
     The global _STATE_HINTS['ok'] is None, so this is an inline override
-    specific to find_projects."""
+    specific to search_projects."""
     # "zzznomatch" won't match any of the four configured project ids.
-    out = configured["find_projects"](query="zzznomatch")
+    out = configured["search_projects"](query="zzznomatch")
     assert out["state"] == "ok"
     assert out["matches"] == []
     assert out["hint"] is not None
@@ -259,18 +259,18 @@ def test_find_projects_no_match_hint_non_null(configured: dict) -> None:
     assert "list_projects" in out["hint"]
 
 
-def test_find_projects_empty_query_hint_null_when_state_ok(configured: dict) -> None:
+def test_search_projects_empty_query_hint_null_when_state_ok(configured: dict) -> None:
     """An empty query returns all projects (state='ok', non-empty matches);
     hint must remain None in that case — the override only fires when the
     matches list is empty AND a query was actually supplied (ticket #63)."""
-    out = configured["find_projects"](query="")
+    out = configured["search_projects"](query="")
     assert out["state"] == "ok"
     assert len(out["matches"]) > 0
     # No hint needed when results are present.
     assert out["hint"] is None
 
 
-def test_find_projects_empty_query_in_no_config(
+def test_search_projects_empty_query_in_no_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """When no projects are configured, empty-query still returns an
@@ -299,7 +299,7 @@ def test_find_projects_empty_query_in_no_config(
             return deco
 
     proj_tools.register(_Stub())
-    out = captured["find_projects"](query="")
+    out = captured["search_projects"](query="")
     assert out["matches"] == []
     assert out["state"] == "no_config"
 
@@ -625,24 +625,24 @@ def test_probe_failure_records_error_and_keeps_defaults(
 # ---------- ticket #60: F17 — truncated / total fields ----------------------
 
 
-def test_find_projects_truncation_fields_present(configured: dict) -> None:
+def test_search_projects_truncation_fields_present(configured: dict) -> None:
     """Empty query with default limit (10) on 4 projects → truncated=False, total=4."""
-    out = configured["find_projects"](query="")
+    out = configured["search_projects"](query="")
     assert "truncated" in out
     assert "total" in out
     assert out["truncated"] is False
     assert out["total"] == 4
 
 
-def test_find_projects_truncated_when_limit_below_total(configured: dict) -> None:
+def test_search_projects_truncated_when_limit_below_total(configured: dict) -> None:
     """limit=2 on 4 projects → truncated=True, total=4, 2 matches returned."""
-    out = configured["find_projects"](query="", limit=2)
+    out = configured["search_projects"](query="", limit=2)
     assert out["truncated"] is True
     assert out["total"] == 4
     assert len(out["matches"]) == 2
 
 
-def test_find_projects_scored_path_truncation(
+def test_search_projects_scored_path_truncation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Scored path: stub 5 projects that all match 't', limit=3 → truncated=True."""
@@ -676,7 +676,7 @@ def test_find_projects_scored_path_truncation(
             return deco
 
     proj_tools.register(_Stub())
-    out = captured["find_projects"](query="test", limit=3)
+    out = captured["search_projects"](query="test", limit=3)
     # All 5 projects contain "test" in their id; scored count should be 5.
     assert out["total"] == 5
     assert out["truncated"] is True
@@ -697,10 +697,10 @@ def test_score_hyphenated_query_matches_hyphenated_id() -> None:
     assert proj_tools._score("proj-iss", p) > 0
 
 
-def test_find_projects_hyphenated_query_returns_match(
+def test_search_projects_hyphenated_query_returns_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """find_projects(query='proj-iss') finds 'agent-project-issues'."""
+    """search_projects(query='proj-iss') finds 'agent-project-issues'."""
     from lib_python_projects import ProjectsLoadResult
 
     p = ProjectConfig(
@@ -728,7 +728,7 @@ def test_find_projects_hyphenated_query_returns_match(
             return deco
 
     proj_tools.register(_Stub())
-    out = captured["find_projects"](query="proj-iss")
+    out = captured["search_projects"](query="proj-iss")
     ids = [m["id"] for m in out["matches"]]
     assert "agent-project-issues" in ids
 
@@ -736,14 +736,14 @@ def test_find_projects_hyphenated_query_returns_match(
 # ---------- ticket #60: UX7 — short tokens skipped in scoring ----------------
 
 
-def test_find_projects_adversarial_sql_query_no_results(configured: dict) -> None:
+def test_search_projects_adversarial_sql_query_no_results(configured: dict) -> None:
     """SQL injection-style query returns no matches.
 
     Short tokens like `'`, `or`, and `--` are skipped by the UX7 length guard
     (< 3 chars). The remaining token `1=1` (length 3, passes the guard) does
     not appear in any configured project id, path, or description, so the
     result is still empty."""
-    out = configured["find_projects"](query="' OR 1=1 --")
+    out = configured["search_projects"](query="' OR 1=1 --")
     assert out["matches"] == []
 
 
@@ -761,28 +761,28 @@ def test_score_two_char_token_not_added() -> None:
 # ---------- ticket #118: truncation hint -----------------------------------------
 
 
-def test_find_projects_truncation_hint_populated_full(configured: dict) -> None:
+def test_search_projects_truncation_hint_populated_full(configured: dict) -> None:
     """fields='full' (default): when results are truncated, hint must be
     non-null and mention 'limit' so the agent knows how to get more."""
     # 4 configured projects, limit=2 → truncated=True
-    out = configured["find_projects"](query="", limit=2)
+    out = configured["search_projects"](query="", limit=2)
     assert out["truncated"] is True
     assert out["hint"] is not None
     assert "limit" in out["hint"]
 
 
-def test_find_projects_truncation_hint_populated_light(configured: dict) -> None:
+def test_search_projects_truncation_hint_populated_light(configured: dict) -> None:
     """fields='light': truncation hint must also be populated (same logic)."""
-    out = configured["find_projects"](query="", limit=2, fields="light")
+    out = configured["search_projects"](query="", limit=2, fields="light")
     assert out["truncated"] is True
     assert out["hint"] is not None
     assert "limit" in out["hint"]
 
 
-def test_find_projects_no_truncation_hint_null_when_state_ok(configured: dict) -> None:
+def test_search_projects_no_truncation_hint_null_when_state_ok(configured: dict) -> None:
     """When all projects fit within the limit, hint stays None (state=ok,
     non-empty results, not truncated — no special message needed)."""
     # Default limit is 10, only 4 projects → not truncated
-    out = configured["find_projects"](query="")
+    out = configured["search_projects"](query="")
     assert out["truncated"] is False
     assert out["hint"] is None

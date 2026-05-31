@@ -112,7 +112,7 @@ def register(mcp: FastMCP) -> None:
     def create_label(
         project_id: str,
         name: str,
-        color: str | None = None,
+        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'). Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
     ) -> dict:
         """Create a new label in the project's repository.
@@ -163,16 +163,16 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def update_label(
         project_id: str,
-        name: Annotated[str, Field(description="Current name of the label to look up. This is NOT changed by the call — to rename, pass the new name as new_name.")],
+        current_name: Annotated[str, Field(description="Current name of the label to look up (lookup key only — never mutated by this call). To rename the label, supply `new_name`.")],
         new_name: Annotated[str | None, Field(description="New name for the label (renames it). Leave unset to keep the current name.")] = None,
-        color: str | None = None,
+        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'). Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
     ) -> dict:
         """Rename or recolour an existing label.
 
         Requires the project's `issues.modify` permission.
 
-        `name` is the label's **current** name, used only to look it up
+        `current_name` is the label's **current** name, used only to look it up
         — it is never changed by this call. To rename the label, pass the
         desired name as `new_name`; leave `new_name` unset to keep the
         current name and only change `color` / `description`.
@@ -201,13 +201,13 @@ def register(mcp: FastMCP) -> None:
             _require_issues_modify(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            _validate_label_name(name)
+            _validate_label_name(current_name)
             if new_name is not None:
                 _validate_label_name(new_name)
             if color is not None and project.provider == "github":
                 _validate_github_color(color)
             label = provider.update_label(
-                project, token, name,
+                project, token, current_name,
                 new_name=new_name, color=color, description=description,
             )
             return {

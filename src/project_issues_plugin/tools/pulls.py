@@ -48,7 +48,7 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_prs(
         project_id: str,
-        status: Literal["open", "closed", "any"] = "open",
+        status: Annotated[Literal["open", "closed", "any"], Field(description="'open' (default), 'closed', or 'any'. Note: 'closed' also returns merged PRs — GitHub treats merged as closed, so a matched row may carry status: 'merged'. There is no 'merged' filter; use 'closed' and filter by the merged field.")] = "open",
         labels: list[str] | None = None,
         assignee: str | None = None,
         head: str | None = None,
@@ -268,7 +268,9 @@ def register(mcp: FastMCP) -> None:
         `head` is the source branch (`feature/x` or `owner:branch` for
         cross-fork PRs); `base` is the target branch. The label
         `ai-generated` is added automatically by the server — do not
-        pass it yourself.
+        pass it yourself. The body is also automatically prefixed with
+        `#ai-generated\\n\\n` — do not prepend it yourself. The server
+        deduplicates the marker if you accidentally include it.
 
         `requested_reviewers` is a list of usernames to request a review
         from. Distinct from `assignees`: reviewers carry per-user review
@@ -398,7 +400,7 @@ def register(mcp: FastMCP) -> None:
         pr_id: str,
         body: str,
         path: Annotated[str | None, Field(description="New-thread mode: file path in the diff (e.g. 'src/foo.py'). Set together with line and commit_sha. Leave unset in reply mode.")] = None,
-        line: Annotated[int | None, Field(description="New-thread mode: line number in the diff to anchor the comment to. Set together with path and commit_sha. Leave unset in reply mode.")] = None,
+        line: Annotated[int | None, Field(description="New-thread mode: absolute file line number (1-based), NOT a diff-hunk position. Set together with path and commit_sha. Leave unset in reply mode.")] = None,
         side: Literal["LEFT", "RIGHT"] = "RIGHT",
         commit_sha: Annotated[str | None, Field(description="New-thread mode: the commit SHA the comment is anchored to. Set together with path and line. Leave unset in reply mode.")] = None,
         in_reply_to: Annotated[str | None, Field(description="Reply mode: opaque discussion id from get_pr review_comments — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric). Leave path/line/commit_sha unset.")] = None,
@@ -465,7 +467,7 @@ def register(mcp: FastMCP) -> None:
     def submit_pr_review(
         project_id: str,
         pr_id: str,
-        state: Annotated[str, Field(description="Required. One of: 'approve', 'request_changes', 'comment'. A non-empty body is required when state is 'request_changes' or 'comment'; optional for 'approve'. Kept as str (not Literal) so invalid values return a friendly error.")],
+        state: Annotated[str, Field(description="Required. Lowercase only. One of: 'approve', 'request_changes', 'comment'. A non-empty body is required when state is 'request_changes' or 'comment'; optional for 'approve'. Kept as str (not Literal) so invalid values return a friendly error.")],
         body: Annotated[str | None, Field(description="Required when state is 'request_changes' or 'comment'; optional for 'approve'. Do not prepend '#ai-generated' — added automatically.")] = None,
         commit_sha: str | None = None,
     ) -> dict:

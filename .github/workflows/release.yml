@@ -245,9 +245,10 @@ jobs:
           [ -d .codex-plugin ] && cp -a .codex-plugin "$STAGE/"
           [ -f .mcp.json     ] && cp -a .mcp.json     "$STAGE/"
           cp -a bin             "$STAGE/"
-          [ -f README.md ] && cp README.md "$STAGE/"
-          [ -f LICENSE   ] && cp LICENSE   "$STAGE/"
-          [ -d assets    ] && cp -a assets "$STAGE/"
+          [ -f README.md      ] && cp README.md      "$STAGE/"
+          [ -f LICENSE        ] && cp LICENSE        "$STAGE/"
+          [ -f description.md ] && cp description.md "$STAGE/"
+          [ -d assets         ] && cp -a assets       "$STAGE/"
 
           python3 - "$STAGE" "$ZIP_PATH" <<'PYEOF'
           import os, sys, time, zipfile
@@ -292,9 +293,10 @@ jobs:
           [ -d .codex-plugin ] && cp -a .codex-plugin "$STAGE_DIR/"
           [ -f .mcp.json     ] && cp -a .mcp.json     "$STAGE_DIR/"
           cp -a bin             "$STAGE_DIR/"
-          [ -f README.md ] && cp README.md "$STAGE_DIR/"
-          [ -f LICENSE   ] && cp LICENSE   "$STAGE_DIR/"
-          [ -d assets    ] && cp -a assets "$STAGE_DIR/"
+          [ -f README.md      ] && cp README.md      "$STAGE_DIR/"
+          [ -f LICENSE        ] && cp LICENSE        "$STAGE_DIR/"
+          [ -f description.md ] && cp description.md "$STAGE_DIR/"
+          [ -d assets         ] && cp -a assets       "$STAGE_DIR/"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -376,7 +378,8 @@ jobs:
               "category":    "mcp",
               "version":     "${VERSION}",
               "ref":         "${TAG}",
-              "icon":        "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png"
+              "icon":            "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
+              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md"
             }
           }
           EOF

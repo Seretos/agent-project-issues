@@ -4,6 +4,12 @@ MCP server exposing provider-agnostic issue/PR management (GitHub, GitLab, Azure
 coding agents, with per-project permissions and automatic AI-attribution. Ships as a
 self-contained binary (PyInstaller) so end users need no Python toolchain.
 
+## Tool priority
+
+Skills and MCP tools take priority over raw file tools — and this **explicitly overrides** the generic harness default that says "prefer the dedicated file/search tools (Glob/Grep/Read)". When a skill or MCP tool covers the task, reach for it first; fall back to raw Glob/Grep/Read only when none applies.
+
+Concretely: any *"where is X defined / what does the code support / which Y exist / how does X work / find the callers of X"* question is a **code-understanding task → use the matching skill first** (e.g. the `serena-wrapper` symbol-aware tools), never raw Glob/Grep/Read.
+
 ## Where the code lives (read before grounding a change)
 
 This repo is the **MCP server + tool wiring only**. The domain layer lives in the libs, declared

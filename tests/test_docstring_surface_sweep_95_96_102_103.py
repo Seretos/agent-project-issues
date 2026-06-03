@@ -237,7 +237,7 @@ def test_update_label_bad_github_color_rejected_no_http(monkeypatch):
         raise AssertionError(f"unexpected HTTP call: {req.url}")
 
     _install_github_mock(monkeypatch, handler)
-    result = tools["update_label"](project_id="acme", current_name="bug", color="xyz123zzz")
+    result = tools["update_label"](project_id="acme", name="bug", color="xyz123zzz")
     assert "error" in result
     assert "6-digit hex" in result["error"]
 
@@ -424,7 +424,7 @@ def test_get_pipeline_run_run_id_description_says_quote_it():
 
 
 def test_update_label_name_description_clarifies_vs_new_name():
-    desc = _param_description(_label_tools["update_label"], "current_name")
+    desc = _param_description(_label_tools["update_label"], "name")
     assert "new_name" in desc
     assert "never mutated" in desc.lower() or "lookup" in desc.lower() or "look up" in desc.lower()
 

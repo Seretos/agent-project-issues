@@ -177,13 +177,13 @@ def test_update_label_color_field_mentions_github_bare_hex():
 
 
 def test_update_label_current_name_param_exists_in_schema():
-    desc = _param_description(_label_tools["update_label"], "current_name")
-    assert desc != "", "current_name must have a Field description"
+    desc = _param_description(_label_tools["update_label"], "name")
+    assert desc != "", "name must have a Field description"
 
 
 def test_update_label_name_param_gone_from_schema():
-    desc = _param_description(_label_tools["update_label"], "name")
-    assert desc == "", f"old 'name' param must not appear in schema; got: {desc!r}"
+    desc = _param_description(_label_tools["update_label"], "current_name")
+    assert desc == "", f"old 'current_name' param must not appear in schema; got: {desc!r}"
 
 
 # ===========================================================================
@@ -270,4 +270,4 @@ def test_create_pr_docstring_mentions_body_ai_prefix():
 
 def test_update_label_current_name_in_docstring():
     doc = _label_tools["update_label"].__doc__ or ""
-    assert "current_name" in doc, repr(doc[:400])
+    assert "name" in doc, repr(doc[:400])

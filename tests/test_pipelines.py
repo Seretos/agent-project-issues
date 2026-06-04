@@ -523,7 +523,7 @@ def test_get_pipeline_run_failed_populates_failure(
     _install_mock(monkeypatch, handler)
 
     # Patch the log-fetch (separate httpx client w/ follow_redirects).
-    def fake_log(token, log_url):
+    def fake_log(token, log_url, **kwargs):
         return (
             "Setting up runner...\n"
             "Running tests...\n"
@@ -626,7 +626,7 @@ def test_get_pipeline_run_excerpt_anchors_on_failing_step_header(
     ])
 
     monkeypatch.setattr(
-        github_provider, "_fetch_job_log", lambda token, url: fake_log_text
+        github_provider, "_fetch_job_log", lambda token, url, **kw: fake_log_text
     )
 
     result = tools["get_pipeline_run"](
@@ -704,7 +704,7 @@ def test_get_pipeline_run_log_403_marks_logs_unavailable(
 
     # Logs unavailable -> _fetch_job_log returns None on 403.
     monkeypatch.setattr(
-        github_provider, "_fetch_job_log", lambda token, url: None
+        github_provider, "_fetch_job_log", lambda token, url, **kw: None
     )
 
     result = tools["get_pipeline_run"](project_id="acme", run_id="5002")
@@ -736,7 +736,7 @@ def test_get_pipeline_run_in_progress_skips_failure_fetch(
     # Also stub _fetch_job_log to a marker so accidental calls show up.
     called: dict[str, bool] = {"x": False}
 
-    def boom(token, url):
+    def boom(token, url, **kwargs):
         called["x"] = True
         return ""
 

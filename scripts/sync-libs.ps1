@@ -5,7 +5,7 @@
 #                         will NOT re-pull a branch dep whose version string
 #                         is unchanged, so a local dev env can silently lag
 #                         behind CI (which always starts with a clean env).
-#   lib-python-projects -- pinned to an exact immutable tag (@v0.1.10). The
+#   lib-python-projects -- pinned to an exact immutable tag (@v0.1.11). The
 #                         tag never moves, so drift is impossible; however a
 #                         local `pip install -e <lib>` checkout can still
 #                         shadow the released package entirely, making pytest
@@ -55,4 +55,4 @@ $specs | ForEach-Object { Write-Host "    $_" }
 & $py -m pip install --force-reinstall --no-cache-dir --no-deps @specs
 if ($LASTEXITCODE -ne 0) { Fail "pip install (lib refresh) failed." }
 
-Write-Step "Libs synced: lib-python-config to release/0.x HEAD; lib-python-projects pinned at v0.1.10."
+Write-Step "Libs synced: lib-python-config to release/0.x HEAD; lib-python-projects pinned at v0.1.11."

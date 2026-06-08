@@ -2,7 +2,7 @@
 
 # agent-project-issues
 
-Let your AI coding agent read and write **GitHub / GitLab / Azure DevOps issues** safely. MCP tools for listing/creating/updating tickets and adding comments, with automatic safety markers (`ai-generated` / `ai-modified` labels, `#ai-generated` comment prefix). Per-project permissions and read-only auto-discovery from the local git remote when no config exists.
+Let your AI coding agent read and write **GitHub / GitLab / Azure DevOps issues** safely. MCP tools for listing/creating/updating tickets and adding comments, with automatic safety markers (`ai-generated` / `ai-modified` labels, `#ai-generated` comment prefix). Per-project permissions and automatic project discovery from provider tokens and the local git remote when no config exists.
 
 ## Quick install
 
@@ -25,11 +25,13 @@ Put your token once in `~/.claude/settings.json` (the Claude Code host file — 
 }
 ```
 
-In any repo with a `github.com` `origin` remote, the plugin auto-discovers a single read-only project (`id="_auto"`) using that token. Use `list_projects` / `list_tickets` / `get_ticket` right away — no further setup. GitLab works the same way with `GITLAB_TOKEN`.
+In any repo with a `github.com` `origin` remote, the plugin auto-discovers a project from the CWD's git remote. Use `list_projects` / `list_tickets` / `get_ticket` right away — no further setup. GitLab works the same way with `GITLAB_TOKEN`.
+
+If no `.seretos/projects.yml` config file is found (neither walking up from the working directory nor at `~/.seretos/`) but a provider token is set, **token-discovery** kicks in: the plugin enumerates every repository accessible to that token and surfaces all of them as managed projects. A broad PAT will surface all repos it can reach — see [Token-discovery: broad-PAT exposure](SECURITY.md#token-discovery-broad-pat-exposure) for the implications.
 
 ## Write access (per-project)
 
-Drop a `.seretos/project-issues.yml` at the root of your repo (a `.yaml` extension also works):
+Drop a `.seretos/projects.yml` at the root of your repo (a `.yaml` extension also works):
 
 ```yaml
 version: 1
@@ -124,21 +126,36 @@ Azure DevOps differences worth knowing:
 
 ### Where the loader looks for the config
 
-The resolver walks **git project boundaries** outward from the CWD:
+Resolution happens in three legs, in order. **The first leg that produces results wins entirely — subsequent legs are skipped.**
+
+**Leg 1 — Config file (explicit or discovered):**
 
 1. `$PROJECT_ISSUES_CONFIG` (explicit override; missing path = hard error).
-2. `<enclosing-git-repo>/.seretos/project-issues.{yml,yaml}`. The walk finds the nearest `.git`-bearing ancestor, checks its `.seretos/`, then jumps *out* of that repo (next iteration starts above its root). Repeats project-by-project until no enclosing repo exists.
-3. `~/.seretos/project-issues.{yml,yaml}` (user-level fallback).
+2. `<enclosing-git-repo>/.seretos/projects.{yml,yaml}`. The walk finds the nearest `.git`-bearing ancestor, checks its `.seretos/`, then jumps *out* of that repo (next iteration starts above its root). Repeats project-by-project until no enclosing repo exists.
+3. `~/.seretos/projects.{yml,yaml}` (user-level fallback).
 
-Configs are **not merged** — the first match wins entirely. Higher/outer configs are ignored. If a project is not in the winning config, the agent has no access to it.
+Configs are **not merged** — the first match wins entirely. Higher/outer configs are ignored. If a project is not in the winning config, the agent has no access to it. Finding a config file also **disables all further discovery** (legs 2 and 3 are not run).
 
-**One exception:** the CWD repo is always included via auto-discovery (`source: "git-remote"`, read-only by default, permissions derived from the GitHub/GitLab token's effective rights) — unless it's already declared in the winning config, in which case the explicit declaration wins.
+**Leg 2 — Token-discovery:**
+
+If no config file is found but a provider token is present (`GITHUB_TOKEN`, `GITLAB_TOKEN`, or `AZURE_DEVOPS_TOKEN`), the lib enumerates every repository/project accessible to that token and emits them all as managed projects with `source="token-discovery"`. Permissions on each discovered project are pre-populated by the lib from the token's effective rights — **no additional probe is issued**. The result list is capped by a hard-coded lib constant (not user-configurable); when the cap is hit, `list_projects`/`search_projects` surface a `hint` field describing the truncation. Token-discovery bypasses leg 3: if the enumeration returns anything (even a partial list), no git-remote `_auto` project is added.
+
+**Leg 3 — Git-remote auto-discovery:**
+
+If no config file was found and token-discovery yielded nothing, the CWD's git remote is used to produce one project entry (`id="_auto"`, `source="git-remote"`). Permissions are derived from the token's effective rights via a live probe, not assumed — with a working token the project can surface with write flags if the token permits them.
+
+**State semantics:**
+
+- `state="ok"` — projects are available. This no longer implies a config file was found: token-discovery can produce `state="ok"` with no config file on disk.
+- `state="no_config"` — no config file found **and** no token-discovery results **and** no git remote yielded a project.
+- `state="config_empty"` — a config file was found but it declares no projects.
+- `state="config_error"` — a config file was found but failed to parse.
 
 ### Known limitation: GitHub Copilot CLI
 
 In Claude Code CLI the host passes the user's working directory to the MCP, so the project-boundary walk lands on the repo's `.seretos/`. **GitHub Copilot CLI** does not pass a usable CWD — it spawns the MCP from the plugin install dir. Two workarounds:
 
-- **Recommended:** put your config in `~/.seretos/project-issues.yml`. The user-level fallback is the dedicated escape hatch.
+- **Recommended:** put your config in `~/.seretos/projects.yml`. The user-level fallback is the dedicated escape hatch.
 - **Per-project:** export `PROJECT_ISSUES_PLUGIN_CWD=$(pwd)` before launching `copilot`. The plugin reads it as the search root.
 
 Each `projects[]` entry can reuse the global `GITHUB_TOKEN` or scope to a per-project token (`token_env: GITHUB_TOKEN_ACME`) — the env var name is just a pointer; the token value itself is read from the process environment.
@@ -185,7 +202,7 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 
 ### Migrating from the previous `.toml` config
 
-Before v1 the config lived in `.seretos/project-issues.toml` (originally `.claude/project-issues.toml` — both folder names have since been retired) and used a flat `permissions = { ... }` table plus split `owner` / `repo` fields. The format changed in a single breaking step — no auto-converter, no fallback. Migration is a literal field-by-field copy.
+Before v1 the config lived in `.seretos/project-issues.toml` (originally `.claude/project-issues.toml` — both folder names have since been retired) and used a flat `permissions = { ... }` table plus split `owner` / `repo` fields. The format changed in a single breaking step — no auto-converter, no fallback. Migration is a literal field-by-field copy. The new filename is `projects.yml` (the old `project-issues.yml` name is no longer recognised by the plugin).
 
 **Before — `.claude/project-issues.toml`:**
 
@@ -210,7 +227,7 @@ modify = false
 merge  = false
 ```
 
-**After — `.seretos/project-issues.yml`:**
+**After — `.seretos/projects.yml`:**
 
 ```yaml
 version: 1
@@ -237,7 +254,7 @@ Key consolidation points:
 - **`owner` + `repo` → `path`.** GitHub uses `"owner/repo"`; the old separate fields are no longer accepted (the strict schema rejects them).
 - **`version: 1` is the new top-level field.** It defaults to `1` when omitted, but adding it explicitly future-proofs against later schema breaks.
 - **`permissions` is a YAML mapping**, not a TOML inline-table. The legacy flat shape `permissions = { create = true, modify = true, pr_create = true, pr_modify = false }` is no longer accepted — split it into the nested `issues` / `pulls` sub-mappings shown above. There was never a flat equivalent for `pulls.merge`.
-- **File extension `.yml` / `.yaml`** — the `.toml` filename is no longer recognised. Rename the file along with the migration.
+- **File extension `.yml` / `.yaml`, filename `projects.yml`** — the `.toml` filename and the old `project-issues.yml` name are no longer recognised. Rename the file along with the migration.
 
 Find-replace is enough for typical configs; the only structural change is the permissions / path collapse described above.
 

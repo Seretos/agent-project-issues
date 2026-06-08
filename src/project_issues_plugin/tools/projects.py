@@ -46,13 +46,22 @@ minutes per `(provider, path, token-fingerprint)` so a single
 Two extra per-project fields document the source:
 
 - `permissions_source`:
-  - `"config"`     — permissions came from the YAML entry.
-  - `"token-probe"` — permissions came from a successful probe.
-  - `"default"`    — no probe was possible (no token, or probe failed)
-                      and the all-False default applies.
+  - `"config"`          — permissions came from the YAML entry.
+  - `"token-discovery"` — permissions came verbatim from the
+                           token-discovery result (pre-populated by
+                           the lib; no additional probe is issued).
+  - `"token-probe"`     — permissions came from a successful live
+                           API probe.
+  - `"default"`         — no probe was possible (no token, or probe
+                           failed) and the all-False default applies.
 - `permissions_probe_error`: stable `TokenCapabilities.reason` string
   when a probe failed (`"bad_credentials"`, `"repo_invisible_to_token"`,
   `"network_error"`, `"permissions_field_missing"`, ...), else `None`.
+
+Note: `state="ok"` can occur without a config file being present when
+token-discovery returns projects from a provider token.  When
+`result.discovery_truncated` is `True`, the response `hint` field
+explains that the token-discovery result list was capped.
 """
 from __future__ import annotations
 
@@ -186,6 +195,16 @@ def _project_to_dict(p: ProjectConfig) -> dict:
     if p.source == "config":
         # YAML-defined projects are authoritative — never override.
         permissions_source = "config"
+    elif p.source == "token-discovery":
+        # Token-discovery projects have pre-populated permissions from the
+        # lib; use them verbatim — no additional probe call is needed or
+        # wanted.
+        issues_create = p.permissions.issues.create
+        issues_modify = p.permissions.issues.modify
+        pulls_create = p.permissions.pulls.create
+        pulls_modify = p.permissions.pulls.modify
+        pulls_merge = p.permissions.pulls.merge
+        permissions_source = "token-discovery"
     else:
         # Auto-discovered (git-remote) project. If a token is available,
         # ask the provider what the token can actually do; otherwise
@@ -318,8 +337,9 @@ _STATE_HINTS = {
         "one before continuing."
     ),
     "no_config": (
-        "Project management is not set up for this directory. Ask the "
-        "user to configure at least one project."
+        "No config file found — if a provider token is set, accessible "
+        "repositories may appear automatically via token discovery; "
+        "otherwise configure at least one project."
     ),
     "config_error": (
         "Project configuration failed to load. Ask the user to inspect "
@@ -355,11 +375,15 @@ def register(mcp: FastMCP) -> None:
             }
 
         Inspect `state` before reporting to the user:
-          - "ok":           use `projects` as-is.
+          - "ok":           use `projects` as-is.  Note: `state="ok"`
+                            no longer implies a config file was found —
+                            token-discovery may return projects without
+                            one.
           - "config_empty": no projects are defined yet — tell the user
                             to add one. Do NOT claim none exist when the
                             user expects some.
-          - "no_config":    project management is not set up here.
+          - "no_config":    no config file found and no token-discovery
+                            results; project management is not set up.
           - "config_error": configuration failed to load — ask the user
                             to check it (details are in the server log,
                             not in this response).
@@ -383,13 +407,19 @@ def register(mcp: FastMCP) -> None:
               `null` (token present), `"env_var_unset"`,
               `"env_var_empty"`, or `"no_token_env"`.
           - Per project, `permissions_source`:
-              `"config"` (from YAML), `"token-probe"` (derived from a
-              live API probe of the token), or `"default"` (no probe
-              was possible — the all-False default applies).
+              `"config"` (from YAML), `"token-discovery"` (permissions
+              pre-populated by the lib's token-discovery pass — no
+              additional probe is issued), `"token-probe"` (derived
+              from a live API probe of the token), or `"default"` (no
+              probe was possible — the all-False default applies).
           - Per project, `permissions_probe_error`: stable failure
               identifier (e.g. `"bad_credentials"`,
               `"repo_invisible_to_token"`, `"network_error"`) when a
               probe was attempted and failed, else `null`.
+
+        When the token-discovery result list was capped, the top-level
+        `hint` field explains the truncation and notes that tuning the
+        cap requires a future lib-side limit parameter.
 
         Raw config-paths are hidden by default to keep the agent from
         learning the location of the permissions file. Start the
@@ -411,16 +441,21 @@ def register(mcp: FastMCP) -> None:
             config_filename="projects.yml",
             config_filename_alt="projects.yaml",
         )
+        _discovery_truncated_hint = (
+            "Token-discovery returned a partial project list — the result "
+            "was capped by the lib. To raise the cap, a future lib-side "
+            "limit parameter will be required."
+        ) if result.discovery_truncated else None
         if fields == "light":
             return {
                 "projects": [_project_to_light(p) for p in result.projects],
                 "state": result.state,
-                "hint": _STATE_HINTS.get(result.state),
+                "hint": _discovery_truncated_hint or _STATE_HINTS.get(result.state),
             }
         return {
             "projects": [_project_to_dict(p) for p in result.projects],
             "state": result.state,
-            "hint": _STATE_HINTS.get(result.state),
+            "hint": _discovery_truncated_hint or _STATE_HINTS.get(result.state),
             "runtime": _runtime_block(result),
         }
 
@@ -476,7 +511,12 @@ def register(mcp: FastMCP) -> None:
 
         Same diagnostic fields as `list_projects` (`runtime.os`,
         debug-gated `runtime.config_files_searched` /
-        `config_file_loaded`, per-match `token_error`).
+        `config_file_loaded`, per-match `token_error`,
+        per-match `permissions_source` including `"token-discovery"`).
+
+        When the token-discovery result list was capped, the top-level
+        `hint` field explains the truncation and notes that tuning the
+        cap requires a future lib-side limit parameter.
 
         Token-cheap knob:
           - `fields="light"`: return only ``{id, provider, score}`` per
@@ -489,6 +529,11 @@ def register(mcp: FastMCP) -> None:
             config_filename="projects.yml",
             config_filename_alt="projects.yaml",
         )
+        _discovery_truncated_hint = (
+            "Token-discovery returned a partial project list — the result "
+            "was capped by the lib. To raise the cap, a future lib-side "
+            "limit parameter will be required."
+        ) if result.discovery_truncated else None
         cap = max(1, limit)
         q_trimmed = (query or "").strip()
         if fields == "light":
@@ -512,17 +557,18 @@ def register(mcp: FastMCP) -> None:
                     for s, p in scored_light[:cap]
                 ]
             truncated = total > cap
-            hint = _STATE_HINTS.get(result.state)
-            if result.state == "ok" and not results and q_trimmed:
-                hint = (
-                    "No projects matched the query. "
-                    "Use list_projects to see all available projects."
-                )
-            if result.state == "ok" and truncated:
-                hint = (
-                    "Results were truncated — increase `limit` or use "
-                    "`list_projects` to see all projects."
-                )
+            hint = _discovery_truncated_hint or _STATE_HINTS.get(result.state)
+            if not _discovery_truncated_hint:
+                if result.state == "ok" and not results and q_trimmed:
+                    hint = (
+                        "No projects matched the query. "
+                        "Use list_projects to see all available projects."
+                    )
+                if result.state == "ok" and truncated:
+                    hint = (
+                        "Results were truncated — increase `limit` or use "
+                        "`list_projects` to see all projects."
+                    )
             return {
                 "query": query,
                 "matches": results,
@@ -552,17 +598,18 @@ def register(mcp: FastMCP) -> None:
         # the global `_STATE_HINTS["ok"]` is None (no hint is right for
         # `list_projects` in the ok case). Override locally so the agent
         # gets a useful nudge rather than `hint: null` (ticket #63 item 5).
-        hint = _STATE_HINTS.get(result.state)
-        if result.state == "ok" and not results and q_trimmed:
-            hint = (
-                "No projects matched the query. "
-                "Use list_projects to see all available projects."
-            )
-        if result.state == "ok" and truncated:
-            hint = (
-                "Results were truncated — increase `limit` or use "
-                "`list_projects` to see all projects."
-            )
+        hint = _discovery_truncated_hint or _STATE_HINTS.get(result.state)
+        if not _discovery_truncated_hint:
+            if result.state == "ok" and not results and q_trimmed:
+                hint = (
+                    "No projects matched the query. "
+                    "Use list_projects to see all available projects."
+                )
+            if result.state == "ok" and truncated:
+                hint = (
+                    "Results were truncated — increase `limit` or use "
+                    "`list_projects` to see all projects."
+                )
         return {
             "query": query,
             "matches": results,

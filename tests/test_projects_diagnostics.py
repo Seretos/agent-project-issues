@@ -794,3 +794,268 @@ def test_search_projects_no_truncation_hint_null_when_state_ok(configured: dict)
     out = configured["search_projects"](query="")
     assert out["truncated"] is False
     assert out["hint"] is None
+
+
+# ---------- ticket #132: token-discovery projects ----------------------------
+
+
+def _token_discovery_project(
+    path: str = "acme/frontend",
+    *,
+    issues_create: bool = True,
+    issues_modify: bool = True,
+    pulls_create: bool = True,
+    pulls_modify: bool = True,
+    pulls_merge: bool = False,
+) -> "ProjectConfig":
+    from lib_python_projects.models import Permissions, IssuesPermissions, PullsPermissions
+    return ProjectConfig(
+        id="_td",
+        description="Discovered via token",
+        provider="github",
+        path=path,
+        token_env="GITHUB_TOKEN",
+        source="token-discovery",
+        permissions=Permissions(
+            issues=IssuesPermissions(create=issues_create, modify=issues_modify),
+            pulls=PullsPermissions(
+                create=pulls_create, modify=pulls_modify, merge=pulls_merge
+            ),
+        ),
+    )
+
+
+def _make_stub_tools(monkeypatch, fake_result) -> dict:
+    """Register tools against a stub MCP, wiring the stub load_projects."""
+    monkeypatch.setattr(proj_tools, "load_projects", lambda **_: fake_result)
+    captured: dict = {}
+
+    class _Stub:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    proj_tools.register(_Stub())
+    return captured
+
+
+def test_token_discovery_project_never_calls_probe(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """Regression: token-discovery projects must NEVER invoke the probe path.
+
+    Before the fix, these projects fell into the git-remote `else` branch
+    and triggered a provider probe.  After the fix the dedicated
+    `token-discovery` branch handles them without touching the provider.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
+
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+
+    # Install an exploding provider — if the probe path is entered the test fails.
+    from project_issues_plugin.tools import _providers as providers_mod
+    class _ExplodingProvider:
+        def probe_token_capabilities(self, project, token):
+            raise AssertionError(
+                "probe_token_capabilities must not be called for token-discovery projects"
+            )
+    monkeypatch.setitem(providers_mod._PROVIDERS, "github", _ExplodingProvider())
+
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["list_projects"]()
+
+    assert len(out["projects"]) == 1
+    assert out["projects"][0]["permissions_source"] == "token-discovery"
+
+
+def test_token_discovery_permissions_source_exact_value(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """permissions_source must be exactly "token-discovery" and
+    permissions_probe_error must be None."""
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["list_projects"]()
+    p = out["projects"][0]
+    assert p["permissions_source"] == "token-discovery"
+    assert p["permissions_probe_error"] is None
+
+
+def test_token_discovery_permissions_values_from_project(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """Permission booleans in the response must equal those set on
+    p.permissions — verbatim copy, not all-False default."""
+    td = _token_discovery_project(
+        issues_create=True,
+        issues_modify=False,
+        pulls_create=True,
+        pulls_modify=True,
+        pulls_merge=True,
+    )
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["list_projects"]()
+    p = out["projects"][0]
+    assert p["permissions"]["issues"]["create"] is True
+    assert p["permissions"]["issues"]["modify"] is False
+    assert p["permissions"]["pulls"]["create"] is True
+    assert p["permissions"]["pulls"]["modify"] is True
+    assert p["permissions"]["pulls"]["merge"] is True
+
+
+def test_token_discovery_no_probe_even_with_token_in_env(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """Even when GITHUB_TOKEN is set AND an exploding provider is installed,
+    a token-discovery project must not raise."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_real_value")
+
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+
+    from project_issues_plugin.tools import _providers as providers_mod
+    class _ExplodingProvider:
+        def probe_token_capabilities(self, project, token):
+            raise AssertionError("probe must not run for token-discovery projects")
+    monkeypatch.setitem(providers_mod._PROVIDERS, "github", _ExplodingProvider())
+
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    # Must not raise.
+    out = captured["list_projects"]()
+    assert out["projects"][0]["permissions_source"] == "token-discovery"
+
+
+def test_token_discovery_in_search_projects(
+    monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
+) -> None:
+    """search_projects must also report permissions_source='token-discovery'
+    for token-discovery projects."""
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["search_projects"](query="")
+    assert len(out["matches"]) == 1
+    assert out["matches"][0]["permissions_source"] == "token-discovery"
+
+
+def test_no_config_hint_mentions_token_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no_config state hint must mention 'token discovery' so agents
+    understand that repositories can appear automatically when a provider
+    token is set."""
+    fake_result = ProjectsLoadResult(
+        projects=[],
+        config_file=None,
+        searched_paths=[],
+        state="no_config",
+        search_root="/tmp",
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["list_projects"]()
+    assert out["state"] == "no_config"
+    assert out["hint"] is not None
+    assert "token discovery" in out["hint"].lower()
+
+
+def test_discovery_truncated_hint_in_list_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When discovery_truncated=True, list_projects must set a non-null hint
+    string that mentions the list was capped."""
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+        discovery_truncated=True,
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["list_projects"]()
+    assert out["hint"] is not None
+    assert isinstance(out["hint"], str)
+    # The hint must communicate truncation (cap / partial / capped).
+    hint_lc = out["hint"].lower()
+    assert any(word in hint_lc for word in ("cap", "partial", "truncat")), out["hint"]
+
+
+def test_discovery_truncated_hint_in_search_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same check for search_projects."""
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+        discovery_truncated=True,
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out = captured["search_projects"](query="")
+    assert out["hint"] is not None
+    assert isinstance(out["hint"], str)
+    hint_lc = out["hint"].lower()
+    assert any(word in hint_lc for word in ("cap", "partial", "truncat")), out["hint"]
+
+
+def test_no_truncated_hint_when_discovery_truncated_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When discovery_truncated=False (the default), no spurious truncation
+    hint must appear for a normal ok state with results."""
+    td = _token_discovery_project()
+    fake_result = ProjectsLoadResult(
+        projects=[td],
+        config_file=None,
+        searched_paths=[],
+        state="ok",
+        search_root="/tmp",
+        discovery_truncated=False,
+    )
+    captured = _make_stub_tools(monkeypatch, fake_result)
+    out_list = captured["list_projects"]()
+    # state=ok, no special condition → hint must be None
+    assert out_list["hint"] is None
+
+    out_search = captured["search_projects"](query="")
+    # state=ok, results present, not truncated → hint must be None
+    assert out_search["hint"] is None

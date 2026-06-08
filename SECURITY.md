@@ -40,11 +40,50 @@ making any HTTP call:
 | `list_tickets`   | read-only — no gate                 |
 | `get_ticket`     | read-only — no gate                 |
 
-`_auto`-discovered projects (no explicit config) have `create=false, modify=false`
-by default and are therefore read-only by construction. Write access requires an
-explicit `.seretos/project-issues.yml` entry. The auto-entry's read permissions
-are derived from the token's effective rights on the target repo via a probe,
-not assumed.
+The permission flags on any project determine what the agent may do. How those
+flags are populated depends on the project's source:
+
+- **`source="config"`** — flags come directly from the `.seretos/projects.yml`
+  entry (`permissions_source="config"`). Write access requires an explicit
+  YAML entry with the relevant flag set to `true`.
+- **`source="git-remote"`** — the `_auto` project produced from the CWD's git
+  remote. When a token is present the plugin probes the token's effective rights
+  against the repo and uses the result (`permissions_source="token-probe"`). A
+  token with push access will therefore surface with write flags — these projects
+  are **not** forced read-only.
+- **`source="token-discovery"`** — permissions are pre-populated by the lib from
+  the token's effective rights during enumeration (`permissions_source="token-discovery"`).
+  No additional probe is issued; a PAT with write access grants write access through
+  this plugin. See [Token-discovery: broad-PAT exposure](#token-discovery-broad-pat-exposure)
+  below for details.
+
+## Token-discovery: broad-PAT exposure
+
+When no `.seretos/projects.yml` config file is found and a provider token is
+set (`GITHUB_TOKEN`, `GITLAB_TOKEN`, or `AZURE_DEVOPS_TOKEN`), the plugin
+automatically enumerates every repository/project accessible to that token
+(up to a hard-coded lib constant) and exposes them all as managed projects
+with `source="token-discovery"`.
+
+**Permissions are NOT forced read-only.** The lib pre-populates permissions
+from the token's effective rights during enumeration. A PAT with write access
+to many repositories grants write access to all of them through this plugin —
+the agent can create tickets, post comments, open and merge pull requests on
+any repo the token can reach.
+
+**Opt-out:** drop a `.seretos/projects.yml` with an explicit `projects:` list.
+A config file wins entirely and disables token-discovery for that directory
+(legs 2 and 3 of the resolution order are skipped). An empty list
+(`projects: []`) is enough to suppress discovery while you fill in the real
+entries.
+
+**Scope-down:** use a narrowly-scoped token — repo-specific fine-grained PATs
+(GitHub) or read-only tokens — to limit how many repositories token-discovery
+can reach and what it may write.
+
+**Azure DevOps note:** ADO token-discovery requires a determinable organization
+context. Without an org hint available to the lib, ADO repositories are not
+enumerated by token-discovery.
 
 ## AI-attribution markers
 

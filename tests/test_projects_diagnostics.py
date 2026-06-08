@@ -166,6 +166,10 @@ def test_no_config_state_still_has_runtime_block(
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
         "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
         "PROJECT_ISSUES_DEBUG",
+        # v0.1.12: token-driven discovery runs when no config file is found;
+        # clear provider tokens so it can't return real projects and mask
+        # the no_config state.
+        "GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
     empty = tmp_path / "empty"
@@ -279,6 +283,10 @@ def test_search_projects_empty_query_in_no_config(
         "PROJECT_ISSUES_CONFIG", "PROJECT_ISSUES_PLUGIN_ROOT",
         "PROJECT_ISSUES_PLUGIN_CWD", "CLAUDE_PROJECT_DIR",
         "PROJECT_ISSUES_DEBUG",
+        # v0.1.12: token-driven discovery runs when no config file is found;
+        # clear provider tokens so it can't return real projects and mask
+        # the no_config state.
+        "GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
     empty = tmp_path / "empty"

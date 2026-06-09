@@ -1,6 +1,6 @@
 # Example project-issues plugin configuration (v1).
 #
-# Place this file at `.seretos/project-issues.yml` in your project root.
+# Place this file at `.seretos/projects.yml` in your project root.
 # The loader walks outward by git project boundaries: it checks each
 # enclosing repo's `.seretos/` directory, then `~/.seretos/` as the
 # user-level fallback.

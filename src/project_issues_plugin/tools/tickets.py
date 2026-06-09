@@ -398,7 +398,9 @@ def register(mcp: FastMCP) -> None:
                 "silently dropped when combined with standard fields, but a "
                 "custom_fields-only call returns an error. "
                 "Use the full dotted field reference, e.g. "
-                "{'Custom.ProcessState': 'Approved'} or {'System.Tags': 'release'}."
+                "{'Custom.ProcessState': 'Approved'} or {'System.Tags': 'release'}. "
+                "Call list_custom_fields(project_id) to discover available field "
+                "reference names and their allowed values before setting them."
             ))
         ] = None,
     ) -> dict:
@@ -605,6 +607,61 @@ def register(mcp: FastMCP) -> None:
             }
             _status_cache[cache_key] = (now, payload)
             return payload
+        return _safe(go)
+
+    @mcp.tool()
+    def list_custom_fields(project_id: str, work_item_type: str | None = None) -> dict:
+        """Discover provider-native custom and work-item fields.
+
+        Returns the structured field schema for the project's provider.
+        Azure DevOps is the primary use case — it exposes a rich schema
+        with typed fields, picklist constraints, and per-work-item-type
+        scoping. GitHub and GitLab have no structured field schema and
+        always return `"fields": []` (not an error — it is a stable fact
+        about those providers, not "unsupported" or "retry later").
+
+        The `work_item_type` parameter optionally scopes the field set to
+        a specific Azure DevOps work-item type (e.g. `"Bug"`, `"Task"`).
+        When omitted the provider returns all fields across all types.
+        It is silently ignored by GitHub and GitLab.
+
+        The `reference_name` and `allowed_values` values returned here
+        feed directly into `update_ticket`'s `custom_fields` parameter —
+        call this tool first to discover valid field references and their
+        allowed picklist values before setting them.
+
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "provider": "github" | "gitlab" | "azuredevops",
+          "fields": [
+            {
+              "reference_name":   str,        # provider-native id, e.g. "System.State"
+              "display_name":     str,        # human-readable label
+              "type":             str,        # field type, e.g. "string", "picklistString"
+              "allowed_values":   [str] | null,  # picklist values; null when free-form
+              "read_only":        bool,
+              "always_required":  bool
+            },
+            ...
+          ]
+        }
+        ```
+
+        Read-only: no permission flag required beyond a valid token.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            fields = provider.list_fields(project, token, work_item_type=work_item_type)
+            return {
+                "project_id": project.id,
+                "provider": project.provider,
+                "fields": [asdict(f) for f in fields],
+            }
         return _safe(go)
 
     @mcp.tool()

@@ -7,6 +7,7 @@ them and MUST NOT add them manually.
 """
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
@@ -375,6 +376,7 @@ def register(mcp: FastMCP) -> None:
         "title", "body", "status",
         "labels_add", "labels_remove",
         "assignees_add", "assignees_remove",
+        "custom_fields",
     )
 
     @mcp.tool()
@@ -388,6 +390,17 @@ def register(mcp: FastMCP) -> None:
         labels_remove: list[str] | None = None,
         assignees_add: list[str] | None = None,
         assignees_remove: list[str] | None = None,
+        custom_fields: Annotated[
+            dict[str, Any] | None,
+            Field(description=(
+                "Provider-specific field overrides as a key→value map. "
+                "Only supported by Azure DevOps. On GitHub and GitLab it is "
+                "silently dropped when combined with standard fields, but a "
+                "custom_fields-only call returns an error. "
+                "Use the full dotted field reference, e.g. "
+                "{'Custom.ProcessState': 'Approved'} or {'System.Tags': 'release'}."
+            ))
+        ] = None,
     ) -> dict:
         """Update an existing ticket. Only specified fields change.
 
@@ -457,6 +470,15 @@ def register(mcp: FastMCP) -> None:
         server performs no escape-sequence normalisation.
 
         Requires the project's `issues.modify` permission.
+
+        `custom_fields` passes provider-specific `{field_ref: value}` overrides
+        to the underlying provider. It is currently only supported by Azure DevOps,
+        where full dotted field references such as `Custom.ProcessState` or
+        `System.Tags` are used. On GitHub and GitLab the parameter is silently
+        dropped when other standard fields are present; a `custom_fields`-only
+        call on those providers returns a descriptive error rather than silently
+        mutating nothing of what was asked. Passing `None` or an empty dict `{}`
+        means "no custom fields" and is treated as though the argument were absent.
         """
         # Reject empty calls explicitly (ticket #48 finding 4 / #49 finding 4).
         # `labels_add=[]` etc. are treated as "no action" — only non-empty
@@ -469,13 +491,14 @@ def register(mcp: FastMCP) -> None:
             or labels_remove
             or assignees_add
             or assignees_remove
+            or custom_fields
         )
         if not actionable:
             return {
                 "error": (
                     "no update fields supplied; pass at least one of "
                     "title/body/status/labels_add/labels_remove/"
-                    "assignees_add/assignees_remove."
+                    "assignees_add/assignees_remove/custom_fields."
                 )
             }
 
@@ -485,13 +508,31 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_id = _normalize_id(project, ticket_id)
+            cf_supported = "custom_fields" in inspect.signature(
+                provider.update_ticket
+            ).parameters
+            has_other_fields = any([
+                title is not None, body is not None, status is not None,
+                labels_add, labels_remove, assignees_add, assignees_remove,
+            ])
+            if custom_fields and not cf_supported and not has_other_fields:
+                return {
+                    "error": (
+                        f"custom_fields is not supported by the '{project.provider}' "
+                        "provider; it is only available on Azure DevOps. Supply at least "
+                        "one standard field (title/body/status/labels/assignees) or omit "
+                        "custom_fields."
+                    )
+                }
+            kwargs: dict[str, Any] = dict(
+                title=title, body=body, status=status,
+                labels_add=labels_add, labels_remove=labels_remove,
+                assignees_add=assignees_add, assignees_remove=assignees_remove,
+            )
+            if custom_fields and cf_supported:
+                kwargs["custom_fields"] = custom_fields
             try:
-                ticket = provider.update_ticket(
-                    project, token, normalized_id,
-                    title=title, body=body, status=status,
-                    labels_add=labels_add, labels_remove=labels_remove,
-                    assignees_add=assignees_add, assignees_remove=assignees_remove,
-                )
+                ticket = provider.update_ticket(project, token, normalized_id, **kwargs)
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
                     exc, project_id=project.id, kind="ticket",

@@ -57,6 +57,39 @@ flags are populated depends on the project's source:
   this plugin. See [Token-discovery: broad-PAT exposure](#token-discovery-broad-pat-exposure)
   below for details.
 
+## Config-file protection (managed-settings deny rule)
+
+**Threat vector:** an agent operating in a project that has a `.seretos/projects.yml` config file is write-capable within that project tree. A sufficiently unconstrained agent can overwrite the config to grant itself broader permissions (additional projects, escalated write flags) before its next tool call — the permission gate reads the config on every call, so an overwrite takes effect immediately.
+
+**Mitigation:** place a Claude Code managed-settings deny rule in an **admin-owned OS location** that the agent's file tools cannot reach. The rule blocks Claude Code's own `Read`, `Edit`, and `Write` tools from accessing `.seretos/` paths:
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.seretos/**)",
+      "Edit(**/.seretos/**)",
+      "Write(**/.seretos/**)"
+    ]
+  }
+}
+```
+
+Place this in the OS-managed settings file (filename `managed-settings.json`):
+
+| Platform | Path |
+|---|---|
+| Windows | `C:\Program Files\ClaudeCode\managed-settings.json` |
+| macOS | `/Library/Application Support/ClaudeCode/managed-settings.json` |
+| Linux / WSL | `/etc/claude-code/managed-settings.json` |
+
+**Caveats:**
+
+- `~/.claude/settings.json` is within the agent's write reach and is **not** a substitute.
+- Deny rules bind Claude Code's own file tools (and recognized file commands in Bash). They do **not** sandbox arbitrary subprocesses — OS-level sandboxing is required for that guarantee.
+
+See the [Security hardening](README.md#security-hardening) section in README.md for setup steps.
+
 ## Token-discovery: broad-PAT exposure
 
 When no `.seretos/projects.yml` config file is found and a provider token is

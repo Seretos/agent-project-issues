@@ -8,6 +8,5 @@
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/project-issues",
       "args": []
     }
-  },
-  "hooks": "${CLAUDE_PLUGIN_ROOT}/hooks/hooks.json"
+  }
 }

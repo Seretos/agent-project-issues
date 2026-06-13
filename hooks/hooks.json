@@ -1,12 +1,16 @@
 {
-  "UserPromptSubmit": [
-    {
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/security_hint.py\""
-        }
-      ]
-    }
-  ]
+  "description": "Injects a .seretos/ managed-settings security reminder on the first qualifying prompt and every 10th thereafter, when a .seretos/ directory is present in the project tree.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/security_hint.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }

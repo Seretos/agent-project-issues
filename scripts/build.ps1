@@ -327,6 +327,9 @@ if ($Package) {
     if (Test-Path "skills") {
         Copy-Item -Recurse -Force "skills" $stage
     }
+    if (Test-Path "hooks") {
+        Copy-Item -Recurse -Force "hooks" $stage
+    }
     Copy-Item -Force "README.md", "LICENSE" $stage -ErrorAction SilentlyContinue
 
     # Build the zip via Python's zipfile so we can stamp Unix mode bits

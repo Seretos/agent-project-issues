@@ -2,7 +2,7 @@
 #
 # Syncs the lib-python-* deps to the refs in pyproject.toml (lib-python-config
 # floats on release/0.x — this surfaces any branch drift locally rather than
-# only in CI; lib-python-projects is tag-pinned at v0.1.16 — this overrides any
+# only in CI; lib-python-projects is tag-pinned at v0.1.19 — this overrides any
 # local editable-install shadow), then runs pytest. Extra args go to pytest.
 #
 # Usage (from anywhere):

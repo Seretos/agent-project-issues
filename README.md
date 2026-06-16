@@ -238,64 +238,6 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 | `pulls.modify`         | bool  | `false` | `update_pr`, `add_pr_comment` |
 | `pulls.merge`          | bool  | `false` | `merge_pr` (opt in deliberately) |
 
-### Migrating from the previous `.toml` config
-
-Before v1 the config lived in `.seretos/project-issues.toml` (originally `.claude/project-issues.toml` — both folder names have since been retired) and used a flat `permissions = { ... }` table plus split `owner` / `repo` fields. The format changed in a single breaking step — no auto-converter, no fallback. Migration is a literal field-by-field copy. The new filename is `projects.yml` (the old `project-issues.yml` name is no longer recognised by the plugin).
-
-**Before — `.claude/project-issues.toml`:**
-
-```toml
-env_file = ".env"
-
-[[projects]]
-id          = "acme-backend"
-description = "Acme main backend"
-provider    = "github"
-owner       = "acme"
-repo        = "backend"
-token_env   = "GITHUB_TOKEN_ACME"
-
-[projects.permissions.issues]
-create = true
-modify = true
-
-[projects.permissions.pulls]
-create = true
-modify = false
-merge  = false
-```
-
-**After — `.seretos/projects.yml`:**
-
-```yaml
-version: 1
-env_file: .env
-
-projects:
-  - id: acme-backend
-    description: Acme main backend
-    provider: github
-    path: acme/backend
-    token_env: GITHUB_TOKEN_ACME
-    permissions:
-      issues:
-        create: true
-        modify: true
-      pulls:
-        create: true
-        modify: false
-        merge: false
-```
-
-Key consolidation points:
-
-- **`owner` + `repo` → `path`.** GitHub uses `"owner/repo"`; the old separate fields are no longer accepted (the strict schema rejects them).
-- **`version: 1` is the new top-level field.** It defaults to `1` when omitted, but adding it explicitly future-proofs against later schema breaks.
-- **`permissions` is a YAML mapping**, not a TOML inline-table. The legacy flat shape `permissions = { create = true, modify = true, pr_create = true, pr_modify = false }` is no longer accepted — split it into the nested `issues` / `pulls` sub-mappings shown above. There was never a flat equivalent for `pulls.merge`.
-- **File extension `.yml` / `.yaml`, filename `projects.yml`** — the `.toml` filename and the old `project-issues.yml` name are no longer recognised. Rename the file along with the migration.
-
-Find-replace is enough for typical configs; the only structural change is the permissions / path collapse described above.
-
 ## Alternative installs
 
 ### From GitHub Releases

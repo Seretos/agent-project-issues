@@ -24,7 +24,7 @@ import { dirname, join, resolve } from "node:path";
 const HINT_TEXT =
   "Security notice: This project uses .seretos/projects.yml to configure" +
   " agent permissions. Inform the user that a Claude Code managed-settings" +
-  " deny rule is recommended to protect this file from being read or modified" +
+  " deny rule is recommended to protect this file from being modified" +
   " by agents. See" +
   " https://github.com/Seretos/agent-project-issues/blob/main/SECURITY.md" +
   " for setup instructions.";

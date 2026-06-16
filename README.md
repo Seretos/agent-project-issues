@@ -162,7 +162,7 @@ Each `projects[]` entry can reuse the global `GITHUB_TOKEN` or scope to a per-pr
 
 ## Security hardening
 
-`.seretos/projects.yml` grants an agent write permissions over your repositories. A dotfile path is **not** a security boundary against a write-capable agent — an agent with file-write access to the working tree can read or overwrite the config to broaden its own permissions.
+`.seretos/projects.yml` grants an agent write permissions over your repositories. A dotfile path is **not** a security boundary against a write-capable agent — an agent with file-write access to the working tree can overwrite the config to broaden its own permissions.
 
 The robust mitigation is a Claude Code **managed-settings deny rule** placed in an admin-owned OS location that the agent's file tools cannot reach:
 
@@ -170,9 +170,10 @@ The robust mitigation is a Claude Code **managed-settings deny rule** placed in 
 {
   "permissions": {
     "deny": [
-      "Read(**/.seretos/**)",
-      "Edit(**/.seretos/**)",
-      "Write(**/.seretos/**)"
+      "Edit(**/.seretos/projects.yml)",
+      "Write(**/.seretos/projects.yml)",
+      "Edit(**/.seretos/projects.yaml)",
+      "Write(**/.seretos/projects.yaml)"
     ]
   }
 }
@@ -189,6 +190,8 @@ Place this in the OS-managed settings file (filename `managed-settings.json`):
 **Important caveats:**
 
 - `~/.claude/settings.json` is within the agent's write reach and is **not** a substitute — deny rules placed there can be overwritten by the agent.
+- This rule protects **integrity** — it prevents the agent from overwriting the config to escalate its own permissions. `Read` is intentionally not denied: the config contains no secrets, and the agent can already see permission flags via `list_projects`.
+- The `**/.seretos/` glob covers both per-project configs and the user-level fallback (`~/.seretos/projects.yml`) when the agent's working root encompasses the home directory.
 - Deny rules bind Claude Code's own file tools (and recognized file commands in Bash). They do **not** sandbox arbitrary subprocesses (e.g. a Python script that opens the file directly) — OS-level sandboxing (e.g. `seccomp`, container restrictions) is required for that.
 
 This plugin ships a `UserPromptSubmit` hook (`hooks/security_hint.py`) that periodically reminds the agent to surface these guidelines whenever a `.seretos/` directory is present in the project tree. The hint hook requires Python on PATH (the core plugin binary does not).

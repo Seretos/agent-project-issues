@@ -1,5 +1,5 @@
 {
-  "description": "Injects a .seretos/ managed-settings security reminder on the first qualifying prompt and every 10th thereafter, when a .seretos/ directory is present in the project tree.",
+  "description": "Injects a .seretos/ managed-settings security reminder on the first qualifying prompt and every 10th thereafter (if not already configured), when a .seretos/ directory is present in the project tree.",
   "hooks": {
     "UserPromptSubmit": [
       {

@@ -61,15 +61,16 @@ flags are populated depends on the project's source:
 
 **Threat vector:** an agent operating in a project that has a `.seretos/projects.yml` config file is write-capable within that project tree. A sufficiently unconstrained agent can overwrite the config to grant itself broader permissions (additional projects, escalated write flags) before its next tool call — the permission gate reads the config on every call, so an overwrite takes effect immediately.
 
-**Mitigation:** place a Claude Code managed-settings deny rule in an **admin-owned OS location** that the agent's file tools cannot reach. The rule blocks Claude Code's own `Read`, `Edit`, and `Write` tools from accessing `.seretos/` paths:
+**Mitigation:** place a Claude Code managed-settings deny rule in an **admin-owned OS location** that the agent's file tools cannot reach. The rule blocks Claude Code's own `Edit` and `Write` tools from modifying `.seretos/projects.yml` (and its `.yaml` extension variant). The `Read` tool is intentionally not denied — the config contains no secrets (tokens are env vars, not inlined in the file) and reading it is a legitimate agent operation.
 
 ```json
 {
   "permissions": {
     "deny": [
-      "Read(**/.seretos/**)",
-      "Edit(**/.seretos/**)",
-      "Write(**/.seretos/**)"
+      "Edit(**/.seretos/projects.yml)",
+      "Write(**/.seretos/projects.yml)",
+      "Edit(**/.seretos/projects.yaml)",
+      "Write(**/.seretos/projects.yaml)"
     ]
   }
 }
@@ -86,7 +87,9 @@ Place this in the OS-managed settings file (filename `managed-settings.json`):
 **Caveats:**
 
 - `~/.claude/settings.json` is within the agent's write reach and is **not** a substitute.
-- Deny rules bind Claude Code's own file tools (and recognized file commands in Bash). They do **not** sandbox arbitrary subprocesses — OS-level sandboxing is required for that guarantee.
+- This rule protects **integrity** — it prevents the agent from overwriting the config to escalate its own permissions. It does not address confidentiality: `Read` is intentionally not denied.
+- Deny rules bind Claude Code's own file tools (and recognized file commands in Bash). They do **not** sandbox arbitrary subprocesses — an agent can still invoke `cp`, `tar`, a shell redirect, or any subprocess that writes the file directly. OS-level sandboxing (e.g. `seccomp`, container restrictions) is required for a stronger guarantee.
+- The `**/.seretos/` glob in the rule covers both per-project configs (`.seretos/` inside a repo) and the user-level fallback (`~/.seretos/projects.yml`) whenever the agent's working root encompasses the home directory.
 
 See the [Security hardening](README.md#security-hardening) section in README.md for setup steps.
 

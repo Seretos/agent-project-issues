@@ -79,8 +79,9 @@ def register(mcp: FastMCP) -> None:
             targets are not yet supported.
           - Inputs with a `/` but no `#` or `!` (e.g. `owner/repo`):
             rejected earlier by `_normalize_target` with `ValueError:
-            "id 'owner/repo' could not be normalised — expected a bare
-            number, '#N', or a full issue/PR URL"`.
+            "target 'owner/repo' could not be normalised — expected a bare
+            number, '#N', a full issue/PR URL, or a cross-repo reference
+            ('owner/repo#N', 'group/project#N', or 'group/project!N')"`.
 
         Symmetry: `add_relation(A, kind=parent, target=B)` is a logical
         alias for `add_relation(B, kind=child, target=A)`. Pick the

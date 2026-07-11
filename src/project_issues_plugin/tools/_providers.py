@@ -187,6 +187,35 @@ def _rewrap_404(exc, *, project_id: str, kind: str, ident: str):
     )
 
 
+def _rewrap_work_item_type_404(exc, *, project_id: str, work_item_type: str | None):
+    """Rewrap an Azure DevOps 404 raised for an invalid `work_item_type`.
+
+    Ticket #182 finding 1: `list_custom_fields(work_item_type="Bug")`
+    against an invalid type currently surfaces Azure's raw 404 body
+    verbatim, which embeds an internal Azure project GUID the agent has
+    no use for. Callers catch the raw exception and run it through this
+    helper, which raises a fresh exception (same type, NEW message — the
+    original `str(exc)` is deliberately not embedded, so the GUID never
+    reaches the agent) naming the caller's own `project_id` /
+    `work_item_type` and pointing at the recovery path: call
+    `list_custom_fields` without `work_item_type`, then read the allowed
+    values under `System.WorkItemType.allowed_values`.
+
+    The `work_item_type is not None` gate means an unscoped 404 (no
+    sensible recovery hint to give) falls through unchanged, same as
+    `_rewrap_404` does for non-404s — callers can
+    `raise _rewrap_work_item_type_404(exc, ...)` unconditionally.
+    """
+    if not hasattr(exc, "status") or exc.status != 404 or work_item_type is None:
+        return exc
+    return type(exc)(
+        404,
+        f"work_item_type '{work_item_type}' not found for project '{project_id}'. "
+        "Call list_custom_fields without work_item_type to see the allowed values "
+        "under the 'System.WorkItemType' field's 'allowed_values'.",
+    )
+
+
 # --------- error translation -------------------------------------------------
 
 
@@ -225,6 +254,7 @@ __all__ = [
     "_normalize_id",
     "_normalize_target",
     "_rewrap_404",
+    "_rewrap_work_item_type_404",
     "_safe",
     "load_projects",
     "resolve_token",

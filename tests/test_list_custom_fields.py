@@ -18,6 +18,7 @@ import pytest
 from mcp.server.fastmcp.utilities.func_metadata import func_metadata
 
 from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.base import FieldSpec
 from project_issues_plugin.tools import _providers as providers_mod
 from project_issues_plugin.tools import tickets as ticket_tools
@@ -117,6 +118,38 @@ class _MockGitHubProvider:
         return []
 
 
+# GUID substring embedded in Azure's raw 404 body — must never reach the
+# agent once rewrapped (ticket #182 finding 1).
+_ADO_GUID = "23abe1f1-1234-4a3b-9c9c-abcdefabcdef"
+
+
+class _MockADOProvider404:
+    """Fake ADO provider whose list_fields raises a raw Azure 404 (with an
+    internal project GUID in the message) when work_item_type is set."""
+
+    def __init__(self, status: int = 404) -> None:
+        self._status = status
+
+    def list_fields(self, project, token, *, work_item_type=None):
+        if work_item_type is not None:
+            raise AzureDevOpsError(
+                self._status,
+                f"TF401232: Work item type '{work_item_type}' does not exist "
+                f"in project {_ADO_GUID} or you do not have permission to "
+                "access it.",
+            )
+        return [
+            FieldSpec(
+                reference_name="System.WorkItemType",
+                display_name="Work Item Type",
+                type="string",
+                allowed_values=["Bug", "Task", "User Story"],
+                read_only=False,
+                always_required=True,
+            ),
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -211,6 +244,68 @@ def test_list_custom_fields_unknown_project_returns_error(
     out = stub.tools["list_custom_fields"](project_id="no-such-project")
 
     assert "error" in out, f"expected error key; got: {out}"
+
+
+# ---------------------------------------------------------------------------
+# 404 rewrap tests (ticket #182 finding 1)
+# ---------------------------------------------------------------------------
+
+
+def test_list_custom_fields_invalid_work_item_type_hides_guid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid work_item_type 404 is rewrapped: the caller's project_id
+    and work_item_type are named, the recovery hint is present, and the
+    internal Azure GUID from the raw provider message does NOT leak through."""
+    mock = _MockADOProvider404()
+    tools, _ = _register_with_provider(monkeypatch, mock)
+
+    out = tools["list_custom_fields"](project_id="acme", work_item_type="Bug")
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    message = out["error"]
+    assert "acme" in message
+    assert "Bug" in message
+    assert "list_custom_fields" in message
+    assert "allowed_values" in message or "System.WorkItemType" in message
+    assert _ADO_GUID not in message
+
+
+def test_list_custom_fields_unscoped_404_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 with work_item_type=None (no scoping to rewrap around) is
+    NOT rewrapped — the rewrap gate requires work_item_type is not None."""
+
+    class _MockADOProviderUnscoped404:
+        def list_fields(self, project, token, *, work_item_type=None):
+            raise AzureDevOpsError(404, f"project {_ADO_GUID} not found")
+
+    mock = _MockADOProviderUnscoped404()
+    tools, _ = _register_with_provider(monkeypatch, mock)
+
+    out = tools["list_custom_fields"](project_id="acme")
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    # Raw message passes through unchanged (including the GUID) — there is
+    # no work_item_type to give a recovery hint about.
+    assert _ADO_GUID in out["error"]
+
+
+def test_list_custom_fields_non_404_error_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-404 AzureDevOpsError (e.g. 401/500) is not touched by the
+    work-item-type rewrap; it surfaces via the normal _safe translation."""
+    mock = _MockADOProvider404(status=401)
+    tools, _ = _register_with_provider(monkeypatch, mock)
+
+    out = tools["list_custom_fields"](project_id="acme", work_item_type="Bug")
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    # The raw (unwrapped) message, including the GUID, passes through since
+    # the rewrap only fires on 404.
+    assert _ADO_GUID in out["error"]
 
 
 def _param_description(fn: Callable, param: str) -> str:

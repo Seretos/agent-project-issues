@@ -124,7 +124,50 @@ Azure DevOps differences worth knowing:
 - **Relations** — `parent` / `child` map to `Hierarchy-Reverse` / `Hierarchy-Forward`, `blocks` / `blocked_by` to `Dependency-Forward` / `-Reverse`, `duplicate_of` to `Duplicate-Forward`, `relates_to` to `Related`. Cross-project relation writes are rejected (parity with GitHub/GitLab).
 - **Pipelines** — `list_pipeline_runs` reads from the classic Build REST surface (`/_apis/build/builds`). `list_runs_for_ticket` walks the work-item's `ArtifactLink` relations to find associated builds. Failure context is the last ~120 lines of the failing job's log; like GitLab, no structured Check-Run annotations.
 
-### Where the loader looks for the config
+#### Board columns (optional)
+
+Add a `board:` block to a project entry to let `list_board_columns` and the `column` filter on `list_tickets` / `list_tickets_across_projects` reason about the project's board in logical, provider-agnostic column names instead of raw provider primitives. Supported on GitHub (Projects v2) and Azure DevOps (Azure Boards) only — GitLab has no board concept and `list_board_columns` always returns `columns: []` for it.
+
+`columns` is the ordered list of logical names the agent uses (e.g. in the `column` filter); `binding` maps those onto the live provider board. Logical names default to identity (a column named `"Approved"` looks for a native `"Approved"` option/column) — set `binding.map` only where the logical and native names differ.
+
+GitHub Projects v2:
+
+```yaml
+projects:
+  - id: acme-backend
+    provider: github
+    path: acme/backend
+    board:
+      columns: [Todo, Approved, Doing, Done]
+      binding:
+        kind: github-projects-v2
+        owner: acme               # org or user login that owns the project
+        project_number: 7
+        status_field: Status      # optional; default shown
+        map:                      # optional; only where names differ
+          Approved: "Ready for Dev"
+```
+
+Azure Boards:
+
+```yaml
+projects:
+  - id: acme-ado-web
+    provider: azuredevops
+    path: acme/frontend-stack/web
+    board:
+      columns: [New, Approved, Doing, Done]
+      binding:
+        kind: azure-boards
+        team: Web Team            # Azure Boards boards are bound to a team + backlog level
+        board: Stories            # or "Epics" / "Features" / a custom board name
+        provider_extras:
+          split_done_column: Done # marks "Doing" as the split's Doing half (System.BoardColumnDone)
+```
+
+Both `owner`/`project_number` (GitHub) and `team`/`board` (Azure DevOps) can be omitted from the YAML — the block stays schema-valid — but `list_board_columns` (and the `column` filter) raise a descriptive error at call time if the binding is used without them, rather than silently no-op-ing.
+
+
 
 Resolution happens in three legs, in order. **The first leg that produces results wins entirely — subsequent legs are skipped.**
 
@@ -226,6 +269,7 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 | `base_url`    | string | optional | provider host | Self-hosted base URL — GitLab (`https://gitlab.example.com`) or Azure DevOps Server (`https://devops.example.com`). Ignored for GitHub. |
 | `token_env`   | string | optional | provider default | Name of the env var holding the API token for this project (e.g. `"GITHUB_TOKEN_ACME"`). When omitted the loader falls back to `GITHUB_TOKEN` / `GITLAB_TOKEN` / `AZURE_DEVOPS_TOKEN`. |
 | `default_work_item_type` | string | optional | discovered | Azure DevOps only. Which work-item type `create_ticket` creates (e.g. `"Bug"`). When omitted the provider auto-picks the first match from `Issue → Bug → User Story → Product Backlog Item → Requirement`. |
+| `board`       | object | optional | unset         | GitHub/Azure DevOps only (ignored on GitLab). Logical board columns + provider binding — see [Board columns](#board-columns-optional). Feeds `list_board_columns` and the `column` filter on `list_tickets`. |
 | `permissions` | object | optional | all-false     | Permission flags (see below). Defaults make the project read-only. |
 
 **`permissions`:**

@@ -44,6 +44,7 @@ def register(mcp: FastMCP) -> None:
         limit_per_project: int = 10,
         omit_body: bool = False,
         body_max_chars: int | None = None,
+        column: str | None = None,
     ) -> dict:
         """List tickets across multiple projects in a single call.
 
@@ -55,6 +56,14 @@ def register(mcp: FastMCP) -> None:
         `search`) and `limit_per_project` are applied per-project with
         the same semantics as `list_tickets`. `limit_per_project` caps
         the result count for each project independently.
+
+        `column` carries the same semantics as `list_tickets`' `column`
+        filter — a logical board column, discovered per-project via
+        `list_board_columns`. Since it's a single value applied to every
+        project in the batch, mix providers/boards in one call only when
+        the same logical column name is meaningful across all of them;
+        GitLab projects in the batch fail that entry with a per-project
+        "not supported" error (not a top-level exception).
 
         Default `limit_per_project` is `10` — the fan-out shape
         multiplies the body-row cost, so this is the conservative
@@ -114,6 +123,7 @@ def register(mcp: FastMCP) -> None:
             limit=limit_per_project,
             not_labels=not_labels or [],
             author=author,
+            board_column=column,
         )
 
         for pid in target_ids:
@@ -136,7 +146,7 @@ def register(mcp: FastMCP) -> None:
                     "error": None,
                 }
                 total_tickets += len(ticket_dicts)
-            except (LookupError, PermissionError, NotImplementedError, GitHubError) as exc:
+            except (LookupError, PermissionError, NotImplementedError, ValueError, GitHubError) as exc:
                 msg = str(exc)
                 results[pid] = {"tickets": [], "has_more": False, "error": msg}
                 errors.append({"project_id": pid, "error": msg})

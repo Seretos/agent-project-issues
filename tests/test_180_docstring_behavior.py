@@ -63,6 +63,20 @@ def _param_description(fn: Callable, param: str) -> str:
     return schema.get("properties", {}).get(param, {}).get("description", "")
 
 
+def _normalize_ws(text: str) -> str:
+    """Collapse all whitespace runs (including the newline + indentation
+    between wrapped docstring lines) to a single space.
+
+    CPython 3.13+ strips the common leading whitespace from multi-line
+    docstrings at compile time (`__doc__` comes back dedented); older
+    versions (e.g. the 3.12 CI pin) do not, so a wrapped docstring line
+    is followed by `\\n` plus the source's indentation instead of a bare
+    `\\n`. Comparing against whitespace-normalized text keeps these
+    assertions correct on both.
+    """
+    return " ".join(text.split())
+
+
 # ---------------------------------------------------------------------------
 # Item 1 — get_ticket: duplicate_of / duplicated_by are GitHub + GitLab +
 # Azure DevOps, not just "GitHub + Azure DevOps".
@@ -77,10 +91,10 @@ def test_get_ticket_docstring_does_not_confine_duplicate_of_to_github_and_ado():
     doc = _ticket_tools["get_ticket"].__doc__ or ""
 
     old_wrong_clause = (
-        "`duplicate_of`, `duplicated_by`, `mentions`,\n"
+        "`duplicate_of`, `duplicated_by`, `mentions`, "
         "`mentioned_by`, `blocks`, `blocked_by` (GitHub + Azure DevOps)"
     )
-    assert old_wrong_clause not in doc, (
+    assert old_wrong_clause not in _normalize_ws(doc), (
         "get_ticket docstring still confines duplicate_of/duplicated_by to "
         "GitHub + Azure DevOps only"
     )
@@ -109,13 +123,13 @@ def test_get_ticket_docstring_states_duplicate_of_supported_on_gitlab():
 def test_get_ticket_docstring_leaves_blocks_grouping_untouched():
     """blocks/blocked_by must remain GitHub + Azure DevOps only (unchanged)."""
     doc = _ticket_tools["get_ticket"].__doc__ or ""
-    assert "`blocks`,\n`blocked_by` (GitHub + Azure DevOps)" in doc
+    assert "`blocks`, `blocked_by` (GitHub + Azure DevOps)" in _normalize_ws(doc)
 
 
 def test_get_ticket_docstring_leaves_relates_to_grouping_untouched():
     """relates_to must remain GitLab + Azure DevOps only (unchanged)."""
     doc = _ticket_tools["get_ticket"].__doc__ or ""
-    assert "plus `relates_to`\n(GitLab + Azure DevOps)" in doc
+    assert "plus `relates_to` (GitLab + Azure DevOps)" in _normalize_ws(doc)
 
 
 def test_list_relation_kinds_provider_support_includes_gitlab_duplicate_of():

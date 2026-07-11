@@ -98,6 +98,37 @@ def test_delete_comment_ticket_id_description_mentions_azure():
 
 
 # ---------------------------------------------------------------------------
+# comments — ticket_id description is unified (ticket #184): identical
+# across get_comment/update_comment/delete_comment, and states the single
+# "always pass it" rule rather than the old per-provider divergence framing.
+# ---------------------------------------------------------------------------
+
+
+def test_comment_tools_ticket_id_description_identical_across_tools():
+    tools = _register(comment_tools)
+    descs = {
+        name: _param_description(tools[name], "ticket_id")
+        for name in ("get_comment", "update_comment", "delete_comment")
+    }
+    assert descs["get_comment"] == descs["update_comment"] == descs["delete_comment"], (
+        f"Expected byte-identical ticket_id descriptions, got: {descs!r}"
+    )
+
+
+def test_comment_tools_ticket_id_description_states_unified_rule():
+    tools = _register(comment_tools)
+    for name in ("get_comment", "update_comment", "delete_comment"):
+        desc = _param_description(tools[name], "ticket_id")
+        assert "Always" in desc, (
+            f"Expected 'Always' in {name} ticket_id description, got: {desc!r}"
+        )
+        assert "optional for GitHub" not in desc, (
+            f"Expected old divergence phrasing absent from {name} "
+            f"ticket_id description, got: {desc!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # tickets.add_comment — body
 # ---------------------------------------------------------------------------
 

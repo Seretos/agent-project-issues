@@ -70,6 +70,9 @@ def register(mcp: FastMCP) -> None:
         omit_body: bool = False,
         body_max_chars: int | None = None,
         omit_nulls: bool = False,
+        states: list[str] | None = None,
+        area_path: str | None = None,
+        area_path_recursive: bool = True,
     ) -> dict:
         """List tickets in a project. Default: open tickets, limit 30.
 
@@ -83,6 +86,23 @@ def register(mcp: FastMCP) -> None:
             `open`/`closed`/`any` are normalised by this tool — they are
             NOT valid inputs for `update_ticket` or `create_ticket`, which
             require provider-native strings from `list_ticket_statuses`.
+          - `states`: provider-native state values (e.g. Azure DevOps
+            `["New", "Approved"]`, or GitHub/GitLab `["open"]`) — call
+            `list_ticket_statuses(project_id)` first to discover the
+            valid strings for a project; pass them exactly as returned,
+            no casing/whitespace normalisation. Supported on all three
+            providers. A non-empty `states` list takes full precedence
+            over `status` (including `status="any"`). An unknown value
+            raises an error naming the accepted values.
+          - `area_path`: Azure-DevOps-only `System.AreaPath` filter. On
+            GitHub/GitLab a non-empty value raises an explicit error
+            ("not supported ... it is an Azure DevOps concept") rather
+            than being silently ignored. `area_path_recursive` (default
+            `True`) selects `UNDER` (the path and all descendants) vs
+            an exact `=` match on the single path; ignored when
+            `area_path` is unset. No validation against Azure's
+            classification-node tree — an invalid path simply yields
+            zero matches instead of an error.
           - `labels`: only tickets carrying ALL of these labels.
           - `not_labels`: exclude tickets carrying ANY of these labels
             (e.g. `["test"]` filters out test issues).
@@ -155,6 +175,9 @@ def register(mcp: FastMCP) -> None:
                     updated_before=updated_before,
                     sort_by=sort_by,
                     sort_order=sort_order,
+                    states=states or [],
+                    area_path=area_path,
+                    area_path_recursive=area_path_recursive,
                 ),
             )
             rows = [asdict(t) for t in tickets]

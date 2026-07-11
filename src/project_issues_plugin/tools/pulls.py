@@ -161,6 +161,30 @@ def register(mcp: FastMCP) -> None:
         get the real `true` / `false` instead of branching on the
         transient `null`.
 
+        Azure DevOps quirk: `merge_commit_sha` (and `mergeable: true`)
+        can already be populated right after `create_pr`, before any
+        merge has happened — Azure DevOps computes a speculative
+        pre-merge preview commit natively, it is NOT proof that a merge
+        occurred. Check `merged` / `status` to know whether the PR was
+        actually merged; do not treat a populated `merge_commit_sha` as
+        confirmation. Contrast with GitHub, which correctly returns
+        `mergeable: null` pre-merge (see above).
+
+        GitLab quirk: `base.sha` is `null` immediately after `create_pr`
+        and only populates on a later fetch (e.g. `merge_pr`'s response
+        or a subsequent `get_pr` call) — the same async-computation
+        pattern as GitHub's `mergeable_state`, but for this field.
+        Re-fetch rather than treating the transient `null` as a missing
+        or error value.
+
+        `detailed_merge_status` is GitLab-only — GitHub and Azure DevOps
+        always return `null` for it. GitLab's enum (may not be
+        exhaustive): `unchecked`, `checking`, `mergeable`,
+        `not_mergeable`, `discussions_not_resolved`, `ci_must_pass`,
+        `ci_still_running`, `not_open`, `broken_status`,
+        `blocked_status`, `commits_status`, `preparing`, `draft_status`,
+        `jira_association_missing`, `need_rebase`, `conflict`.
+
         Comment-slicing knobs — apply to the discussion `comments`
         list only. They do not affect `review_comments` in any way:
           - `include_comments=False`: omits the `comments` key entirely
@@ -276,6 +300,18 @@ def register(mcp: FastMCP) -> None:
         from. Distinct from `assignees`: reviewers carry per-user review
         state (approved / changes-requested / commented); assignees
         don't. Requires the project's `pulls.create` permission.
+
+        Azure DevOps quirk: the returned `merge_commit_sha` (with
+        `mergeable: true`) can already be populated on this very
+        create response, before any merge has happened — Azure DevOps
+        computes a speculative pre-merge preview commit natively. Do
+        not read it as proof of a merge; check `merged` / `status`
+        instead.
+
+        GitLab quirk: `base.sha` is `null` on this create response and
+        only populates on a later fetch (e.g. via `merge_pr`'s response
+        or a subsequent `get_pr` call) — don't treat the transient
+        `null` as a missing or error value.
         """
         def go() -> dict:
             if head == base:
@@ -476,7 +512,14 @@ def register(mcp: FastMCP) -> None:
         `state` is one of:
           - `"approve"`         — approve the PR (a body is optional;
             on GitLab it's posted as a separate note so the rationale
-            is captured).
+            is captured). Self-approval policy diverges by provider:
+            GitHub hard-blocks approving your own PR — the error
+            message contains GitHub's underlying text `Can not approve
+            your own pull request`, wrapped as `GitHub 422: ...` with
+            `(GitHub platform restriction; use another account)`
+            appended (not a bare passthrough) — while GitLab allows
+            self-approval outright. Generic approve-then-merge logic
+            must be prepared to handle/tolerate the GitHub error.
           - `"request_changes"` — request changes (a body is required;
             on GitLab this also issues a best-effort `unapprove`).
           - `"comment"`         — leave a review-level comment without
@@ -550,6 +593,12 @@ def register(mcp: FastMCP) -> None:
         `pull_request` is the full post-merge PR snapshot — the same
         shape `get_pr` returns — so `merged: true` and
         `merge_commit_sha` are available without a follow-up `get_pr`.
+
+        Azure DevOps quirk: merging a PR adds the merging user to
+        `requested_reviewers` as a native side effect of the merge
+        operation itself — reviewer/assignee fields can mutate as a
+        result of merging, not just PR-state fields like `merged` /
+        `status`.
         """
         def go() -> dict:
             project = _resolve(project_id)

@@ -5,7 +5,7 @@
 #                         will NOT re-pull a branch dep whose version string
 #                         is unchanged, so a local dev env can silently lag
 #                         behind CI (which always starts with a clean env).
-#   lib-python-projects -- pinned to an exact immutable tag (@v0.2.1). The
+#   lib-python-projects -- pinned to an exact immutable tag (see pyproject.toml). The
 #                         tag never moves, so drift is impossible; however a
 #                         local `pip install -e <lib>` checkout can still
 #                         shadow the released package entirely, making pytest
@@ -18,21 +18,40 @@
 #
 # Usage (from anywhere; paths resolve off the repo root):
 #   pwsh -File scripts/sync-libs.ps1
+#   pwsh -File scripts/sync-libs.ps1 -Python C:\path\to\.venv\Scripts\python.exe
+#
+# -Python lets a caller (e.g. build.ps1) target a specific interpreter --
+# typically its own project-local .venv -- instead of whatever `python` is
+# ambient on PATH. This matters for build.ps1: its .venv can persist across
+# runs, and a previously-installed local editable checkout of a lib would
+# otherwise keep shadowing the pinned release inside that venv forever.
 #
 # Runs on Windows PowerShell 5.1 and PowerShell 7+ (Windows / Linux).
+
+[CmdletBinding()]
+param(
+    [string]$Python
+)
 
 $root = (Resolve-Path "$PSScriptRoot/..").Path
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 
-# Locate a Python launcher. setup-python (CI) and typical local installs
-# both expose `python`; fall back to `python3` on POSIX-only setups.
-$py = $null
-foreach ($cand in @("python", "python3")) {
-    if (Get-Command $cand -ErrorAction SilentlyContinue) { $py = $cand; break }
+# Locate a Python launcher. Use the caller-supplied interpreter if given;
+# otherwise fall back to whatever `python`/`python3` is ambient on PATH
+# (setup-python in CI, or a typical local install).
+$py = $Python
+if ($py) {
+    if (-not (Test-Path $py) -and -not (Get-Command $py -ErrorAction SilentlyContinue)) {
+        Fail "Specified -Python '$py' not found."
+    }
+} else {
+    foreach ($cand in @("python", "python3")) {
+        if (Get-Command $cand -ErrorAction SilentlyContinue) { $py = $cand; break }
+    }
+    if (-not $py) { Fail "No python/python3 found on PATH." }
 }
-if (-not $py) { Fail "No python/python3 found on PATH." }
 
 # Single source of truth: pull the lib specs straight from pyproject.toml
 # so this script never drifts from the declared dependency (branch, URL).
@@ -55,4 +74,4 @@ $specs | ForEach-Object { Write-Host "    $_" }
 & $py -m pip install --force-reinstall --no-cache-dir --no-deps @specs
 if ($LASTEXITCODE -ne 0) { Fail "pip install (lib refresh) failed." }
 
-Write-Step "Libs synced: lib-python-config to release/0.x HEAD; lib-python-projects pinned at v0.2.1."
+Write-Step "Libs synced: lib-python-config to release/0.x HEAD; lib-python-projects to its pinned tag."

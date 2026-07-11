@@ -208,6 +208,19 @@ if ($LASTEXITCODE -ne 0) {
     Fail "pip install failed."
 }
 
+# 2b. Force the lib-python-* deps to the exact refs pinned in pyproject.toml.
+# The .venv above is reused across runs (created once, not per-build), and
+# `pip install -e ".[build]"` alone won't touch a package that's already
+# "satisfied" -- including a stale local editable checkout of a lib that
+# got installed into this venv some other way. Without this step, `build.ps1`
+# can silently ship a binary built against whatever lib happens to already
+# be in .venv instead of the pinned release (see AGENTS.md / sync-libs.ps1).
+Write-Step "Syncing lib-python-* to pinned refs"
+& "$PSScriptRoot/sync-libs.ps1" -Python $script:PyCmd
+if ($LASTEXITCODE -ne 0) {
+    Fail "Lib sync failed."
+}
+
 # 3. Clean previous build artifacts if requested.
 if ($Clean) {
     Write-Step "Cleaning dist/ and build/"

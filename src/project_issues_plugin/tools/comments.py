@@ -40,6 +40,19 @@ from project_issues_plugin.tools._providers import (
 )
 from project_issues_plugin.tools._slicing import apply_body_knobs, apply_order
 
+# Shared across get_comment/update_comment/delete_comment (ticket #184): one
+# rule callers can follow without special-casing per provider. Required for
+# GitLab/Azure DevOps, ignored/harmless on GitHub, so passing it always works.
+# A plain string (not a shared Field(...) instance) so each Annotated site
+# gets its own FieldInfo — pydantic FieldInfo instances are not meant to be
+# reused across multiple model fields.
+_TICKET_ID_DESCRIPTION = (
+    "Always pass the id of the ticket this comment belongs to; "
+    "required for GitLab and Azure DevOps, ignored by GitHub, so "
+    "passing it always works. GitLab alternative: encode the comment "
+    "id as the self-contained '<iid>/<note_id>' form instead."
+)
+
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
@@ -118,22 +131,23 @@ def register(mcp: FastMCP) -> None:
     def get_comment(
         project_id: str,
         comment_id: str,
-        ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
+        ticket_id: Annotated[str | None, Field(description=_TICKET_ID_DESCRIPTION)] = None,
     ) -> dict:
         """Get a single comment by id.
 
-        `ticket_id` carries consistent semantics across providers:
-          - GitHub: unused (comment ids are repo-wide). May be omitted
-            or set to `None`.
-          - GitLab: required when `comment_id` is a bare note id (as
-            returned by `add_comment`). Prefer passing the bare note
-            id with `ticket_id` set. The composite `"<iid>/<note_id>"`
-            format in `comment_id` is accepted at this layer but may
-            not work correctly in all cases; `ticket_id` is then
-            ignored.
-          - Azure DevOps: always required — work-item comment ids are
-            scoped to a work item (`workItems/{ticket_id}/comments/
-            {comment_id}`); omitting it returns a structured error.
+        `ticket_id`: always pass the id of the ticket this comment
+        belongs to. Required for GitLab and Azure DevOps; ignored (and
+        safe to omit) on GitHub, since GitHub comment ids are
+        repo-wide. Passing it is therefore always correct regardless
+        of provider.
+          - Azure DevOps: work-item comment ids are scoped to a work
+            item (`workItems/{ticket_id}/comments/{comment_id}`);
+            omitting `ticket_id` returns a structured error.
+          - GitLab: Prefer passing `ticket_id` with the bare note id
+            (as returned by `add_comment`). As a self-contained
+            alternative, the composite `"<iid>/<note_id>"` format is
+            accepted in `comment_id` at this layer, but may not work correctly
+            in all cases; `ticket_id` is then ignored.
 
         Read-only: requires a token only if the repo is private.
         """
@@ -160,7 +174,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         comment_id: str,
         body: Annotated[str, Field(description="New comment body. Do NOT include '#ai-generated' — added automatically. Use real U+000A newlines, not the \\n escape.")],
-        ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
+        ticket_id: Annotated[str | None, Field(description=_TICKET_ID_DESCRIPTION)] = None,
     ) -> dict:
         """Update an existing comment's body.
 
@@ -169,18 +183,19 @@ def register(mcp: FastMCP) -> None:
         read-modify-write loop, strip the marker from the stored body
         before passing it here.
 
-        `ticket_id` carries consistent semantics across providers:
-          - GitHub: unused (comment ids are repo-wide). May be omitted
-            or set to `None`.
-          - GitLab: required when `comment_id` is a bare note id (as
-            returned by `add_comment`). Prefer passing the bare note
-            id with `ticket_id` set. The composite `"<iid>/<note_id>"`
-            format in `comment_id` is accepted at this layer but may
-            not work correctly in all cases; `ticket_id` is then
-            ignored.
-          - Azure DevOps: always required — work-item comment ids are
-            scoped to a work item (`workItems/{ticket_id}/comments/
-            {comment_id}`); omitting it returns a structured error.
+        `ticket_id`: always pass the id of the ticket this comment
+        belongs to. Required for GitLab and Azure DevOps; ignored (and
+        safe to omit) on GitHub, since GitHub comment ids are
+        repo-wide. Passing it is therefore always correct regardless
+        of provider.
+          - Azure DevOps: work-item comment ids are scoped to a work
+            item (`workItems/{ticket_id}/comments/{comment_id}`);
+            omitting `ticket_id` returns a structured error.
+          - GitLab: Prefer passing `ticket_id` with the bare note id
+            (as returned by `add_comment`). As a self-contained
+            alternative, the composite `"<iid>/<note_id>"` format is
+            accepted in `comment_id` at this layer, but may not work correctly
+            in all cases; `ticket_id` is then ignored.
 
         The body is rewritten so the first line is exactly one `#ai-*`
         marker matching the comment's authorship: `#ai-generated` if
@@ -224,22 +239,23 @@ def register(mcp: FastMCP) -> None:
     def delete_comment(
         project_id: str,
         comment_id: str,
-        ticket_id: Annotated[str | None, Field(description="Required for GitLab (bare note id) and Azure DevOps (work-item-scoped); optional for GitHub where comment ids are repo-wide. Alternatively encode the comment id as '<iid>/<note_id>' so it is self-contained.")] = None,
+        ticket_id: Annotated[str | None, Field(description=_TICKET_ID_DESCRIPTION)] = None,
     ) -> dict:
         """Delete an existing comment by id.
 
-        `ticket_id` carries consistent semantics across providers:
-          - GitHub: unused (comment ids are repo-wide). May be omitted
-            or set to `None`.
-          - GitLab: required when `comment_id` is a bare note id (as
-            returned by `add_comment`). Prefer passing the bare note
-            id with `ticket_id` set. The composite `"<iid>/<note_id>"`
-            format in `comment_id` is accepted at this layer but may
-            not work correctly in all cases; `ticket_id` is then
-            ignored.
-          - Azure DevOps: always required — work-item comment ids are
-            scoped to a work item (`workItems/{ticket_id}/comments/
-            {comment_id}`); omitting it returns a structured error.
+        `ticket_id`: always pass the id of the ticket this comment
+        belongs to. Required for GitLab and Azure DevOps; ignored (and
+        safe to omit) on GitHub, since GitHub comment ids are
+        repo-wide. Passing it is therefore always correct regardless
+        of provider.
+          - Azure DevOps: work-item comment ids are scoped to a work
+            item (`workItems/{ticket_id}/comments/{comment_id}`);
+            omitting `ticket_id` returns a structured error.
+          - GitLab: Prefer passing `ticket_id` with the bare note id
+            (as returned by `add_comment`). As a self-contained
+            alternative, the composite `"<iid>/<note_id>"` format is
+            accepted in `comment_id` at this layer, but may not work correctly
+            in all cases; `ticket_id` is then ignored.
 
         Requires the project's `issues.modify` permission.
 

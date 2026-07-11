@@ -184,8 +184,36 @@ def register(mcp: FastMCP) -> None:
         comments_limit: int | None = None,
         comments_order: Literal["asc", "desc"] = "asc",
         comments_body_max_chars: int | None = None,
+        include_custom_fields: bool = False,
     ) -> dict:
         """Get a ticket's full details, including all comments and relations.
+
+        The `ticket` object always carries `acceptance_criteria` (`str`,
+        `""` when the provider has none — Azure DevOps'
+        `Microsoft.VSTS.Common.AcceptanceCriteria`; always empty on
+        GitHub/GitLab, which have no such field) alongside `body`, so
+        agents implementing against a work item's requirements see the
+        acceptance criteria without a separate call.
+
+        Set `include_custom_fields=True` to also populate
+        `ticket.custom_fields` (`dict | None`, omitted from the response
+        as `None` when not requested or not applicable). Semantics are
+        provider-specific:
+          - **Azure DevOps**: the entire raw work-item `fields` dict
+            (every `System.*` field plus custom field references),
+            keyed by provider-native field reference names — no extra
+            HTTP request.
+          - **GitHub**: values from the project's `github-projects-v2`
+            board binding (`project.board.binding` in `projects.yml`).
+            No board binding configured → `custom_fields` stays `None`
+            ("not applicable", not an error). Binding configured but the
+            issue has no board item → `custom_fields = {}`.
+          - **GitLab**: two fixed keys, `"labels"` (the issue's label
+            list) and `"milestone"` (the milestone title, or `None`).
+          Call `list_custom_fields(project_id)` first to discover the
+          field reference names / allowed values this feeds into
+          `create_ticket`'s and `update_ticket`'s `custom_fields`
+          parameter.
 
         When `include_relations` is True (default), the response also
         includes a `relations` list describing typed links to other
@@ -268,6 +296,7 @@ def register(mcp: FastMCP) -> None:
                 ticket, comments, relations, truncated = provider.get_ticket(
                     project, token, normalized_id,
                     include_relations=include_relations,
+                    include_custom_fields=include_custom_fields,
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_404(
@@ -320,6 +349,22 @@ def register(mcp: FastMCP) -> None:
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
         status: str | None = None,
+        custom_fields: Annotated[
+            dict[str, Any] | None,
+            Field(description=(
+                "Provider-specific field overrides, applied at creation time. "
+                "Semantics differ per provider: on Azure DevOps, full dotted "
+                "field references (e.g. {'Custom.ProcessState': 'Approved'}); "
+                "on GitHub, values for the project's 'github-projects-v2' board "
+                "binding (requires a 'board' block in projects.yml — raises if "
+                "custom_fields is non-empty and no binding is configured); on "
+                "GitLab, exactly the keys 'labels' (list[str], overrides the "
+                "labels argument) and/or 'milestone' (str title, or None). "
+                "Call list_custom_fields(project_id) to discover available "
+                "field reference names and their allowed values first. "
+                "None or {} means 'no overrides' and is always a no-op."
+            ))
+        ] = None,
     ) -> dict:
         """Create a new ticket.
 
@@ -358,6 +403,12 @@ def register(mcp: FastMCP) -> None:
         Unknown values raise the same error type as `update_ticket`
         with a hint to call `list_ticket_statuses`.
 
+        `custom_fields` sets provider-specific fields (or board-column
+        values) at creation time — see the parameter description for
+        per-provider semantics. `None`/`{}` is a no-op. Errors (e.g. a
+        missing board binding) surface as `{"error": ...}`, not a
+        traceback; the ticket is not created in that case.
+
         Requires the project's `issues.create` permission.
         """
         def go() -> dict:
@@ -367,7 +418,7 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             ticket = provider.create_ticket(
                 project, token, title, body, labels or [], assignees or [],
-                status=status,
+                status=status, custom_fields=custom_fields,
             )
             return {"project_id": project.id, "ticket": asdict(ticket)}
         return _safe(go)

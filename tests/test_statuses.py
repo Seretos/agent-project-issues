@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+import httpx
 import pytest
 
 from lib_python_projects import ProjectConfig, ProjectsLoadResult
+from lib_python_projects.providers import azuredevops as ado_provider
 from lib_python_projects.providers import github as github_provider
 from lib_python_projects.providers.base import StatusSpec
 from lib_python_projects.providers.github import GitHubProvider
@@ -260,3 +262,97 @@ def test_update_ticket_provider_accepts_new_suffix_status() -> None:
     assert sent["payload"]["state"] == "closed"
     assert sent["payload"]["state_reason"] == "not_planned"
     assert ticket.status == "closed:not_planned"
+
+
+# ---------- Azure DevOps status-rejection message format (ticket #191) -------
+#
+# Verifies, from this repo's side, the deferred agent-project-issues#182
+# finding #3: Azure DevOps's status-rejection message used to read
+# "— accepted: ['To Do', 'Doing', 'Done']" (double em-dash + Python
+# list-repr) while GitHub/GitLab already used clean comma-prose. That text
+# is owned by lib-python-projects, not this repo (confirmed: no "Accepted:"
+# literal anywhere in this codebase) — it was fixed there via
+# lib-python-projects#143 / PR #144, shipped in v0.2.5. This test does not
+# re-fix the wording (nothing to fix here); it confirms the now-unified
+# message actually reaches an agent through this repo's `update_ticket`
+# tool once the pin is bumped.
+
+
+def _ado_project() -> ProjectConfig:
+    from lib_python_projects import IssuesPermissions, Permissions, PullsPermissions
+    return ProjectConfig(
+        id="acme-ado",
+        provider="azuredevops",
+        path="MyOrg/MyProject/MyRepo",
+        token_env="ADO_TOKEN",
+        permissions=Permissions(
+            issues=IssuesPermissions(create=True, modify=True),
+            pulls=PullsPermissions(create=True, modify=True, merge=True),
+        ),
+    )
+
+
+def test_update_ticket_azuredevops_rejects_invalid_status_with_unified_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _ado_project()
+    monkeypatch.setenv(project.token_env, "test-token")
+
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(projects=[project], state="ok", search_root="/tmp")
+
+    monkeypatch.setattr(providers_mod, "load_projects", fake_load_projects)
+    ticket_tools._status_cache_clear()
+    stub = _StubMCP()
+    ticket_tools.register(stub)
+    tools = stub.tools
+
+    # Isolate from the work-item-type/states discovery endpoints — those
+    # aren't what's under test here — by stubbing list_statuses directly,
+    # mirroring the GitHubProvider.list_statuses stubbing above.
+    monkeypatch.setattr(
+        ado_provider.AzureDevOpsProvider,
+        "list_statuses",
+        lambda self, project, token: StatusSpec(
+            values=["To Do", "Doing", "Done"],
+            transitions={},
+            hints={
+                "default_open": "To Do",
+                "terminal": ["Done"],
+                "terminal_completed": "Done",
+                "terminal_declined": None,
+            },
+        ),
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(200, json={"fields": {}})
+        if req.method == "PATCH":
+            # A real ADO 400 for an invalid System.State transition.
+            return httpx.Response(
+                400,
+                json={
+                    "message": "Bogus is not a valid state for work item type Bug.",
+                    "typeKey": "WorkItemTransitionDeniedException",
+                },
+            )
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_client(project, token):
+        return httpx.Client(base_url="https://dev.azure.com", transport=transport)
+
+    monkeypatch.setattr(ado_provider, "_client", fake_client)
+
+    result = tools["update_ticket"](project_id="acme-ado", ticket_id="7", status="Bogus")
+
+    assert "error" in result, result
+    message = result["error"]
+    # New, unified comma-prose — matches GitHub/GitLab's wording exactly.
+    assert "Accepted: To Do, Doing, Done." in message
+    # Old formatting must be gone: no double em-dash "accepted:" clause,
+    # no raw Python list-repr artifacts.
+    assert "— accepted:" not in message
+    assert "['" not in message and "']" not in message

@@ -22,6 +22,19 @@ projects:
     #   gitlab: full namespace, e.g. "group/sub/project"
     path: acme/backend
     token_env: GITHUB_TOKEN_ACME
+    # Optional: let `list_board_columns` and the `column` filter reason
+    # about this project's board in provider-agnostic logical names.
+    # Supported on GitHub (Projects v2) and Azure DevOps (Azure Boards)
+    # only — omit entirely for GitLab.
+    board:
+      columns: [Todo, Approved, Doing, Done]
+      binding:
+        kind: github-projects-v2
+        owner: acme               # org or user login that owns the project
+        project_number: 7
+        # status_field: Status    # optional; default shown
+        # map:                    # optional; only where logical and native names differ
+        #   Approved: "Ready for Dev"
     permissions:
       issues:
         create: true
@@ -57,6 +70,16 @@ projects:
     # project (Issue → Bug → User Story → Product Backlog Item →
     # Requirement) — covers Basic/Agile/Scrum/CMMI templates.
     # default_work_item_type: Bug
+    # Optional: let `list_board_columns` and the `column` filter reason
+    # about this project's board in provider-agnostic logical names.
+    board:
+      columns: [New, Approved, Doing, Done]
+      binding:
+        kind: azure-boards
+        team: Web Team             # Azure Boards boards are bound to a team + backlog level
+        board: Stories             # or "Epics" / "Features" / a custom board name
+        # provider_extras:
+        #   split_done_column: Done  # optional; marks "Doing" as the split's Doing half
     permissions:
       issues:
         create: true

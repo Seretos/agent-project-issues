@@ -29,6 +29,7 @@ from project_issues_plugin.tools._providers import (
     _require_token,
     _resolve,
     _rewrap_404,
+    _rewrap_work_item_type_404,
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
@@ -747,7 +748,12 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            fields = provider.list_fields(project, token, work_item_type=work_item_type)
+            try:
+                fields = provider.list_fields(project, token, work_item_type=work_item_type)
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_work_item_type_404(
+                    exc, project_id=project.id, work_item_type=work_item_type,
+                )
             return {
                 "project_id": project.id,
                 "provider": project.provider,

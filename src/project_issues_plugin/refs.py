@@ -190,7 +190,12 @@ def _looks_like_url(s: str) -> bool:
     return "://" in s
 
 
-def normalize_id(raw: str | int | None, project: ProjectConfig) -> str | None:
+def normalize_id(
+    raw: str | int | None,
+    project: ProjectConfig,
+    *,
+    unparseable_message: str | None = None,
+) -> str | None:
     """Normalise a ticket / PR / comment id input to its bare numeric form.
 
     Returns `None` when `raw` is `None` (the caller likely passed an
@@ -203,6 +208,13 @@ def normalize_id(raw: str | int | None, project: ProjectConfig) -> str | None:
       - GitLab composite comment id `"5/123"`    → `"5/123"` (pass-through)
       - GitHub issue/PR URL                      → `"12"`
       - GitLab issue / work-item / MR URL        → `"12"`
+
+    `unparseable_message`, when given, replaces the message used for the
+    terminal "could not be normalised" `ValueError` (raised once the input
+    isn't a URL, a hash-prefixed/bare number, or a GitLab composite comment
+    id). `normalize_target` uses this to swap in a target-specific message;
+    when `None` (the default, and always the case for direct `normalize_id`
+    callers) the original id-specific message is used unchanged.
     """
     if raw is None:
         return None
@@ -239,6 +251,8 @@ def normalize_id(raw: str | int | None, project: ProjectConfig) -> str | None:
     if len(composite) == 2 and all(seg.isdigit() for seg in composite):
         return "/".join(composite)
     if not stripped.isdigit():
+        if unparseable_message is not None:
+            raise ValueError(unparseable_message)
         raise ValueError(
             f"id {raw!r} could not be normalised — expected a bare number, "
             "'#N', a '<iid>/<note_id>' comment id, or a full issue/PR URL"
@@ -270,7 +284,15 @@ def normalize_target(raw: str | int | None, project: ProjectConfig) -> str | Non
     # Cross-repo form: owner/repo#N or owner/repo!N — pass through unchanged.
     if "/" in stripped and ("#" in stripped or "!" in stripped):
         return stripped
-    return normalize_id(stripped, project)
+    return normalize_id(
+        stripped,
+        project,
+        unparseable_message=(
+            f"target {raw!r} could not be normalised — expected a bare number, "
+            "'#N', a full issue/PR URL, or a cross-repo reference "
+            "('owner/repo#N', 'group/project#N', or 'group/project!N')"
+        ),
+    )
 
 
 __all__ = [

@@ -213,6 +213,40 @@ def test_normalize_target_returns_none_on_none():
     assert normalize_target(None, _github_project()) is None
 
 
+def test_normalize_target_composite_still_passes_through():
+    """Composite `5/123` (GitLab comment id shape) still passes through
+    normalize_target — this is not the unparseable case under test below."""
+    assert normalize_target("5/123", _gitlab_project()) == "5/123"
+
+
+# ---------- normalize_target: unparseable input error message (ticket #182) --
+
+
+def test_normalize_target_unparseable_message_omits_comment_id_clause():
+    """The comment-id form ('<iid>/<note_id>') is irrelevant to relation
+    targets — the error message must not mention it."""
+    with pytest.raises(ValueError) as excinfo:
+        normalize_target("not-an-id", _github_project())
+    assert "<iid>/<note_id>" not in str(excinfo.value)
+
+
+def test_normalize_target_unparseable_message_mentions_cross_repo_forms():
+    """The message must mention the cross-repo forms normalize_target
+    actually accepts (owner/repo#N and group/project!N)."""
+    with pytest.raises(ValueError, match=r"owner/repo#N"):
+        normalize_target("not-an-id", _github_project())
+
+
+def test_normalize_id_unparseable_message_unchanged():
+    """Regression guard: normalize_id's own message is untouched by the
+    normalize_target-specific message plumbing."""
+    with pytest.raises(ValueError, match="bare number"):
+        normalize_id("not-an-id", _github_project())
+    with pytest.raises(ValueError) as excinfo:
+        normalize_id("not-an-id", _github_project())
+    assert "<iid>/<note_id>" in str(excinfo.value)
+
+
 # ---------- parser classes directly -----------------------------------------
 
 

@@ -44,6 +44,9 @@ def register(mcp: FastMCP) -> None:
         limit_per_project: int = 10,
         omit_body: bool = False,
         body_max_chars: int | None = None,
+        states: list[str] | None = None,
+        area_path: str | None = None,
+        area_path_recursive: bool = True,
     ) -> dict:
         """List tickets across multiple projects in a single call.
 
@@ -55,6 +58,14 @@ def register(mcp: FastMCP) -> None:
         `search`) and `limit_per_project` are applied per-project with
         the same semantics as `list_tickets`. `limit_per_project` caps
         the result count for each project independently.
+
+        `states` and `area_path`/`area_path_recursive` carry the exact
+        same semantics as `list_tickets` — see that tool's docstring.
+        Because filters are shared across every project in `project_ids`,
+        a non-empty `area_path` fails every non-Azure-DevOps project in
+        the batch with a per-project error (not a top-level exception);
+        mix providers in one call only when the filters you pass apply
+        to all of them.
 
         Default `limit_per_project` is `10` — the fan-out shape
         multiplies the body-row cost, so this is the conservative
@@ -114,6 +125,9 @@ def register(mcp: FastMCP) -> None:
             limit=limit_per_project,
             not_labels=not_labels or [],
             author=author,
+            states=states or [],
+            area_path=area_path,
+            area_path_recursive=area_path_recursive,
         )
 
         for pid in target_ids:
@@ -136,7 +150,7 @@ def register(mcp: FastMCP) -> None:
                     "error": None,
                 }
                 total_tickets += len(ticket_dicts)
-            except (LookupError, PermissionError, NotImplementedError, GitHubError) as exc:
+            except (LookupError, PermissionError, NotImplementedError, ValueError, GitHubError) as exc:
                 msg = str(exc)
                 results[pid] = {"tickets": [], "has_more": False, "error": msg}
                 errors.append({"project_id": pid, "error": msg})

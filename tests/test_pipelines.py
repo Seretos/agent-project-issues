@@ -455,6 +455,29 @@ def test_list_pipeline_runs_recent_empty_with_status_filter_no_hint(
     )
 
 
+def test_list_pipeline_runs_recent_empty_hint_is_provider_neutral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recent-empty hint must not imply GitHub Actions specifically
+    (ticket #183 item 2) — it should read as generic CI/CD guidance that
+    also applies to GitLab CI and Azure Pipelines projects."""
+    tools = _register_tools_with(monkeypatch, _project())
+    monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            return _json({"workflow_runs": []})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](project_id="acme", recent=True)
+    assert "error" not in result, result
+    hint = result["hint"]
+    assert hint is not None
+    assert "workflows configured" not in hint
+    assert "pipeline" in hint or "CI/CD" in hint
+
+
 def test_list_pipeline_runs_recent_plus_branch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

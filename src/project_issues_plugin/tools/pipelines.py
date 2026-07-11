@@ -126,8 +126,9 @@ def register(mcp: FastMCP) -> None:
                 addressed_by = "recent"
                 if not runs and status == "all":
                     hint = (
-                        "no recent workflow runs found — the project may "
-                        "have no CI workflows configured"
+                        "no recent pipeline/CI runs found — the project may "
+                        "have no CI/CD pipelines configured (GitHub Actions "
+                        "workflows, GitLab CI, or Azure Pipelines)"
                     )
             elif branch:
                 runs, _ = provider.list_runs_for_branch(

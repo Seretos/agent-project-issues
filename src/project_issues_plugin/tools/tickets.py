@@ -239,7 +239,12 @@ def register(mcp: FastMCP) -> None:
           - **Azure DevOps**: the entire raw work-item `fields` dict
             (every `System.*` field plus custom field references),
             keyed by provider-native field reference names — no extra
-            HTTP request.
+            HTTP request. This is not limited to custom/picklist
+            fields: it also carries **identity/PII fields** verbatim,
+            e.g. `System.CreatedBy` / `System.ChangedBy` (display
+            name, unique name/email, and avatar URL of the author and
+            last editor). Filter these out client-side if you don't
+            want to expose them.
           - **GitHub**: values from the project's `github-projects-v2`
             board binding (`project.board.binding` in `projects.yml`).
             No board binding configured → `custom_fields` stays `None`
@@ -849,6 +854,15 @@ def register(mcp: FastMCP) -> None:
         The body is automatically prefixed with `#ai-generated\\n\\n`.
         Do not add that prefix yourself. Requires the project's
         `issues.modify` permission.
+
+        The returned `comment.id` is a bare note id and is **not
+        self-contained on GitLab or Azure DevOps** — those providers
+        scope comment ids to their parent ticket. To later call
+        `get_comment`, `update_comment`, or `delete_comment` on it,
+        either pass this id together with `ticket_id`, or encode it
+        as the composite `"<iid>/<note_id>"` form so the id is
+        self-contained. GitHub comment ids are already repo-wide and
+        need no `ticket_id`.
         """
         def go() -> dict:
             project = _resolve(project_id)

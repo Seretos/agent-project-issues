@@ -73,6 +73,7 @@ def register(mcp: FastMCP) -> None:
         states: list[str] | None = None,
         area_path: str | None = None,
         area_path_recursive: bool = True,
+        column: str | None = None,
     ) -> dict:
         """List tickets in a project. Default: open tickets, limit 30.
 
@@ -103,6 +104,17 @@ def register(mcp: FastMCP) -> None:
             `area_path` is unset. No validation against Azure's
             classification-node tree — an invalid path simply yields
             zero matches instead of an error.
+          - `column`: filter by logical board column (e.g. `"Approved"`),
+            as configured in the project's `board` block in
+            `projects.yml`. Call `list_board_columns(project_id)` first
+            to discover the valid logical column names for a project.
+            Supported on GitHub (Projects v2) and Azure DevOps (Azure
+            Boards); GitLab has no board concept and raises an explicit
+            "not supported" error rather than silently ignoring it. On
+            GitHub, a `column` filter takes a dedicated resolution path
+            (a single Projects-v2 GraphQL query) instead of the REST
+            `/issues` endpoint — `labels`/`not_labels`/`assignee`/
+            `states`/`status` are still applied, just client-side.
           - `labels`: only tickets carrying ALL of these labels.
           - `not_labels`: exclude tickets carrying ANY of these labels
             (e.g. `["test"]` filters out test issues).
@@ -178,6 +190,7 @@ def register(mcp: FastMCP) -> None:
                     states=states or [],
                     area_path=area_path,
                     area_path_recursive=area_path_recursive,
+                    board_column=column,
                 ),
             )
             rows = [asdict(t) for t in tickets]
@@ -735,6 +748,80 @@ def register(mcp: FastMCP) -> None:
                 "project_id": project.id,
                 "provider": project.provider,
                 "fields": [asdict(f) for f in fields],
+            }
+        return _safe(go)
+
+    @mcp.tool()
+    def list_board_columns(project_id: str) -> dict:
+        """Discover the project's logical board columns, resolved live.
+
+        Resolves the `board` block in `projects.yml` against the live
+        board and returns each logical column paired with its native
+        column/option name. Feeds directly into `list_tickets`' and
+        `list_tickets_across_projects`' `column` filter parameter — call
+        this first to discover the valid logical column names.
+
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "provider": "github" | "gitlab" | "azuredevops",
+          "columns": [
+            {
+              "logical":   str,        # the name used in projects.yml
+              "native":    str,        # the resolved live column/option name
+              "option_id": str,        # live option id (GitHub) / column id (Azure)
+              "states":    [str, ...], # Azure only: mapped System.State names; [] on GitHub
+              "is_split":  bool,       # Azure only: true for a Doing/Done split column; always False on GitHub
+            },
+            ...
+          ]
+        }
+        ```
+
+        Supported on GitHub (`github-projects-v2` binding) and Azure
+        DevOps (`azure-boards` binding). GitLab has no board concept and
+        always returns `"columns": []` — a stable fact about the
+        provider, not an error, mirroring `list_custom_fields`.
+
+        Unlike `list_custom_fields`, a **missing or misconfigured**
+        `board` block on a provider that does support boards is NOT
+        silently empty — it raises a descriptive error (no `board`
+        configured; wrong binding `kind`; missing required binding
+        fields; or a configured logical column that doesn't resolve to
+        a live column/option on the board). Fix the `projects.yml`
+        `board` block and retry rather than treating the error as
+        transient.
+
+        Read-only: no permission flag required beyond a valid token.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            if not hasattr(provider, "list_board_columns"):
+                # e.g. GitLab — no board concept at all (stable fact,
+                # not an error), mirroring list_custom_fields' fields=[].
+                return {
+                    "project_id": project.id,
+                    "provider": project.provider,
+                    "columns": [],
+                }
+            columns = provider.list_board_columns(project, token)
+            return {
+                "project_id": project.id,
+                "provider": project.provider,
+                "columns": [
+                    {
+                        "logical": c.logical,
+                        "native": c.native,
+                        "option_id": c.option_id,
+                        "states": list(c.states),
+                        "is_split": c.is_split,
+                    }
+                    for c in columns
+                ],
             }
         return _safe(go)
 

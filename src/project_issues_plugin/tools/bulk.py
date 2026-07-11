@@ -47,6 +47,7 @@ def register(mcp: FastMCP) -> None:
         states: list[str] | None = None,
         area_path: str | None = None,
         area_path_recursive: bool = True,
+        column: str | None = None,
     ) -> dict:
         """List tickets across multiple projects in a single call.
 
@@ -66,6 +67,14 @@ def register(mcp: FastMCP) -> None:
         the batch with a per-project error (not a top-level exception);
         mix providers in one call only when the filters you pass apply
         to all of them.
+
+        `column` carries the same semantics as `list_tickets`' `column`
+        filter — a logical board column, discovered per-project via
+        `list_board_columns`. Since it's a single value applied to every
+        project in the batch, mix providers/boards in one call only when
+        the same logical column name is meaningful across all of them;
+        GitLab projects in the batch fail that entry with a per-project
+        "not supported" error (not a top-level exception).
 
         Default `limit_per_project` is `10` — the fan-out shape
         multiplies the body-row cost, so this is the conservative
@@ -128,6 +137,7 @@ def register(mcp: FastMCP) -> None:
             states=states or [],
             area_path=area_path,
             area_path_recursive=area_path_recursive,
+            board_column=column,
         )
 
         for pid in target_ids:

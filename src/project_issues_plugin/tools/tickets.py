@@ -254,9 +254,10 @@ def register(mcp: FastMCP) -> None:
         When `include_relations` is True (default), the response also
         includes a `relations` list describing typed links to other
         tickets / PRs. Relation kinds: `parent`, `child`, `closes`,
-        `closed_by`, `duplicate_of`, `duplicated_by`, `mentions`,
-        `mentioned_by`, `blocks`, `blocked_by` (GitHub + Azure DevOps),
-        plus `relates_to` (GitLab + Azure DevOps). Each relation carries
+        `closed_by`, `mentions`, `mentioned_by`, `duplicate_of`,
+        `duplicated_by` (GitHub + GitLab + Azure DevOps), `blocks`,
+        `blocked_by` (GitHub + Azure DevOps), plus `relates_to`
+        (GitLab + Azure DevOps). Each relation carries
         `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo),
         best-effort `title`, `url`, `state`
         (`"open"`/`"closed"`/`"merged"`/`""`), and `is_pull_request`.
@@ -708,9 +709,12 @@ def register(mcp: FastMCP) -> None:
         about those providers, not "unsupported" or "retry later").
 
         The `work_item_type` parameter optionally scopes the field set to
-        a specific Azure DevOps work-item type (e.g. `"Bug"`, `"Task"`).
+        a specific Azure DevOps work-item type (e.g. `"Task"`, `"Issue"`).
         When omitted the provider returns all fields across all types.
-        It is silently ignored by GitHub and GitLab.
+        It is silently ignored by GitHub and GitLab. Valid work-item
+        type names vary by process template — not every template ships
+        the same types — so call with `work_item_type=None` first to
+        discover which types exist before scoping to one.
 
         The `reference_name` and `allowed_values` values returned here
         feed directly into `update_ticket`'s `custom_fields` parameter —

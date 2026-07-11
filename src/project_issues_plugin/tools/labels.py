@@ -8,7 +8,8 @@ the lib; this module is wiring only.
 Provider color format notes:
   - **GitHub**: `color` is a 6-hex string *without* `#` (e.g. ``"ededed"``).
     Defaults to ``"ededed"`` when omitted on create.
-  - **GitLab**: `color` is `#RRGGBB` (e.g. ``"#ff0000"``).
+  - **GitLab**: `color` is `#RRGGBB` (e.g. ``"#ff0000"``); bare 6-hex
+    like ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
   - **Azure DevOps**: `color` is always empty — the provider uses implicit
     tag-style labels with no color or description support.  `create_label`,
     `update_label`, and `delete_label` on Azure DevOps will always return
@@ -88,7 +89,8 @@ def register(mcp: FastMCP) -> None:
 
         `color` semantics differ by provider:
           - GitHub: bare 6-hex string, e.g. ``"ededed"``.
-          - GitLab: ``#RRGGBB``, e.g. ``"#ff0000"``.
+          - GitLab: ``#RRGGBB``, e.g. ``"#ff0000"``; bare 6-hex like
+            ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
           - Azure DevOps: always ``""`` (tags have no color concept).
 
         `description` is always a string. An empty string ``""`` is a
@@ -112,7 +114,7 @@ def register(mcp: FastMCP) -> None:
     def create_label(
         project_id: str,
         name: str,
-        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'). Azure DevOps: ignored (tags have no color concept).")] = None,
+        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB'. Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
     ) -> dict:
         """Create a new label in the project's repository.
@@ -124,7 +126,8 @@ def register(mcp: FastMCP) -> None:
         `color` format is provider-specific:
           - GitHub: 6-hex string *without* ``#`` (e.g. ``"ededed"``).
             Omit to use the GitHub default (``"ededed"``).
-          - GitLab: ``#RRGGBB`` (e.g. ``"#ff0000"``).
+          - GitLab: ``#RRGGBB`` (e.g. ``"#ff0000"``); bare 6-hex like
+            ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
           - Azure DevOps: label creation is not supported — returns
             ``{"error": "..."}`` containing "not supported".
 
@@ -165,7 +168,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         name: Annotated[str | None, Field(description="Name of the label to look up (lookup key only — never mutated by this call). To rename the label, supply `new_name`.")] = None,
         new_name: Annotated[str | None, Field(description="New name for the label (renames it). Leave unset to keep the current name.")] = None,
-        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'). Azure DevOps: ignored (tags have no color concept).")] = None,
+        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB'. Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
     ) -> dict:
         """Rename or recolour an existing label.

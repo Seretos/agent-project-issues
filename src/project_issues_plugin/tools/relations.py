@@ -95,9 +95,11 @@ def register(mcp: FastMCP) -> None:
             to GraphQL work-item ids first, raising `RelationNotFound`
             if either side can't be resolved.
           - `duplicate_of` triggers a body-edit and closes the source
-            on both providers — the marker line `#ai-generated` /
+            on GitHub and GitLab — the marker line `#ai-generated` /
             `#ai-modified` is preserved correctly via the shared
-            marker helper.
+            marker helper. (Azure DevOps' `duplicate_of` side-effect
+            is implemented in the `lib-python-projects` lib and is
+            not independently verified from this repo.)
 
         Requires the project's `issues.modify` permission.
 
@@ -117,6 +119,11 @@ def register(mcp: FastMCP) -> None:
           }
         }
         ```
+
+        `relation.ticket_id` is the **target/other** ticket's id (the
+        "to" end resolved from `target`) — distinct from the
+        `ticket_id` request parameter above, which identifies the
+        source ticket.
 
         `resolved` documents how the relation metadata was obtained:
           - `true`  — target was fetched from the provider API; title /

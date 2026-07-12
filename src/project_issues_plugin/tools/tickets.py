@@ -266,8 +266,10 @@ def register(mcp: FastMCP) -> None:
         `duplicated_by` (GitHub + GitLab + Azure DevOps), `blocks`,
         `blocked_by` (GitHub + Azure DevOps), plus `relates_to`
         (GitLab + Azure DevOps). Each relation carries
-        `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo),
-        best-effort `title`, `url`, `state`
+        `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo)
+        — the **other/linked** ticket's id, distinct from this tool's own
+        `ticket_id` argument, which selects the ticket being queried —
+        plus best-effort `title`, `url`, `state`
         (`"open"`/`"closed"`/`"merged"`/`""`), and `is_pull_request`.
         For outgoing relations parsed from the queried ticket's own body
         (`mentions`, `closes`, `duplicate_of`) we don't fetch the target,

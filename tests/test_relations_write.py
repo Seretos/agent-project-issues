@@ -6,7 +6,8 @@ HTTP transports. The same provider-agnostic surface translates to:
     (blocks/blocked_by, API 2026-03-10), body-edit + close
     (duplicate_of).
   - GitLab: Issue Links REST (blocks/blocked_by/relates_to),
-    body-edit + close + relates_to (duplicate_of).
+    Work Items GraphQL `hierarchyWidget` (parent/child), body-edit +
+    close + relates_to (duplicate_of).
 
 Kinds the provider cannot model natively surface as
 `RelationKindUnsupported` (the `_safe` wrapper translates that to
@@ -23,7 +24,7 @@ import pytest
 from lib_python_projects import ProjectConfig
 from lib_python_projects.providers import github as github_provider
 from lib_python_projects.providers import gitlab as gitlab_provider
-from lib_python_projects.providers.base import RelationKindUnsupported
+from lib_python_projects.providers.base import RelationKindUnsupported, RelationNotFound
 from lib_python_projects.providers.github import GitHubProvider
 from lib_python_projects.providers.gitlab import GitLabProvider
 
@@ -533,28 +534,146 @@ def test_gitlab_remove_relation_blocked_by_deletes_link(
     assert ei.value.provider == "gitlab"
 
 
-# ---------- GitLab: parent / child unsupported ------------------------------
+# ---------- GitLab: parent / child via Work Items GraphQL (lib v0.3.0) -----
+#
+# lib-python-projects v0.3.0 added GitLab `parent`/`child` relation support
+# via the Work Items GraphQL `hierarchyWidget` (ticket #151 in the lib) —
+# previously these two kinds raised `RelationKindUnsupported`. These tests
+# were updated (alongside the v0.3.0 pin bump, ticket #201) to cover the
+# now-supported happy path via a minimal GraphQL mock instead of asserting
+# the stale "unsupported" behaviour.
 
 
-def test_gitlab_add_relation_parent_unsupported(
+def _gl_work_item_node(
+    *, gid: str, iid: str, title: str, web_url: str,
+    state: str = "OPEN", parent: dict | None = None,
+) -> dict:
+    return {
+        "id": gid,
+        "iid": iid,
+        "title": title,
+        "webUrl": web_url,
+        "state": state,
+        "widgets": [{"parent": parent}],
+    }
+
+
+def _install_gitlab_hierarchy_mock(
+    monkeypatch: pytest.MonkeyPatch, work_items_by_iid: dict[str, dict],
+) -> list[httpx.Request]:
+    """Mock the two GraphQL round-trips `_gitlab_add_hierarchy_relation`
+    makes: a `workItems(iid: ...)` query per side of the edge, then a
+    `workItemUpdate` hierarchy mutation."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/api/graphql"
+        body = json.loads(req.content.decode())
+        query = body["query"]
+        variables = body["variables"]
+        if "workItemUpdate" in query:
+            work_item = work_items_by_iid[variables["id"]]
+            return _json({
+                "data": {
+                    "workItemUpdate": {
+                        "workItem": work_item,
+                        "errors": [],
+                    }
+                }
+            })
+        # workItems hierarchy lookup query.
+        work_item = work_items_by_iid.get(variables["iid"])
+        return _json({
+            "data": {
+                "project": {
+                    "workItems": {"nodes": [work_item] if work_item else []}
+                }
+            }
+        })
+
+    return _install_gitlab_mock(monkeypatch, handler)
+
+
+def test_gitlab_add_relation_parent_sets_hierarchy_via_graphql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """kind="parent": ticket_id (#5)'s work item gets target (#7) as its
+    new parent — the returned Relation describes the target (#7)."""
+    subject = _gl_work_item_node(
+        gid="gid://gitlab/WorkItem/500", iid="5",
+        title="Issue 5", web_url="https://gitlab.example.com/acme/backend/-/work_items/5",
+    )
+    parent = _gl_work_item_node(
+        gid="gid://gitlab/WorkItem/700", iid="7",
+        title="Issue 7", web_url="https://gitlab.example.com/acme/backend/-/work_items/7",
+    )
+    work_items_by_iid = {
+        "5": subject,
+        "7": parent,
+        # Mutation lookups key on the work-item gid passed as `id`.
+        "gid://gitlab/WorkItem/500": {
+            **subject,
+            "widgets": [{"parent": parent}],
+        },
+    }
+    _install_gitlab_hierarchy_mock(monkeypatch, work_items_by_iid)
+
+    relation = GitLabProvider().add_relation(
+        _gitlab_project(), "tok", "5", "parent", "#7",
+    )
+    assert relation.kind == "parent"
+    assert relation.ticket_id == "#7"
+    assert relation.title == "Issue 7"
+    assert relation.url == "https://gitlab.example.com/acme/backend/-/issues/7"
+    assert relation.state == "open"
+    assert relation.resolved is True
+
+
+def test_gitlab_add_relation_child_sets_hierarchy_via_graphql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kind="child": target (#7)'s work item gets ticket_id (#5) as its
+    new parent — the returned Relation still describes the target (#7),
+    but this time `target_wi` is the *subject* work item (mirrors the
+    lib's `target_wi = parent_wi if kind == "parent" else subject_wi`)."""
+    subject = _gl_work_item_node(
+        gid="gid://gitlab/WorkItem/700", iid="7",
+        title="Issue 7", web_url="https://gitlab.example.com/acme/backend/-/work_items/7",
+    )
+    parent = _gl_work_item_node(
+        gid="gid://gitlab/WorkItem/500", iid="5",
+        title="Issue 5", web_url="https://gitlab.example.com/acme/backend/-/work_items/5",
+    )
+    work_items_by_iid = {
+        "7": subject,
+        "5": parent,
+        "gid://gitlab/WorkItem/700": {
+            **subject,
+            "widgets": [{"parent": parent}],
+        },
+    }
+    _install_gitlab_hierarchy_mock(monkeypatch, work_items_by_iid)
+
+    relation = GitLabProvider().add_relation(
+        _gitlab_project(), "tok", "5", "child", "#7",
+    )
+    assert relation.kind == "child"
+    assert relation.ticket_id == "#7"
+    assert relation.title == "Issue 7"
+    assert relation.url == "https://gitlab.example.com/acme/backend/-/issues/7"
+    assert relation.state == "open"
+    assert relation.resolved is True
+
+
+def test_gitlab_add_relation_parent_not_found_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When either side of the edge can't be resolved to a work item
+    (e.g. the mock/real project has no matching iid), `add_relation`
+    raises `RelationNotFound` rather than silently no-op'ing."""
     _install_gitlab_mock(monkeypatch, lambda r: _json({}, 200))
-    with pytest.raises(RelationKindUnsupported) as ei:
+    with pytest.raises(RelationNotFound):
         GitLabProvider().add_relation(
             _gitlab_project(), "tok", "5", "parent", "#7",
-        )
-    assert ei.value.kind == "parent"
-    assert ei.value.provider == "gitlab"
-
-
-def test_gitlab_add_relation_child_unsupported(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_gitlab_mock(monkeypatch, lambda r: _json({}, 200))
-    with pytest.raises(RelationKindUnsupported):
-        GitLabProvider().add_relation(
-            _gitlab_project(), "tok", "5", "child", "#7",
         )
 
 

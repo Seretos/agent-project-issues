@@ -567,10 +567,128 @@ def test_get_pipeline_run_failed_populates_failure(
     job = failing[0]
     assert job["name"] == "pytest"
     assert job["failed_step"] == "run tests"
-    assert job["annotations"] == annotations
+    # Normalized `FailureAnnotation` shape (lib v0.3.0, ticket #200): the
+    # GitHub provider maps `step` from the job name (not `failed_step`),
+    # `path` -> `file`, `start_line` -> `line`, `annotation_level` -> `severity`
+    # verbatim (not normalized to e.g. "error"), and `title` defaults to None
+    # when the raw annotation omits it.
+    assert job["annotations"] == [
+        {
+            "step": "pytest",
+            "message": "NameError: 'x' is not defined",
+            "file": "src/foo.py",
+            "line": 10,
+            "severity": "failure",
+            "title": None,
+        }
+    ]
     assert job["log_excerpt"] is not None
     assert "FAILED" in job["log_excerpt"]
     assert run["failure"]["note"] is None
+    assert "annotation_count" not in job
+    assert "annotations_fetched" not in job
+
+
+def test_get_pipeline_run_compact_annotations_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_annotations=False drops the full annotations list in favor
+    of a compact annotation_count/annotations_fetched pair (ticket #200),
+    mirroring the comments_fetched/relations_fetched sentinel convention.
+    name/url/failed_step/log_excerpt are unaffected."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    annotations = [
+        {
+            "path": "src/foo.py",
+            "start_line": 10,
+            "annotation_level": "failure",
+            "message": "NameError: 'x' is not defined",
+        }
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/actions/runs/5001":
+            return _json(_run_payload(
+                5001, name="test", status="completed", conclusion="failure",
+            ))
+        if path == "/repos/acme/backend/actions/runs/5001/jobs":
+            return _json({
+                "jobs": [
+                    {
+                        "id": 7001,
+                        "name": "pytest",
+                        "html_url": "https://github.com/acme/backend/actions/runs/5001/job/7001",
+                        "conclusion": "failure",
+                        "check_run_url": "https://api.github.com/repos/acme/backend/check-runs/9999",
+                        "steps": [
+                            {"name": "checkout", "conclusion": "success"},
+                            {"name": "run tests", "conclusion": "failure"},
+                        ],
+                    }
+                ]
+            })
+        if path == "/repos/acme/backend/check-runs/9999/annotations":
+            return _json(annotations)
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    def fake_log(token, log_url, **kwargs):
+        return "Running tests...\nFAILED: test_foo\n"
+
+    monkeypatch.setattr(github_provider, "_fetch_job_log", fake_log)
+
+    result = tools["get_pipeline_run"](
+        project_id="acme", run_id="5001", include_annotations=False,
+    )
+    assert "error" not in result, result
+    job = result["run"]["failure"]["failing_jobs"][0]
+    assert "annotations" not in job
+    assert job["annotation_count"] == 1
+    assert job["annotations_fetched"] is False
+    assert job["name"] == "pytest"
+    assert job["failed_step"] == "run tests"
+    # log_excerpt still present — only include_failure_excerpt gates it.
+    assert job["log_excerpt"] is not None
+    assert "FAILED" in job["log_excerpt"]
+
+
+def test_get_pipeline_run_compact_annotations_and_no_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_annotations=False combined with include_failure_excerpt=False
+    yields a fully compact summary: the underlying failure fetch never runs
+    (matches pre-#200 include_failure_excerpt semantics), so run.failure is
+    None — no annotations, no log text."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/actions/runs/5001":
+            return _json(_run_payload(
+                5001, name="test", status="completed", conclusion="failure",
+            ))
+        # No /jobs or /annotations call expected: include_failure_excerpt=False
+        # skips the whole failure-context fetch.
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    def boom(token, url, **kwargs):
+        raise AssertionError("log fetch should not happen")
+
+    monkeypatch.setattr(github_provider, "_fetch_job_log", boom)
+
+    result = tools["get_pipeline_run"](
+        project_id="acme",
+        run_id="5001",
+        include_failure_excerpt=False,
+        include_annotations=False,
+    )
+    assert "error" not in result, result
+    assert result["run"]["failure"] is None
 
 
 def test_get_pipeline_run_excerpt_anchors_on_failing_step_header(
@@ -736,6 +854,66 @@ def test_get_pipeline_run_log_403_marks_logs_unavailable(
     assert len(failing) == 1
     assert failing[0]["log_excerpt"] is None
     assert result["run"]["failure"]["note"] == "logs unavailable"
+
+
+def test_get_pipeline_run_empty_annotations_falls_back_to_log_excerpt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When structured annotations are empty (e.g. GitLab today, or a
+    GitHub check-run with no annotations attached) but the log fetch
+    succeeds, `annotations == []` and `log_excerpt` still surfaces
+    useful context (ticket #200) — the fallback is structural, not
+    conditioned on annotations being present."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/actions/runs/5004":
+            return _json(_run_payload(
+                5004, status="completed", conclusion="failure"
+            ))
+        if path == "/repos/acme/backend/actions/runs/5004/jobs":
+            return _json({
+                "jobs": [
+                    {
+                        "id": 7004,
+                        "name": "pytest",
+                        "html_url": "https://x/job/7004",
+                        "conclusion": "failure",
+                        "check_run_url": (
+                            "https://api.github.com/repos/acme/backend/check-runs/6666"
+                        ),
+                        "steps": [{"name": "run", "conclusion": "failure"}],
+                    }
+                ]
+            })
+        if path == "/repos/acme/backend/check-runs/6666/annotations":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    monkeypatch.setattr(
+        github_provider, "_fetch_job_log",
+        lambda token, url, **kw: "Running tests...\nFAILED: test_foo\n",
+    )
+
+    result = tools["get_pipeline_run"](project_id="acme", run_id="5004")
+    assert "error" not in result, result
+    job = result["run"]["failure"]["failing_jobs"][0]
+    assert job["annotations"] == []
+    assert job["log_excerpt"] is not None
+    assert "FAILED" in job["log_excerpt"]
+
+    # Compact variant: annotation_count reflects the empty list.
+    result_compact = tools["get_pipeline_run"](
+        project_id="acme", run_id="5004", include_annotations=False,
+    )
+    assert "error" not in result_compact, result_compact
+    job_compact = result_compact["run"]["failure"]["failing_jobs"][0]
+    assert "annotations" not in job_compact
+    assert job_compact["annotation_count"] == 0
+    assert job_compact["annotations_fetched"] is False
+    assert job_compact["log_excerpt"] is not None
 
 
 def test_get_pipeline_run_in_progress_skips_failure_fetch(

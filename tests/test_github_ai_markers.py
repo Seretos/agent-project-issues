@@ -148,7 +148,7 @@ def test_ensure_label_hard_fails_on_403(monkeypatch: pytest.MonkeyPatch) -> None
     _install_mock(monkeypatch, handler)
     with github_provider._client("tok") as client:
         with pytest.raises(GitHubError) as exc_info:
-            _ensure_label(client, _project(), "ai-generated")
+            _ensure_label(client, _project(), "ai-generated", "generated")
     assert exc_info.value.status == 403
 
 
@@ -166,7 +166,7 @@ def test_ensure_label_returns_for_422_already_exists(
     _install_mock(monkeypatch, handler)
     with github_provider._client("tok") as client:
         # Must not raise.
-        _ensure_label(client, _project(), "ai-generated")
+        _ensure_label(client, _project(), "ai-generated", "generated")
 
 
 def test_ensure_label_best_effort_returns_false_on_permission_denied(
@@ -180,7 +180,7 @@ def test_ensure_label_best_effort_returns_false_on_permission_denied(
 
     _install_mock(monkeypatch, handler)
     with github_provider._client("tok") as client:
-        result = _ensure_label_best_effort(client, _project(), "ai-generated")
+        result = _ensure_label_best_effort(client, _project(), "ai-generated", "generated")
     assert result is False
 
 
@@ -192,7 +192,7 @@ def test_ensure_label_best_effort_returns_true_on_success(
 
     _install_mock(monkeypatch, handler)
     with github_provider._client("tok") as client:
-        result = _ensure_label_best_effort(client, _project(), "ai-generated")
+        result = _ensure_label_best_effort(client, _project(), "ai-generated", "generated")
     assert result is True
 
 

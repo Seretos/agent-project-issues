@@ -30,6 +30,71 @@ from project_issues_plugin.tools._providers import (
 )
 
 
+def _serialize_annotation(annotation) -> dict:
+    """Map a single `FailureAnnotation` (ticket #152/#200) into the wire
+    shape: `step`, `message`, `file`, `line`, `severity`, `title`."""
+    return {
+        "step": annotation.step,
+        "message": annotation.message,
+        "file": annotation.file,
+        "line": annotation.line,
+        "severity": annotation.severity,
+        "title": annotation.title,
+    }
+
+
+def _serialize_failing_job(job, *, include_annotations: bool) -> dict:
+    """Serialize a single `FailingJob`.
+
+    Full (`include_annotations=True`): carries the normalized
+    `annotations` list (see `_serialize_annotation`) alongside
+    `log_excerpt`.
+
+    Compact (`include_annotations=False`): drops the `annotations`
+    list in favor of `annotation_count` + `annotations_fetched: False`
+    (mirroring the `comments_fetched`/`relations_fetched` sentinel
+    convention used elsewhere in this plugin), while still keeping
+    `name`, `url`, `failed_step`, and `log_excerpt`.
+    """
+    out: dict = {
+        "name": job.name,
+        "url": job.url,
+        "failed_step": job.failed_step,
+    }
+    if include_annotations:
+        out["annotations"] = [_serialize_annotation(a) for a in job.annotations]
+    else:
+        out["annotation_count"] = len(job.annotations)
+        out["annotations_fetched"] = False
+    # `log_excerpt` is a structural fallback for empty/absent structured
+    # annotations (e.g. GitLab today) — always emitted alongside the
+    # annotation section regardless of include_annotations, and is
+    # itself already gated by `include_failure_excerpt` at the point
+    # this function is only called when a `failure` block exists.
+    out["log_excerpt"] = job.log_excerpt
+    return out
+
+
+def _serialize_failure(failure, *, include_annotations: bool) -> dict:
+    """Hand-built serializer for `PipelineFailure` (ticket #200) — does
+    NOT rely on `dataclasses.asdict` recursion across the nested
+    `FailingJob` / `FailureAnnotation` dataclasses, so this repo
+    controls the exact wire shape (and can apply the
+    `include_annotations` progressive-disclosure gate) independent of
+    however the lib's dataclasses are structured. Per-job grouping
+    only — deliberately does not add a top-level flattened annotations
+    list (the lib's `PipelineFailure.failures` convenience property is
+    intentionally not surfaced here).
+    """
+    return {
+        "failing_jobs": [
+            _serialize_failing_job(job, include_annotations=include_annotations)
+            for job in failure.failing_jobs
+        ],
+        "note": failure.note,
+    }
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_pipeline_runs(
@@ -178,6 +243,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         run_id: Annotated[str, Field(description="Numeric string identifying the pipeline run. GitHub: Actions workflow_run id (e.g. '9876543210'); GitLab: pipeline id (e.g. '12345'); Azure DevOps: build id (e.g. '678'). Obtain from list_pipeline_runs. The value is numeric but the type is string — always pass it quoted (\"9876543210\"), never as a bare integer.")],
         include_failure_excerpt: bool = True,
+        include_annotations: Annotated[bool, Field(description="When True (default), each failing job carries its full normalized `annotations` list. When False, the annotations list is dropped in favor of a compact `annotation_count` + `annotations_fetched: False` pair (name/url/failed_step/log_excerpt are unaffected). Combine with include_failure_excerpt=False for a fully compact summary.")] = True,
     ) -> dict:
         """Get a single pipeline run's details.
 
@@ -190,7 +256,7 @@ def register(mcp: FastMCP) -> None:
 
         When `include_failure_excerpt=True` (default) AND the run
         concluded as `failure`, the response also carries a
-        `run.failure` block:
+        `run.failure` block, grouped per failing job:
 
         ```
         {
@@ -199,19 +265,44 @@ def register(mcp: FastMCP) -> None:
               "name": str,
               "url": str,
               "failed_step": str,
-              "annotations": [ ... ],   # GitHub check-run annotations
+              # Full form (include_annotations=True, default):
+              "annotations": [
+                {
+                  "step": str,           # job/step the annotation belongs to
+                  "message": str,        # human-readable annotation text ("" if omitted)
+                  "file": str | None,    # source file the provider anchored to
+                  "line": int | None,    # source line the provider anchored to
+                  "severity": str | None,# provider-native level, e.g. "failure"/"warning"/"notice"
+                  "title": str | None,   # short summary, when distinct from message
+                },
+                ...
+              ],
+              # Compact form (include_annotations=False) instead carries:
+              #   "annotation_count": int,
+              #   "annotations_fetched": False,
               "log_excerpt": str | None  # ~30 lines clamped to the
                                          # failing step's ##[group] /
                                          # ##[endgroup] block (with
                                          # annotation-line + substring
                                          # fallbacks), or None if logs
-                                         # unavailable
+                                         # unavailable. Always present
+                                         # (fallback context) regardless
+                                         # of include_annotations —
+                                         # structured annotations may be
+                                         # empty (e.g. GitLab today) even
+                                         # when a log excerpt exists.
             },
             ...
           ],
           "note": str | None  # e.g. "logs unavailable"
         }
         ```
+
+        `annotations` are normalized across providers (GitHub Check-Run
+        annotations, Azure Pipelines timeline-record issues both map
+        into this shape); GitLab currently has no structured surface to
+        map from, so its `annotations` is always `[]` — rely on
+        `log_excerpt` for context in that case.
 
         In-progress runs (`conclusion=None`) never trigger the failure
         fetch. 403/404 on the log endpoint degrades to
@@ -241,5 +332,10 @@ def register(mcp: FastMCP) -> None:
                     exc, project_id=project.id, kind="pipeline run",
                     ident=run_id,
                 )
-            return {"project_id": project.id, "run": asdict(run)}
+            run_dict = asdict(run)
+            if run.failure is not None:
+                run_dict["failure"] = _serialize_failure(
+                    run.failure, include_annotations=include_annotations,
+                )
+            return {"project_id": project.id, "run": run_dict}
         return _safe(go)

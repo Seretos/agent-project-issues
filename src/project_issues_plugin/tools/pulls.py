@@ -93,12 +93,12 @@ def register(mcp: FastMCP) -> None:
         list results — these fields are only computed on single-PR
         fetches. Use `get_pr` for authoritative mergeability.
 
-        GitLab note: `approvals_required` and `approvals_received` may
-        come back `null` here for a GitLab MR even though `get_pr` for
-        that same MR returns `0` — the list path does not compute these
-        fields. Read the list-path `null` as "not populated on the list
-        path," not as "zero" or "no approvals data." Call `get_pr` for
-        authoritative approval counts.
+        GitLab note: `approvals_required` and `approvals_received` are
+        populated here too (`0` when none are required or received),
+        matching `get_pr`'s behavior for the same MR — both paths
+        compute these fields the same way. GitHub and Azure DevOps
+        return `null` for both fields (on both the list and
+        single-fetch paths) — that provider difference is unchanged.
 
         Routing caveat: when `labels`, `assignee`, or `search` are set
         the provider switches from the cheap `/repos/.../pulls` endpoint
@@ -197,11 +197,11 @@ def register(mcp: FastMCP) -> None:
         `jira_association_missing`, `need_rebase`, `conflict`.
 
         GitLab note: `approvals_required` and `approvals_received` are
-        populated here (`0` when none are required or received) — but
-        the same fields may come back `null` from `list_prs` for this
-        same MR, because the list path doesn't compute them. Don't read
-        that list-path `null` as a difference in the MR's actual
-        approval state; treat this (`get_pr`) response as authoritative.
+        populated here (`0` when none are required or received),
+        matching `list_prs`'s behavior for the same MR — both paths
+        compute these fields the same way. GitHub and Azure DevOps
+        return `null` for both fields, on both the list and
+        single-fetch paths.
 
         Comment-slicing knobs — apply to the discussion `comments`
         list only. They do not affect `review_comments` in any way:

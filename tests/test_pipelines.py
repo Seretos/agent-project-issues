@@ -652,6 +652,9 @@ def test_get_pipeline_run_failed_populates_failure(
     job = failing[0]
     assert job["name"] == "pytest"
     assert job["failed_step"] == "run tests"
+    # Ticket #199: job_id is the handle needed to call
+    # get_pipeline_step_log for this job's full log.
+    assert job["job_id"] == "7001"
     # Normalized `FailureAnnotation` shape (lib v0.3.0, ticket #200): the
     # GitHub provider maps `step` from the job name (not `failed_step`),
     # `path` -> `file`, `start_line` -> `line`, `annotation_level` -> `severity`
@@ -735,6 +738,8 @@ def test_get_pipeline_run_compact_annotations_summary(
     assert job["annotations_fetched"] is False
     assert job["name"] == "pytest"
     assert job["failed_step"] == "run tests"
+    # Ticket #199: job_id survives the compact form too.
+    assert job["job_id"] == "7001"
     # log_excerpt still present — only include_failure_excerpt gates it.
     assert job["log_excerpt"] is not None
     assert "FAILED" in job["log_excerpt"]
@@ -1034,3 +1039,187 @@ def test_get_pipeline_run_in_progress_skips_failure_fetch(
     assert result["run"]["conclusion"] is None
     assert result["run"]["failure"] is None
     assert called["x"] is False
+
+
+# ---------- get_pipeline_step_log --------------------------------------------
+
+
+_STEP_LOG_TEXT = "\n".join(
+    [
+        "Setting up runner...",
+        "Running tests...",
+        "test_foo PASSED",
+        "test_bar FAILED: AssertionError: expected 1 got 2",
+        "Traceback (most recent call last):",
+        '  File "test_bar.py", line 3, in test_bar',
+        "    assert 1 == 2",
+        "AssertionError",
+        "1 failed, 1 passed",
+        "Cleaning up runner",
+    ]
+)
+
+
+def test_get_pipeline_step_log_tail_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no plain HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    monkeypatch.setattr(
+        github_provider.GitHubProvider, "get_step_log",
+        lambda self, project, token, run_id, job_id: _STEP_LOG_TEXT,
+    )
+
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001", mode="tail", max_lines=3,
+    )
+    assert "error" not in result, result
+    assert result["project_id"] == "acme"
+    assert result["run_id"] == "5001"
+    assert result["job_id"] == "7001"
+    assert result["mode"] == "tail"
+    assert result["lines"] == "\n".join(_STEP_LOG_TEXT.splitlines()[-3:])
+    assert result["total_lines"] == 10
+    assert result["returned_lines"] == 3
+    assert result["truncated"] is True
+    assert result["more_available"] is True
+
+
+def test_get_pipeline_step_log_around_failure_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+    _install_mock(monkeypatch, lambda req: (_ for _ in ()).throw(
+        AssertionError(f"no plain HTTP call expected; got {req.url}")
+    ))
+    monkeypatch.setattr(
+        github_provider.GitHubProvider, "get_step_log",
+        lambda self, project, token, run_id, job_id: _STEP_LOG_TEXT,
+    )
+
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001",
+        mode="around_failure", max_lines=4,
+    )
+    assert "error" not in result, result
+    assert result["mode"] == "around_failure"
+    assert "FAILED" in result["lines"]
+    assert result["returned_lines"] == 4
+
+
+def test_get_pipeline_step_log_errors_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+    _install_mock(monkeypatch, lambda req: (_ for _ in ()).throw(
+        AssertionError(f"no plain HTTP call expected; got {req.url}")
+    ))
+    monkeypatch.setattr(
+        github_provider.GitHubProvider, "get_step_log",
+        lambda self, project, token, run_id, job_id: _STEP_LOG_TEXT,
+    )
+
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001",
+        mode="errors_only", max_lines=10,
+    )
+    assert "error" not in result, result
+    assert result["mode"] == "errors_only"
+    assert "test_bar FAILED" in result["lines"]
+    assert "Traceback" in result["lines"]
+    assert "Setting up runner" not in result["lines"]
+
+
+def test_get_pipeline_step_log_non_numeric_run_id_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="not-a-number", job_id="7001",
+    )
+    assert "error" in result
+    assert "run_id" in result["error"]
+
+
+def test_get_pipeline_step_log_non_numeric_job_id_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="not-a-number",
+    )
+    assert "error" in result
+    assert "job_id" in result["error"]
+
+
+def test_get_pipeline_step_log_invalid_mode_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001", mode="bogus",
+    )
+    assert "error" in result
+    assert "mode" in result["error"]
+
+
+def test_get_pipeline_step_log_non_positive_max_lines_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001", max_lines=0,
+    )
+    assert "error" in result
+    assert "max_lines" in result["error"]
+
+
+def test_get_pipeline_step_log_404_rewrapped_with_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors the get_pipeline_run 404 rewrap: a provider 404 (log
+    unavailable) is rewrapped with project/run/job context via
+    `_rewrap_404`, not surfaced as GitHub's bare message."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no plain HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    def raise_404(self, project, token, run_id, job_id):
+        from lib_python_projects.providers.github import GitHubError
+        raise GitHubError(404, "Not Found")
+
+    monkeypatch.setattr(github_provider.GitHubProvider, "get_step_log", raise_404)
+
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="9999",
+    )
+    assert "error" in result
+    assert "acme#5001/9999" in result["error"]
+    assert "pipeline job log" in result["error"]

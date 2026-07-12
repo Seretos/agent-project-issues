@@ -21,6 +21,7 @@ from lib_python_projects import resolve_token
 from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.github import GitHubError
 from lib_python_projects.providers.gitlab import GitLabError
+from project_issues_plugin.tools._log_slicing import slice_log
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
@@ -55,11 +56,16 @@ def _serialize_failing_job(job, *, include_annotations: bool) -> dict:
     (mirroring the `comments_fetched`/`relations_fetched` sentinel
     convention used elsewhere in this plugin), while still keeping
     `name`, `url`, `failed_step`, and `log_excerpt`.
+
+    `job_id` (ticket #199) is emitted in both forms — it's the handle
+    an agent needs to follow up with `get_pipeline_step_log` for the
+    job's full log, so it must survive the compact/full split.
     """
     out: dict = {
         "name": job.name,
         "url": job.url,
         "failed_step": job.failed_step,
+        "job_id": job.job_id,
     }
     if include_annotations:
         out["annotations"] = [_serialize_annotation(a) for a in job.annotations]
@@ -336,6 +342,12 @@ def register(mcp: FastMCP) -> None:
         map from, so its `annotations` is always `[]` — rely on
         `log_excerpt` for context in that case.
 
+        Each failing job also carries a `job_id` (ticket #199). When
+        `log_excerpt`'s ~30 lines aren't enough, pass that `job_id`
+        (with this same `run_id`) to `get_pipeline_step_log` for the
+        job's full log, sliced down to a bounded window instead of the
+        whole unbounded text.
+
         In-progress runs (`conclusion=None`) never trigger the failure
         fetch. 403/404 on the log endpoint degrades to
         `log_excerpt=None` plus `note="logs unavailable"`.
@@ -370,4 +382,115 @@ def register(mcp: FastMCP) -> None:
                     run.failure, include_annotations=include_annotations,
                 )
             return {"project_id": project.id, "run": run_dict}
+        return _safe(go)
+
+    @mcp.tool()
+    def get_pipeline_step_log(
+        project_id: str,
+        run_id: Annotated[str, Field(description="Numeric string identifying the pipeline run — the same run_id you'd pass to get_pipeline_run. Obtain from list_pipeline_runs.")],
+        job_id: Annotated[str, Field(description="Numeric string identifying the failing job within the run. Obtain from get_pipeline_run's run.failure.failing_jobs[].job_id — do not guess or construct it.")],
+        mode: Literal["tail", "around_failure", "errors_only"] = "around_failure",
+        max_lines: int = 200,
+    ) -> dict:
+        """Fetch one failing job's full log, bounded to a small slice.
+
+        This is the explicit, bounded follow-up for a single failing
+        job named by `get_pipeline_run` — call it when that tool's
+        compact `log_excerpt` (~30 lines clamped around the failing
+        step) isn't enough context. Unlike a raw log fetch, this tool
+        ALWAYS bounds its output to at most `max_lines` (hard-capped at
+        1000 regardless of what's requested) — it never returns the
+        full, unbounded log text into the conversation.
+
+        `run_id` / `job_id` are the same identifiers surfaced on a
+        failing job from `get_pipeline_run`
+        (`run.failure.failing_jobs[].job_id`, alongside the `run_id`
+        you already used to call it) — obtain them there first, don't
+        guess or construct them.
+
+        `mode` controls how the raw log is sliced down to `max_lines`:
+          - `"around_failure"` (default): finds the first line that
+            looks like an error (case-insensitive substring match
+            against a small fixed pattern set: `##[error]`, `error`,
+            `failed`, `failure`, `traceback`, `exception`, `fatal`,
+            `panic`) and returns a window of `max_lines` lines centered
+            on it. If no such line is found, this falls back to
+            `"tail"` behavior and the response's `mode` comes back as
+            `"around_failure->tail"` so you can tell it degraded.
+          - `"tail"`: the last `max_lines` lines of the log.
+          - `"errors_only"`: only the lines matching the error-pattern
+            set above, in original order, capped at `max_lines`
+            matching lines.
+
+        Return shape:
+        ```
+        {
+          "project_id": str,
+          "run_id": str,
+          "job_id": str,
+          "lines": str,            # the sliced log text
+          "mode": str,             # echoes the effective mode (see around_failure->tail above)
+          "truncated": bool,       # more content existed than was returned
+          "total_lines": int,      # total lines in the raw log
+          "returned_lines": int,   # lines actually returned in `lines`
+          "more_available": bool,  # a different mode/max_lines would surface more
+        }
+        ```
+
+        For `"tail"`/`"around_failure"`, `truncated`/`more_available`
+        reflect the whole raw log vs. what was returned. For
+        `"errors_only"`, they instead reflect whether there were more
+        *matching* lines than `max_lines` could hold.
+
+        404s (log unavailable, non-numeric run_id/job_id at the
+        provider) are rewrapped with project/run/job context, same as
+        `get_pipeline_run`.
+
+        Read-only: no permission flag required.
+        """
+        if not run_id.strip().isdigit():
+            return {
+                "error": (
+                    f"run_id must be a numeric string (got {run_id!r}). "
+                    "Obtain from list_pipeline_runs / get_pipeline_run."
+                )
+            }
+        if not job_id.strip().isdigit():
+            return {
+                "error": (
+                    f"job_id must be a numeric string (got {job_id!r}). "
+                    "Obtain from get_pipeline_run's "
+                    "run.failure.failing_jobs[].job_id."
+                )
+            }
+        if mode not in ("tail", "around_failure", "errors_only"):
+            return {
+                "error": (
+                    f"mode={mode!r} is not supported. "
+                    "Use one of: tail, around_failure, errors_only."
+                )
+            }
+        if not isinstance(max_lines, int) or max_lines <= 0:
+            return {
+                "error": f"max_lines must be a positive int (got {max_lines!r})."
+            }
+
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            try:
+                log_text = provider.get_step_log(project, token, run_id, job_id)
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="pipeline job log",
+                    ident=f"{run_id}/{job_id}",
+                )
+            sliced = slice_log(log_text, mode=mode, max_lines=max_lines)
+            return {
+                "project_id": project.id,
+                "run_id": run_id,
+                "job_id": job_id,
+                **sliced,
+            }
         return _safe(go)

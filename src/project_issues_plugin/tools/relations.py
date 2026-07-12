@@ -89,8 +89,11 @@ def register(mcp: FastMCP) -> None:
 
         Provider-specific notes:
           - GitHub `relates_to` → unsupported (no native typed link).
-          - GitLab `parent` / `child` → unsupported pending Work Items
-            GraphQL bridge (follow-up).
+          - GitLab `parent` / `child` → backed by the Work Items GraphQL
+            `hierarchyWidget` (see `_gitlab_add_hierarchy_relation` /
+            `_gitlab_remove_hierarchy_relation`); both ends are resolved
+            to GraphQL work-item ids first, raising `RelationNotFound`
+            if either side can't be resolved.
           - `duplicate_of` triggers a body-edit and closes the source
             on both providers — the marker line `#ai-generated` /
             `#ai-modified` is preserved correctly via the shared

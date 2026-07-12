@@ -1,10 +1,12 @@
-"""Tests for the `custom_fields` parameter added to `update_ticket` (ticket #140).
+"""Tests for the `custom_fields` parameter on `update_ticket`.
 
 Verifies:
 - custom_fields is forwarded to providers whose update_ticket signature accepts it
-  (e.g. Azure DevOps).
+  (e.g. Azure DevOps, and now GitHub — the lib added custom_fields support to
+  GitHubProvider.update_ticket, detected dynamically via inspect.signature).
 - custom_fields is NOT forwarded (and causes no error) to providers whose signature
-  does not include it (e.g. GitHub, GitLab).
+  does not include it (e.g. GitLab, the one provider still lacking update-time
+  custom_fields support).
 - A non-empty custom_fields dict alone satisfies the actionable guard.
 - An empty dict or None does NOT satisfy the actionable guard.
 - The Field description for custom_fields mentions Azure.
@@ -33,7 +35,10 @@ def _project(provider: str = "azuredevops") -> ProjectConfig:
     # Azure DevOps path must be 'organization/project/repository' (three segments).
     # GitHub/GitLab use 'owner/repo' (two segments).
     path = "myorg/myproject/myrepo" if provider == "azuredevops" else "acme/backend"
-    token_env = "GITHUB_TOKEN_ACME" if provider == "github" else "ADO_TOKEN_ACME"
+    token_env = {
+        "github": "GITHUB_TOKEN_ACME",
+        "gitlab": "GITLAB_TOKEN_ACME",
+    }.get(provider, "ADO_TOKEN_ACME")
     return ProjectConfig(
         id="acme",
         provider=provider,
@@ -90,7 +95,7 @@ class _MockProviderWithCustomFields:
 
 
 class _MockProviderWithoutCustomFields:
-    """Simulates GitHub/GitLab provider: update_ticket does NOT accept custom_fields."""
+    """Simulates GitLab provider: update_ticket does NOT accept custom_fields."""
 
     def __init__(self) -> None:
         self.captured: dict = {}
@@ -101,6 +106,20 @@ class _MockProviderWithoutCustomFields:
         # that via the inspect.signature guard).
         self.captured.update(kwargs)
         self.captured["_ticket_id"] = ticket_id
+        return _full_ticket()
+
+
+class _MockGitHubProviderWithCustomFields:
+    """Simulates the current GitHub provider: update_ticket accepts
+    custom_fields (lib added this support, symmetric with create_ticket)."""
+
+    def __init__(self) -> None:
+        self.captured: dict = {}
+
+    def update_ticket(self, project_, token, ticket_id, *, custom_fields=None, **kwargs):
+        self.captured.update(kwargs)
+        self.captured["_ticket_id"] = ticket_id
+        self.captured["custom_fields"] = custom_fields
         return _full_ticket()
 
 
@@ -152,17 +171,19 @@ def test_custom_fields_forwarded_to_ado_provider(
     assert provider.captured["custom_fields"] == {"Custom.ProcessState": "Approved"}
 
 
-def test_custom_fields_only_on_github_provider_returns_error(
+def test_custom_fields_only_on_gitlab_provider_returns_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """custom_fields alone on a provider that doesn't support it must return an error,
-    not silently mutate labels via the standard-fields path."""
+    not silently mutate labels via the standard-fields path. GitLab is the one
+    provider still lacking update-time custom_fields support (unlike GitHub,
+    which now forwards it — see test_custom_fields_forwarded_to_github_provider)."""
     mock_provider = _MockProviderWithoutCustomFields()
     tools, provider = _register_with_provider(
         monkeypatch, mock_provider,
-        provider_key="github",
-        token_env="GITHUB_TOKEN_ACME",
-        token_value="ghp_token",
+        provider_key="gitlab",
+        token_env="GITLAB_TOKEN_ACME",
+        token_value="glpat_token",
     )
 
     out = tools["update_ticket"](
@@ -181,17 +202,18 @@ def test_custom_fields_only_on_github_provider_returns_error(
     )
 
 
-def test_custom_fields_with_standard_field_silently_dropped_on_github_provider(
+def test_custom_fields_with_standard_field_silently_dropped_on_gitlab_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When combined with a real standard field, custom_fields is silently dropped
-    (not forwarded) and the call succeeds — no TypeError, no error result."""
+    (not forwarded) and the call succeeds — no TypeError, no error result. GitLab
+    remains the provider without update-time custom_fields support."""
     mock_provider = _MockProviderWithoutCustomFields()
     tools, provider = _register_with_provider(
         monkeypatch, mock_provider,
-        provider_key="github",
-        token_env="GITHUB_TOKEN_ACME",
-        token_value="ghp_token",
+        provider_key="gitlab",
+        token_env="GITLAB_TOKEN_ACME",
+        token_value="glpat_token",
     )
 
     out = tools["update_ticket"](
@@ -205,6 +227,30 @@ def test_custom_fields_with_standard_field_silently_dropped_on_github_provider(
     assert "custom_fields" not in provider.captured, (
         "custom_fields must NOT be forwarded to providers lacking the parameter"
     )
+
+
+def test_custom_fields_forwarded_to_github_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test: the lib added custom_fields support to GitHub's
+    update_ticket (symmetric with create_ticket). custom_fields as the ONLY
+    changed field must be forwarded, not rejected as unsupported."""
+    mock_provider = _MockGitHubProviderWithCustomFields()
+    tools, provider = _register_with_provider(
+        monkeypatch, mock_provider,
+        provider_key="github",
+        token_env="GITHUB_TOKEN_ACME",
+        token_value="ghp_token",
+    )
+
+    out = tools["update_ticket"](
+        project_id="acme",
+        ticket_id="42",
+        custom_fields={"Status": "Done"},
+    )
+
+    assert "error" not in out, f"unexpected error: {out}"
+    assert provider.captured["custom_fields"] == {"Status": "Done"}
 
 
 def test_custom_fields_alone_satisfies_actionable_guard(

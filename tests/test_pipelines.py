@@ -139,6 +139,10 @@ def test_list_pipeline_runs_zero_address_args_error(
     result = tools["list_pipeline_runs"](project_id="acme")
     assert "error" in result
     assert "exactly one" in result["error"]
+    # Ticket #195 finding 3: unified phrasing enumerates the addressing
+    # args and reports "got: none" in the zero-arg case.
+    assert "branch/tag/commit_sha/ticket_id/recent" in result["error"]
+    assert "got: none" in result["error"]
 
 
 def test_list_pipeline_runs_two_address_args_error(
@@ -155,6 +159,34 @@ def test_list_pipeline_runs_two_address_args_error(
     )
     assert "error" in result
     assert "exactly one" in result["error"]
+    # Ticket #195 finding 3: shares the same "exactly one addressing
+    # argument (...)" template as the zero-arg case above — only the
+    # `got:` tail differs.
+    assert "branch/tag/commit_sha/ticket_id/recent" in result["error"]
+    assert "got: branch, commit_sha" in result["error"]
+
+
+def test_list_pipeline_runs_zero_and_two_arg_errors_share_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #195 finding 3: the 0-arg and 2+-arg error messages must use
+    the same sentence template — previously they diverged ("requires
+    exactly one of ..." vs "accepts exactly one addressing argument, but
+    got: ..."). Assert the shared prefix (everything before "but got:")
+    is now identical."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    zero = tools["list_pipeline_runs"](project_id="acme")
+    two = tools["list_pipeline_runs"](
+        project_id="acme", branch="main", commit_sha="abc",
+    )
+    zero_prefix = zero["error"].split("but got:")[0]
+    two_prefix = two["error"].split("but got:")[0]
+    assert zero_prefix == two_prefix
 
 
 # ---------- list_pipeline_runs: branch ---------------------------------------
@@ -203,6 +235,32 @@ def test_list_pipeline_runs_branch_happy_path(
     assert first["url"].endswith("/actions/runs/1001")
 
 
+def test_list_pipeline_runs_branch_empty_returns_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #195 finding 4 repro: `branch="main"` with zero matching runs
+    previously left `hint: null` — only `recent`/`tag`/`ticket` populated a
+    hint on empty results. Now `branch` gets an equivalent hint too."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/branches/main":
+            return _json({"commit": {"sha": "deadbeef"}})
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            return _json({"workflow_runs": []})
+        if req.url.path == "/repos/acme/backend/actions/workflows":
+            return _json({"workflows": [{"id": 1, "name": "CI"}]})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](project_id="acme", branch="main")
+    assert "error" not in result, result
+    assert result["addressed_by"] == "branch"
+    assert result["runs"] == []
+    assert result["hint"] is not None
+    assert "main" in result["hint"]
+
+
 # ---------- list_pipeline_runs: commit_sha -----------------------------------
 
 
@@ -230,6 +288,32 @@ def test_list_pipeline_runs_commit_sha_happy_path(
     assert result["addressed_by"] == "commit"
     assert captured["head_sha"] == "abc123"
     assert [r["id"] for r in result["runs"]] == ["2001"]
+    assert result["hint"] is None
+
+
+def test_list_pipeline_runs_commit_sha_empty_returns_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #195 finding 4 repro: `commit_sha` with zero matching runs
+    previously left `hint: null`."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/acme/backend/commits/abc123":
+            return _json({"sha": "abc123"})
+        if req.url.path == "/repos/acme/backend/actions/runs":
+            return _json({"workflow_runs": []})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["list_pipeline_runs"](
+        project_id="acme", commit_sha="abc123",
+    )
+    assert "error" not in result, result
+    assert result["addressed_by"] == "commit"
+    assert result["runs"] == []
+    assert result["hint"] is not None
+    assert "abc123" in result["hint"]
 
 
 # ---------- list_pipeline_runs: tag ------------------------------------------
@@ -427,13 +511,15 @@ def test_list_pipeline_runs_recent_empty_returns_hint(
     assert any(word in result["hint"] for word in ("CI", "workflow", "workflows"))
 
 
-def test_list_pipeline_runs_recent_empty_with_status_filter_no_hint(
+def test_list_pipeline_runs_recent_empty_with_status_filter_hints_filter_aware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """recent=True with a specific status filter (e.g. 'completed') and no
-    matching runs must NOT set hint — the empty list is a legitimate result
-    of the filter, not evidence of missing CI configuration (ticket #118 Fix 6
-    guard)."""
+    matching runs must still surface a hint — but a filter-aware variant
+    that names the active status filter as a possible cause, rather than
+    unconditionally blaming missing CI configuration (ticket #195 finding 4:
+    superseded the old ticket #118 Fix 6 behavior of suppressing the hint
+    entirely under a status filter)."""
     tools = _register_tools_with(monkeypatch, _project())
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
 
@@ -449,10 +535,9 @@ def test_list_pipeline_runs_recent_empty_with_status_filter_no_hint(
     assert "error" not in result, result
     assert result["addressed_by"] == "recent"
     assert result["runs"] == []
-    # hint must be absent when a status filter is active
-    assert result["hint"] is None, (
-        f"hint should be None for filtered-empty results, got: {result['hint']!r}"
-    )
+    assert result["hint"] is not None
+    assert "completed" in result["hint"]
+    assert "filter" in result["hint"]
 
 
 def test_list_pipeline_runs_recent_empty_hint_is_provider_neutral(

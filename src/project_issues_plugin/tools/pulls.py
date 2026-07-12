@@ -35,6 +35,7 @@ from project_issues_plugin.tools._providers import (
     _require_token,
     _resolve,
     _rewrap_404,
+    _rewrap_azure_bad_base,
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
@@ -320,11 +321,17 @@ def register(mcp: FastMCP) -> None:
             _require_pulls_create(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            pr = provider.create_pr(
-                project, token, title, body, head, base,
-                draft=draft, labels=labels or [], assignees=assignees or [],
-                requested_reviewers=requested_reviewers or [],
-            )
+            try:
+                pr = provider.create_pr(
+                    project, token, title, body, head, base,
+                    draft=draft, labels=labels or [], assignees=assignees or [],
+                    requested_reviewers=requested_reviewers or [],
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                # ticket #195 finding 2: normalize Azure's raw base-branch
+                # activation-failure text; non-matching errors pass through
+                # unchanged.
+                raise _rewrap_azure_bad_base(exc, base=base)
             return {"project_id": project.id, "pull_request": asdict(pr)}
         return _safe(go)
 

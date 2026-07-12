@@ -29,6 +29,7 @@ from project_issues_plugin.tools._providers import (
     _require_token,
     _resolve,
     _rewrap_404,
+    _rewrap_422_assignee,
     _rewrap_work_item_type_404,
     _safe,
 )
@@ -672,10 +673,15 @@ def register(mcp: FastMCP) -> None:
             try:
                 ticket = provider.update_ticket(project, token, normalized_id, **kwargs)
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
-                raise _rewrap_404(
+                # 404 and 422 are disjoint statuses, so applying both
+                # rewraps unconditionally is safe regardless of order —
+                # each is a no-op pass-through when its own gate doesn't
+                # match (ticket #195 finding 1).
+                exc = _rewrap_404(
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
                 )
+                raise _rewrap_422_assignee(exc, assignees_add=assignees_add)
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),

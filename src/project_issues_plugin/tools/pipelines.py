@@ -138,6 +138,13 @@ def register(mcp: FastMCP) -> None:
         }
         ```
 
+        `hint` is populated whenever `runs` is empty, regardless of
+        addressing mode — not just for `recent`/`ticket`. The more
+        specific tag/ticket resolution-failure hints take precedence;
+        otherwise a generic "no runs found" hint names the addressing
+        mode and, when a non-`all` `status` filter is active, notes
+        that the filter may be excluding matching runs.
+
         Run details (`name`, `branch`, `head_sha`, `event`, `status`,
         `conclusion`, `url`, `created_at`, `updated_at`, `run_attempt`)
         match the GitHub Actions `workflow_run` shape. `conclusion` is
@@ -162,18 +169,25 @@ def register(mcp: FastMCP) -> None:
         set_args = [k for k, v in addr_args.items() if v]
         if recent:
             set_args.append("recent")
+        # Ticket #195 finding 3: both branches share one "exactly one
+        # addressing argument" template (only the `got:` tail differs) so
+        # the wording no longer diverges between the 0-arg and 2+-arg
+        # cases. The "exactly one" substring is preserved for existing
+        # tests.
         if len(set_args) == 0:
             return {
                 "error": (
-                    "list_pipeline_runs requires exactly one of "
-                    "branch/tag/commit_sha/ticket_id/recent."
+                    "list_pipeline_runs accepts exactly one addressing "
+                    "argument (branch/tag/commit_sha/ticket_id/recent), "
+                    "but got: none."
                 )
             }
         if len(set_args) > 1:
             return {
                 "error": (
-                    f"list_pipeline_runs accepts exactly one addressing "
-                    f"argument, but got: {', '.join(set_args)}."
+                    "list_pipeline_runs accepts exactly one addressing "
+                    "argument (branch/tag/commit_sha/ticket_id/recent), "
+                    f"but got: {', '.join(set_args)}."
                 )
             }
 
@@ -189,27 +203,25 @@ def register(mcp: FastMCP) -> None:
                     project, token, status=status, limit=limit
                 )
                 addressed_by = "recent"
-                if not runs and status == "all":
-                    hint = (
-                        "no recent pipeline/CI runs found — the project may "
-                        "have no CI/CD pipelines configured (GitHub Actions "
-                        "workflows, GitLab CI, or Azure Pipelines)"
-                    )
+                addressed_desc = "recent pipeline/CI runs"
             elif branch:
                 runs, _ = provider.list_runs_for_branch(
                     project, token, branch, status=status, limit=limit
                 )
                 addressed_by = "branch"
+                addressed_desc = f"pipeline/CI runs for branch '{branch}'"
             elif commit_sha:
                 runs, _ = provider.list_runs_for_commit(
                     project, token, commit_sha, status=status, limit=limit
                 )
                 addressed_by = "commit"
+                addressed_desc = f"pipeline/CI runs for commit '{commit_sha}'"
             elif tag:
                 runs, resolved_refs = provider.list_runs_for_tag(
                     project, token, tag, status=status, limit=limit
                 )
                 addressed_by = "tag"
+                addressed_desc = f"pipeline/CI runs for tag '{tag}'"
                 if not resolved_refs:
                     hint = (
                         f"could not resolve tag '{tag}' to a commit — "
@@ -222,10 +234,30 @@ def register(mcp: FastMCP) -> None:
                     project, token, normalized_ticket, status=status, limit=limit  # type: ignore[arg-type]
                 )
                 addressed_by = "ticket"
+                addressed_desc = "pipeline/CI runs for this ticket"
                 if not resolved_refs:
                     hint = (
                         "no linked PR/branch found — ask user for a "
                         "branch/commit"
+                    )
+
+            # Ticket #195 finding 4: emit an equivalent "no runs found"
+            # hint regardless of addressing mode — previously only
+            # `recent` (and the tag/ticket resolution-failure paths
+            # above) populated `hint` on an empty result; `branch` and
+            # `commit_sha` silently returned `hint: null`. The
+            # more-specific hints set above (tag/ticket resolution
+            # failure) take precedence and are left untouched.
+            if not runs and hint is None:
+                hint = (
+                    f"no {addressed_desc} found — the project may have no "
+                    "CI/CD pipeline configured, or this ref/filter simply "
+                    "has no runs yet"
+                )
+                if status != "all":
+                    hint += (
+                        f" (status filter '{status}' is active and may be "
+                        "excluding matching runs)"
                     )
 
             return {

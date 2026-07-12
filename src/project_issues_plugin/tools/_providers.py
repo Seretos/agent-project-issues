@@ -24,6 +24,8 @@ to substitute a deterministic project list without hitting the disk.
 """
 from __future__ import annotations
 
+import re
+
 from lib_python_projects import ProjectConfig, load_projects, resolve_token
 from lib_python_projects.providers.azuredevops import (
     AzureDevOpsError,
@@ -216,6 +218,92 @@ def _rewrap_work_item_type_404(exc, *, project_id: str, work_item_type: str | No
     )
 
 
+# --------- error translation rewrap helpers (ticket #195) --------------------
+
+
+_ASSIGNEE_LOGIN_RE = re.compile(r"assignees=['\"]?([^'\"\s)]+)")
+
+
+def _rewrap_422_assignee(exc, *, assignees_add: list[str] | None):
+    """Rewrap a GitHub 422 caused by an invalid `assignees_add` login.
+
+    Ticket #195 finding 1: `update_ticket(assignees_add=["baduser"])`
+    against a non-collaborator surfaces GitHub's raw validation body
+    verbatim, e.g. `"GitHub 422: Validation Failed: Issue.assignees=
+    'baduser' (invalid)"` — internal field/resource jargon the agent has
+    no use for. Gated narrowly (status == 422 AND the message names the
+    `assignees` field, mirroring how `_rewrap_work_item_type_404` gates
+    on `work_item_type is not None`) so unrelated 422s (e.g. an invalid
+    label) pass through untouched.
+
+    When the offending login can be parsed out of GitHub's message it is
+    named directly; otherwise the message falls back to naming the full
+    `assignees_add` input list so the agent still knows what to check.
+
+    The atomic rollback of the whole update (e.g. a bundled
+    `labels_remove` not being applied when the assignee write fails)
+    happens entirely in the provider/lib layer before this exception is
+    raised — rewrapping the surfaced message here does not touch that
+    behavior.
+
+    For non-matching errors the original exception is returned unchanged
+    so callers can `raise _rewrap_422_assignee(exc, ...)` unconditionally,
+    matching the `_rewrap_404` / `_rewrap_work_item_type_404` contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 422:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if "assignees" not in message:
+        return exc
+    match = _ASSIGNEE_LOGIN_RE.search(message)
+    if match:
+        login = match.group(1)
+        return type(exc)(
+            422,
+            f"assignee '{login}' is not a valid GitHub user/collaborator",
+        )
+    names = ", ".join(assignees_add) if assignees_add else "(unknown)"
+    return type(exc)(
+        422,
+        "one or more of the requested assignees are not valid GitHub "
+        f"users/collaborators: {names}",
+    )
+
+
+_AZURE_BAD_BASE_RE = re.compile(r"TF401398|target branch|base branch", re.IGNORECASE)
+
+
+def _rewrap_azure_bad_base(exc, *, base: str):
+    """Rewrap an Azure DevOps 400 caused by an unusable `base` branch.
+
+    Ticket #195 finding 2: `create_pr` against a non-existent base
+    branch surfaces Azure's raw activation-failure body verbatim, e.g.
+    `"Azure DevOps 400: TF401398: The pull request cannot be
+    activated..."`. Gated narrowly (status == 400 AND the message
+    signals a base/target-branch activation problem via Azure's
+    TF401398 code or a "target branch"/"base branch" phrase) so
+    unrelated 400s pass through untouched.
+
+    The replacement message is built from our own `base` input already
+    in scope, not by echoing Azure's raw body — so no internal Azure
+    identifiers leak through.
+
+    For non-matching errors the original exception is returned unchanged
+    so callers can `raise _rewrap_azure_bad_base(exc, ...)` unconditionally,
+    matching the `_rewrap_404` / `_rewrap_work_item_type_404` contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 400:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if not _AZURE_BAD_BASE_RE.search(message):
+        return exc
+    return type(exc)(
+        400,
+        f"base branch '{base}' cannot be used for this pull request — "
+        "verify the branch exists in the repository",
+    )
+
+
 # --------- error translation -------------------------------------------------
 
 
@@ -255,6 +343,8 @@ __all__ = [
     "_normalize_target",
     "_rewrap_404",
     "_rewrap_work_item_type_404",
+    "_rewrap_422_assignee",
+    "_rewrap_azure_bad_base",
     "_safe",
     "load_projects",
     "resolve_token",

@@ -131,6 +131,13 @@ def register(mcp: FastMCP) -> None:
           - Azure DevOps: label creation is not supported — returns
             ``{"error": "..."}`` containing "not supported".
 
+        Azure DevOps workaround: Azure has no label catalog — tags are
+        freeform. There is no separate "create the label first" step.
+        Attach a never-before-seen tag directly via
+        ``create_ticket(labels=[...])`` or
+        ``update_ticket(labels_add=[...])`` and it is created on the fly
+        as part of that call.
+
         `description` is optional on GitHub and GitLab; ignored on Azure
         DevOps.
 
@@ -186,6 +193,10 @@ def register(mcp: FastMCP) -> None:
 
         `color` format is provider-specific (see `create_label` docs).
 
+        Azure DevOps: not supported (tags are freeform, not a mutable
+        catalog entry) — see the freeform-tag workaround documented on
+        `create_label`.
+
         Returns ``{"error": "..."}`` when:
           - `name` is not supplied.
           - None of `new_name` / `color` / `description` is supplied.
@@ -229,6 +240,10 @@ def register(mcp: FastMCP) -> None:
         Requires the project's `issues.modify` permission.
 
         `name` identifies the label to delete (required).
+
+        Azure DevOps: not supported (tags are freeform, not a mutable
+        catalog entry) — see the freeform-tag workaround documented on
+        `create_label`.
 
         Returns ``{"error": "..."}`` when:
           - The label does not exist (404).

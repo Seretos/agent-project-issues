@@ -770,6 +770,16 @@ def register(mcp: FastMCP) -> None:
         the same types — so call with `work_item_type=None` first to
         discover which types exist before scoping to one.
 
+        Azure DevOps caveat: when two configured projects map to the same
+        underlying Azure DevOps Team Project, this call returns identical
+        area-path and iteration-path `allowed_values` for both — prefixed
+        with only the *first* configured project's name — because
+        `project_id` granularity here is coarser than the area/iteration
+        path hierarchy. An `area_path` value copied from one project's
+        `allowed_values` and used to filter the other project can 404;
+        this is correct Azure DevOps behavior (shared Team Project), not
+        a bug in this tool.
+
         The `reference_name` and `allowed_values` values returned here
         feed directly into `update_ticket`'s `custom_fields` parameter —
         call this tool first to discover valid field references and their

@@ -160,7 +160,10 @@ def register(mcp: FastMCP) -> None:
         GitHub computes mergeability asynchronously. `null` means "not
         computed yet", NOT "not mergeable": re-fetch a moment later to
         get the real `true` / `false` instead of branching on the
-        transient `null`.
+        transient `null`. On Azure DevOps, `mergeable_state` stays
+        permanently `null` — Azure has no async-resolve pattern like
+        GitHub's transient-then-computed null, so re-fetching will never
+        populate it. Do not poll waiting for it on Azure DevOps.
 
         Azure DevOps quirk: `merge_commit_sha` (and `mergeable: true`)
         can already be populated right after `create_pr`, before any
@@ -510,7 +513,7 @@ def register(mcp: FastMCP) -> None:
     def submit_pr_review(
         project_id: str,
         pr_id: str,
-        state: Annotated[str, Field(description="Required. Lowercase only. One of: 'approve', 'request_changes', 'comment'. A non-empty body is required when state is 'request_changes' or 'comment'; optional for 'approve'. Kept as str (not Literal) so invalid values return a friendly error.")],
+        state: Annotated[str, Field(description="Required. Lowercase only. One of: 'approve', 'request_changes', 'comment'. A non-empty body is required when state is 'request_changes' or 'comment'; optional for 'approve'. Kept as str (not Literal) so invalid values return a friendly error. Azure DevOps note: Azure natively has 5 reviewer votes but this tool only exposes 3 — 'approve_with_suggestions' and 'wait_for_author' are not supported values here (see docstring).")],
         body: Annotated[str | None, Field(description="Required when state is 'request_changes' or 'comment'; optional for 'approve'. Do not prepend '#ai-generated' — added automatically.")] = None,
         commit_sha: str | None = None,
     ) -> dict:
@@ -531,6 +534,14 @@ def register(mcp: FastMCP) -> None:
             on GitLab this also issues a best-effort `unapprove`).
           - `"comment"`         — leave a review-level comment without
             changing approval state (a body is required).
+
+        Azure DevOps note: Azure natively supports 5 reviewer votes, but
+        this tool only exposes 3. The mapping is `"approve"` →
+        `approved` (+10), `"request_changes"` → `rejected` (-10),
+        `"comment"` → `no vote` (0). Azure's other two native votes,
+        `approve_with_suggestions` (+5) and `wait_for_author` (-5), are
+        normalized away and cannot be set through this tool — passing
+        either as `state` returns `{"error": "..."}`.
 
         `commit_sha`, when set, pins the review to a specific commit on
         GitHub (`commit_id`). GitLab cannot pin a review to a commit: it

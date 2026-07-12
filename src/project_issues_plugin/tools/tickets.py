@@ -77,6 +77,7 @@ def register(mcp: FastMCP) -> None:
         column: str | None = None,
     ) -> dict:
         """List tickets in a project. Default: open tickets, limit 30.
+        Supports board-column filtering via `column` — see `list_board_columns`.
 
         Filter args:
           - `status`: "open" (default), "closed", or "any". This filter
@@ -403,6 +404,14 @@ def register(mcp: FastMCP) -> None:
                 "custom_fields is non-empty and no binding is configured); on "
                 "GitLab, exactly the keys 'labels' (list[str], overrides the "
                 "labels argument) and/or 'milestone' (str title, or None). "
+                "update_ticket's custom_fields now shares this same GitHub "
+                "board-write behavior for updates after creation. "
+                "On GitHub, writing a board column can cascade into a ticket "
+                "status change via a Projects-v2 workflow automation — e.g. "
+                "writing the 'Done' column can auto-close the underlying issue "
+                "— this is provider-side automation, not controlled by this "
+                "server; call get_ticket(..., include_custom_fields=True) "
+                "afterward to confirm the resulting status. "
                 "Call list_custom_fields(project_id) to discover available "
                 "field reference names and their allowed values first. "
                 "None or {} means 'no overrides' and is always a no-op."
@@ -448,9 +457,18 @@ def register(mcp: FastMCP) -> None:
 
         `custom_fields` sets provider-specific fields (or board-column
         values) at creation time — see the parameter description for
-        per-provider semantics. `None`/`{}` is a no-op. Errors (e.g. a
-        missing board binding) surface as `{"error": ...}`, not a
-        traceback; the ticket is not created in that case.
+        per-provider semantics. `update_ticket`'s `custom_fields` shares this
+        same GitHub board-write contract for changes made after creation.
+        `None`/`{}` is a no-op. Errors (e.g. a missing board binding) surface
+        as `{"error": ...}`, not a traceback; the ticket is not created in
+        that case.
+
+        On GitHub, writing a board column at creation time can cascade into a
+        ticket status change via a Projects-v2 workflow automation — e.g.
+        writing the "Done" column can auto-close the underlying issue. This
+        is provider-side automation and is not controlled by this server;
+        call `get_ticket(..., include_custom_fields=True)` afterward to
+        confirm the resulting status.
 
         Requires the project's `issues.create` permission.
         """
@@ -488,11 +506,22 @@ def register(mcp: FastMCP) -> None:
             dict[str, Any] | None,
             Field(description=(
                 "Provider-specific field overrides as a key→value map. "
-                "Only supported by Azure DevOps. On GitHub and GitLab it is "
-                "silently dropped when combined with standard fields, but a "
+                "Semantics differ per provider, mirroring create_ticket's "
+                "custom_fields: on Azure DevOps, full dotted field references "
+                "(e.g. {'Custom.ProcessState': 'Approved'} or "
+                "{'System.Tags': 'release'}); on GitHub, values for the "
+                "project's 'github-projects-v2' board binding — same "
+                "requirement and behavior as create_ticket (requires a "
+                "'board' block in projects.yml; raises if custom_fields is "
+                "non-empty and no binding is configured), forwarded whether "
+                "this call is custom_fields-only or combined with standard "
+                "fields. Writing a board column on GitHub can cascade into a "
+                "status change via provider-side workflow automation (e.g. a "
+                "'Done' column auto-closing the issue) — confirm with "
+                "get_ticket(..., include_custom_fields=True) afterward. On "
+                "GitLab, custom_fields remains unsupported: it is silently "
+                "dropped when combined with standard fields, but a "
                 "custom_fields-only call returns an error. "
-                "Use the full dotted field reference, e.g. "
-                "{'Custom.ProcessState': 'Approved'} or {'System.Tags': 'release'}. "
                 "Call list_custom_fields(project_id) to discover available field "
                 "reference names and their allowed values before setting them."
             ))
@@ -568,13 +597,26 @@ def register(mcp: FastMCP) -> None:
         Requires the project's `issues.modify` permission.
 
         `custom_fields` passes provider-specific `{field_ref: value}` overrides
-        to the underlying provider. It is currently only supported by Azure DevOps,
-        where full dotted field references such as `Custom.ProcessState` or
-        `System.Tags` are used. On GitHub and GitLab the parameter is silently
-        dropped when other standard fields are present; a `custom_fields`-only
-        call on those providers returns a descriptive error rather than silently
-        mutating nothing of what was asked. Passing `None` or an empty dict `{}`
-        means "no custom fields" and is treated as though the argument were absent.
+        to the underlying provider, sharing the same board-binding/board-write
+        contract as `create_ticket`'s `custom_fields` (see that tool's
+        docstring for the full per-provider semantics). On Azure DevOps, full
+        dotted field references such as `Custom.ProcessState` or `System.Tags`
+        are used. On GitHub, values are written to the project's
+        `github-projects-v2` board-column binding, forwarded whether the call
+        is `custom_fields`-only or combined with standard fields; a missing
+        `board` binding raises rather than being silently ignored. Standard-field
+        changes are applied before the board write, so a failed board write can
+        surface as an error after standard fields have already landed (the
+        underlying provider call is not atomic). Writing a board column can
+        also cascade into a status change via provider-side workflow
+        automation (e.g. a "Done" column auto-closing the issue) — confirm
+        the result with `get_ticket(..., include_custom_fields=True)`
+        afterward. On GitLab the parameter is still unsupported: it is
+        silently dropped when other standard fields are present; a
+        `custom_fields`-only call on GitLab returns a descriptive error
+        rather than silently mutating nothing of what was asked. Passing
+        `None` or an empty dict `{}` means "no custom fields" and is treated
+        as though the argument were absent.
         """
         # Reject empty calls explicitly (ticket #48 finding 4 / #49 finding 4).
         # `labels_add=[]` etc. are treated as "no action" — only non-empty
@@ -614,10 +656,10 @@ def register(mcp: FastMCP) -> None:
             if custom_fields and not cf_supported and not has_other_fields:
                 return {
                     "error": (
-                        f"custom_fields is not supported by the '{project.provider}' "
-                        "provider; it is only available on Azure DevOps. Supply at least "
-                        "one standard field (title/body/status/labels/assignees) or omit "
-                        "custom_fields."
+                        f"custom_fields on update_ticket is not supported by the "
+                        f"'{project.provider}' provider; it is supported on Azure "
+                        "DevOps and GitHub. Supply at least one standard field "
+                        "(title/body/status/labels/assignees) or omit custom_fields."
                     )
                 }
             kwargs: dict[str, Any] = dict(

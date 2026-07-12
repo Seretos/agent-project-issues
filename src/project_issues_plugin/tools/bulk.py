@@ -50,6 +50,7 @@ def register(mcp: FastMCP) -> None:
         column: str | None = None,
     ) -> dict:
         """List tickets across multiple projects in a single call.
+        Supports board-column filtering via `column` — see `list_board_columns`.
 
         Restricts to the given `project_ids`; unknown ids are surfaced
         as `{"error": "unknown project"}` for that entry rather than

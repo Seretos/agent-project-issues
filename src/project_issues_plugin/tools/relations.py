@@ -34,6 +34,7 @@ from project_issues_plugin.tools._providers import (
     _require_token,
     _resolve,
     _rewrap_404,
+    _rewrap_azure_single_parent,
     _safe,
     resolve_token,
 )
@@ -128,6 +129,17 @@ def register(mcp: FastMCP) -> None:
         `ticket_id` request parameter above, which identifies the
         source ticket.
 
+        The whole returned `relation` object is an **echo of this
+        call's own target side**, resolved live from your `target` /
+        `kind` inputs and framed from `ticket_id` (the source) outward
+        — it is NOT an entry out of `get_ticket(...).relations[]`. In
+        particular it does not reflect what the source ticket's own
+        relations list will show afterward (that list is framed the
+        opposite way, from the source ticket's perspective) and it is
+        not itself one of that list's entries; call
+        `get_ticket(ticket_id, include_relations=True)` afterward if
+        you need the source ticket's actual relations view.
+
         `resolved` documents how the relation metadata was obtained:
           - `true`  — target was fetched from the provider API; title /
             state / url are live.
@@ -142,9 +154,15 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             normalized_ticket = _normalize_id(project, ticket_id)
             normalized_target = _normalize_target(project, target)
-            relation = provider.add_relation(
-                project, token, normalized_ticket, kind, normalized_target,
-            )
+            try:
+                relation = provider.add_relation(
+                    project, token, normalized_ticket, kind, normalized_target,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_azure_single_parent(
+                    exc, ticket_id=normalized_ticket, target=normalized_target,
+                    kind=kind,
+                )
             return {
                 "project_id": project.id,
                 "relation": asdict(relation),

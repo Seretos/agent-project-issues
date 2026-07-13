@@ -408,6 +408,141 @@ def _rewrap_github_bad_base(exc, *, base: str):
     )
 
 
+# --------- error translation rewrap helpers (ticket #218) --------------------
+
+
+_LABEL_ALREADY_EXISTS_RE = re.compile(
+    r"(?=.*Label\.name)(?=.*already_exists)", re.IGNORECASE | re.DOTALL
+)
+
+
+def _rewrap_label_already_exists(exc, *, new_name: str):
+    """Rewrap a GitHub 422 caused by renaming a label to a name that
+    already exists.
+
+    Ticket #218 finding 3a: `update_label(name=..., new_name=<existing
+    label>)` surfaces GitHub's raw validation body verbatim, e.g.
+    `"GitHub 422: Validation Failed: Label.name (already_exists)"` —
+    internal field/resource jargon the agent has no use for. Gated
+    narrowly (status == 422 AND the message names both GitHub's
+    `Label.name` field and its `already_exists` reason code, mirroring
+    how `_rewrap_github_bad_base` gates on `PullRequest.base`) so an
+    unrelated 422 (e.g. a bad color) passes through untouched.
+
+    The replacement message is built from our own `new_name` input
+    already in scope, not by echoing GitHub's raw body.
+
+    For non-matching errors the original exception is returned
+    unchanged so callers can `raise _rewrap_label_already_exists(exc,
+    ...)` unconditionally, matching the other `_rewrap_*` helpers'
+    contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 422:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if not _LABEL_ALREADY_EXISTS_RE.search(message):
+        return exc
+    return type(exc)(
+        422,
+        f"label '{new_name}' already exists; choose a different name or "
+        "update the existing label",
+    )
+
+
+_AZURE_SINGLE_PARENT_RE = re.compile(r"TF201036", re.IGNORECASE)
+
+
+def _rewrap_azure_single_parent(exc, *, ticket_id: str, target: str, kind: str):
+    """Rewrap an Azure DevOps 400 caused by adding a second `parent`
+    relation to a work item that already has one.
+
+    Ticket #218 finding 3b: `add_relation(kind="parent", ...)` against a
+    work item that already has a parent surfaces Azure's raw
+    activation-failure body verbatim, e.g. `"Azure DevOps 400:
+    TF201036: ... work items 66 and 59 ..."` — internal work-item ids
+    that mean nothing to the agent (Azure DevOps models hierarchy as a
+    single-parent tree; a second `parent` link is rejected outright,
+    unlike GitHub/GitLab's simple non-exclusive link list). Gated
+    narrowly (status == 400 AND Azure's `TF201036` code) so unrelated
+    400s pass through untouched.
+
+    The replacement message is built from our own `ticket_id` / `target`
+    / `kind` inputs already in scope, not by echoing Azure's raw body —
+    so the internal work-item ids never leak through.
+
+    For non-matching errors the original exception is returned unchanged
+    so callers can `raise _rewrap_azure_single_parent(exc, ...)`
+    unconditionally, matching the `_rewrap_azure_bad_base` /
+    `_rewrap_github_bad_base` contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 400:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if not _AZURE_SINGLE_PARENT_RE.search(message):
+        return exc
+    return type(exc)(
+        400,
+        f"cannot add '{kind}' relation from '{ticket_id}' to '{target}' — "
+        "Azure DevOps work items can have only one parent; remove the "
+        "existing parent relation before adding this one",
+    )
+
+
+_AZURE_UNKNOWN_FIELD_RE = re.compile(r"TF51535|Cannot find field", re.IGNORECASE)
+_AZURE_UNKNOWN_FIELD_NAME_RE = re.compile(
+    r"field\s+(Custom\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)", re.IGNORECASE
+)
+
+
+def _rewrap_azure_unknown_field(exc, *, custom_fields: dict | None):
+    """Rewrap an Azure DevOps 400 caused by an unrecognised `custom_fields`
+    key.
+
+    Ticket #218 finding 3c: `create_ticket(custom_fields={...})` /
+    `update_ticket(custom_fields={...})` with a field reference name
+    Azure DevOps does not recognise surfaces the raw body verbatim, e.g.
+    `"Azure DevOps 400: TF51535: Cannot find field
+    Custom.ThisFieldDoesNotExist."` Gated narrowly (status == 400 AND
+    Azure's `TF51535` code or its "Cannot find field" phrase, mirroring
+    `_rewrap_azure_bad_base`'s #195 finding 2 counterpart) so unrelated
+    400s pass through untouched — in particular it is disjoint from
+    `update_ticket`'s existing 404 (bad ticket id / bad label) and 422
+    (bad assignee) rewraps, so chaining it alongside them is order-safe.
+
+    When the offending `Custom.*` field name can be parsed out of
+    Azure's message it is named directly; otherwise the message falls
+    back to naming the caller's own `custom_fields` keys so the agent
+    still knows what to check. Either way it points at
+    `list_custom_fields` to discover valid field reference names.
+
+    For non-matching errors the original exception is returned
+    unchanged so callers can `raise _rewrap_azure_unknown_field(exc,
+    ...)` unconditionally, matching the other `_rewrap_*` helpers'
+    contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 400:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if not _AZURE_UNKNOWN_FIELD_RE.search(message):
+        return exc
+    match = _AZURE_UNKNOWN_FIELD_NAME_RE.search(message)
+    if match:
+        field = match.group(1)
+        return type(exc)(
+            400,
+            f"custom field '{field}' is not recognised by Azure DevOps for "
+            "this project; call list_custom_fields to discover valid field "
+            "reference names",
+        )
+    names = ", ".join(custom_fields.keys()) if custom_fields else "(unknown)"
+    return type(exc)(
+        400,
+        "one or more of the requested custom_fields keys are not "
+        f"recognised by Azure DevOps for this project: {names}; call "
+        "list_custom_fields to discover valid field reference names",
+    )
+
+
 # --------- error translation -------------------------------------------------
 
 
@@ -451,6 +586,9 @@ __all__ = [
     "_rewrap_label_404",
     "_rewrap_azure_bad_base",
     "_rewrap_github_bad_base",
+    "_rewrap_label_already_exists",
+    "_rewrap_azure_single_parent",
+    "_rewrap_azure_unknown_field",
     "_safe",
     "load_projects",
     "resolve_token",

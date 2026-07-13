@@ -30,6 +30,7 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _rewrap_404,
     _rewrap_422_assignee,
+    _rewrap_azure_unknown_field,
     _rewrap_label_404,
     _rewrap_work_item_type_404,
     _safe,
@@ -490,10 +491,13 @@ def register(mcp: FastMCP) -> None:
             _require_issues_create(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            ticket = provider.create_ticket(
-                project, token, title, body, labels or [], assignees or [],
-                status=status, custom_fields=custom_fields,
-            )
+            try:
+                ticket = provider.create_ticket(
+                    project, token, title, body, labels or [], assignees or [],
+                    status=status, custom_fields=custom_fields,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
             return {"project_id": project.id, "ticket": asdict(ticket)}
         return _safe(go)
 
@@ -704,12 +708,18 @@ def register(mcp: FastMCP) -> None:
                 # naming the offending label (ticket #217). A genuine
                 # bad-ticket-id 404 doesn't match the label pattern, so
                 # it's still rewrapped by `_rewrap_404` as before.
+                # ticket #218 finding 3c: an Azure 400 for an unrecognised
+                # custom_fields key is disjoint from the 404s (bad ticket
+                # id / bad label) and the 422 (bad assignee) above, so it
+                # can be chained unconditionally alongside them — it's a
+                # no-op pass-through on any status other than 400.
                 exc = _rewrap_404(
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
                 )
                 exc = _rewrap_label_404(exc, labels_add=labels_add)
-                raise _rewrap_422_assignee(exc, assignees_add=assignees_add)
+                exc = _rewrap_422_assignee(exc, assignees_add=assignees_add)
+                raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),

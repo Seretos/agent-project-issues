@@ -488,10 +488,16 @@ def register(mcp: FastMCP) -> None:
         more confident: `>= 300` means the query is a substring of the
         id; `>= 200` a substring of the path; a score `< 100` is usually
         an incidental description / sub-token hit rather than a real
-        match. So "no real match" does NOT reliably show up as an empty
-        `matches` list. For a plain "does project X exist?" check, prefer
-        an exact-id comparison (or enumerate via `list_projects`) instead
-        of relying on `matches` being empty.
+        match. The whole `~100`–`~300` band (below the `>= 300` id-substring
+        floor) is a gray zone: a score in that range is only a path
+        (`>= 200`) or description (`>= 100`) substring hit, or an
+        accumulated sub-token/word-token score built from several partial
+        hits — it is NOT reliably a real match either way. So "no real
+        match" does NOT reliably show up as an empty `matches` list, and a
+        non-empty `matches` list in this band does NOT reliably mean a real
+        match. For a plain "does project X exist?" check, prefer an
+        exact-id comparison (or enumerate via `list_projects`) instead of
+        relying on `matches` being empty or non-empty.
 
         **Pagination fields (always present):**
           - `total: int` — total number of candidates before the `limit`

@@ -22,9 +22,10 @@ from mcp.server.fastmcp import FastMCP
 from lib_python_projects.providers.azuredevops import (
     SUPPORTED_RELATION_KINDS as _AZURE_SUPPORTED_RELATION_KINDS,
 )
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.base import READ_ONLY_RELATION_KINDS, WRITABLE_RELATION_KINDS
-from lib_python_projects.providers.github import GitHubProvider
-from lib_python_projects.providers.gitlab import GitLabProvider
+from lib_python_projects.providers.github import GitHubError, GitHubProvider
+from lib_python_projects.providers.gitlab import GitLabError, GitLabProvider
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _normalize_target,
@@ -32,7 +33,9 @@ from project_issues_plugin.tools._providers import (
     _require_issues_modify,
     _require_token,
     _resolve,
+    _rewrap_404,
     _safe,
+    resolve_token,
 )
 
 
@@ -237,3 +240,72 @@ def register(mcp: FastMCP) -> None:
                 "azuredevops": list(_AZURE_SUPPORTED_RELATION_KINDS),
             },
         }
+
+    @mcp.tool()
+    def list_hierarchy(project_id: str, ticket_id: str) -> dict:
+        """Read a ticket's parent/child (epic) hierarchy in one call.
+
+        A one-call alternative to fetching `get_ticket` for a candidate
+        and hand-filtering its `relations` list for `parent`/`child`
+        entries. Makes exactly the same single provider call `get_ticket`
+        makes internally (`include_relations=True`), then projects the
+        returned relations — it does not resolve or fetch anything
+        beyond what that one call already returns.
+
+        `parent` is the single `parent` relation (an epic or containing
+        issue), or `null` when `ticket_id` has no parent. `children` is
+        the list of all `child` relations, or `[]` when there are none.
+        Each entry has the same shape as an item in `get_ticket`'s
+        `relations` list: `kind`, `ticket_id` (the other ticket's id),
+        `title`, `url`, `state`, `is_pull_request`, `resolved`.
+
+        `relations_truncated` mirrors `get_ticket`'s field of the same
+        name — `true` when the underlying timeline had more pages than
+        were fetched, meaning `children` may be incomplete.
+
+        Read-only: no permission flag required beyond a valid token
+        (public repos work token-less, same as `get_ticket`).
+
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "ticket_id": str,
+          "parent": <relation dict> | null,
+          "children": [<relation dict>, ...],
+          "relations_truncated": bool
+        }
+        ```
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            normalized_id = _normalize_id(project, ticket_id)
+            try:
+                _ticket, _comments, relations, truncated = provider.get_ticket(
+                    project, token, normalized_id,
+                    include_relations=True,
+                    include_custom_fields=False,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="ticket",
+                    ident=normalized_id,
+                )
+            parent = None
+            children = []
+            for rel in relations:
+                if rel.kind == "parent":
+                    parent = asdict(rel)
+                elif rel.kind == "child":
+                    children.append(asdict(rel))
+            return {
+                "project_id": project.id,
+                "ticket_id": normalized_id,
+                "parent": parent,
+                "children": children,
+                "relations_truncated": bool(truncated),
+            }
+        return _safe(go)

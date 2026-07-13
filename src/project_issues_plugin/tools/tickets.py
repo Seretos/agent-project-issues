@@ -402,9 +402,12 @@ def register(mcp: FastMCP) -> None:
                 "Provider-specific field overrides, applied at creation time. "
                 "Semantics differ per provider: on Azure DevOps, full dotted "
                 "field references (e.g. {'Custom.ProcessState': 'Approved'}); "
-                "on GitHub, values for the project's 'github-projects-v2' board "
-                "binding (requires a 'board' block in projects.yml — raises if "
-                "custom_fields is non-empty and no binding is configured); on "
+                "on GitHub, the key is the Projects-v2 board-column field NAME "
+                "(conventionally 'Status') and the value is the native "
+                "column/option name from list_board_columns, e.g. "
+                "{'Status': 'In Progress'} (requires a 'board' block in "
+                "projects.yml — raises if custom_fields is non-empty and no "
+                "binding is configured); on "
                 "GitLab, exactly the keys 'labels' (list[str], overrides the "
                 "labels argument) and/or 'milestone' (str title, or None). "
                 "update_ticket's custom_fields now shares this same GitHub "
@@ -460,7 +463,13 @@ def register(mcp: FastMCP) -> None:
 
         `custom_fields` sets provider-specific fields (or board-column
         values) at creation time — see the parameter description for
-        per-provider semantics. `update_ticket`'s `custom_fields` shares this
+        per-provider semantics. On GitHub, the key is the Projects-v2
+        board-column field NAME (conventionally `"Status"`, discoverable
+        via the project's board binding) and the value is the native
+        column/option name — call `list_board_columns` first to see the
+        valid `native` values. Example: `custom_fields={"Status": "In
+        Progress"}` moves the issue's board card to the "In Progress"
+        column. `update_ticket`'s `custom_fields` shares this
         same GitHub board-write contract for changes made after creation.
         `None`/`{}` is a no-op. Errors (e.g. a missing board binding) surface
         as `{"error": ...}`, not a traceback; the ticket is not created in
@@ -512,9 +521,11 @@ def register(mcp: FastMCP) -> None:
                 "Semantics differ per provider, mirroring create_ticket's "
                 "custom_fields: on Azure DevOps, full dotted field references "
                 "(e.g. {'Custom.ProcessState': 'Approved'} or "
-                "{'System.Tags': 'release'}); on GitHub, values for the "
-                "project's 'github-projects-v2' board binding — same "
-                "requirement and behavior as create_ticket (requires a "
+                "{'System.Tags': 'release'}); on GitHub, the key is the "
+                "Projects-v2 board-column field NAME (conventionally "
+                "'Status') and the value is the native column/option name "
+                "from list_board_columns, e.g. {'Status': 'In Progress'} — "
+                "same requirement and behavior as create_ticket (requires a "
                 "'board' block in projects.yml; raises if custom_fields is "
                 "non-empty and no binding is configured), forwarded whether "
                 "this call is custom_fields-only or combined with standard "
@@ -604,7 +615,11 @@ def register(mcp: FastMCP) -> None:
         contract as `create_ticket`'s `custom_fields` (see that tool's
         docstring for the full per-provider semantics). On Azure DevOps, full
         dotted field references such as `Custom.ProcessState` or `System.Tags`
-        are used. On GitHub, values are written to the project's
+        are used. On GitHub, the key is the Projects-v2 board-column field
+        NAME (conventionally `"Status"`) and the value is the native
+        column/option name from `list_board_columns` — e.g.
+        `custom_fields={"Status": "In Progress"}` moves the issue's board
+        card to the "In Progress" column. Values are written to the project's
         `github-projects-v2` board-column binding, forwarded whether the call
         is `custom_fields`-only or combined with standard fields; a missing
         `board` binding raises rather than being silently ignored. Standard-field

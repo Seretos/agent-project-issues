@@ -36,6 +36,7 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _rewrap_404,
     _rewrap_azure_bad_base,
+    _rewrap_github_bad_base,
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
@@ -172,14 +173,14 @@ def register(mcp: FastMCP) -> None:
         GitHub's transient-then-computed null, so re-fetching will never
         populate it. Do not poll waiting for it on Azure DevOps.
 
-        Azure DevOps quirk: `merge_commit_sha` (and `mergeable: true`)
-        can already be populated right after `create_pr`, before any
-        merge has happened — Azure DevOps computes a speculative
-        pre-merge preview commit natively, it is NOT proof that a merge
-        occurred. Check `merged` / `status` to know whether the PR was
-        actually merged; do not treat a populated `merge_commit_sha` as
-        confirmation. Contrast with GitHub, which correctly returns
-        `mergeable: null` pre-merge (see above).
+        Speculative pre-merge preview: `merge_commit_sha` (and
+        `mergeable: true`) can already be populated right after
+        `create_pr`, before any merge has happened — both GitHub and
+        Azure DevOps compute a speculative pre-merge preview commit
+        natively; this is NOT proof that a merge occurred, and the
+        preview sha differs from the eventual post-merge sha. Check
+        `merged` / `status` to know whether the PR was actually merged;
+        do not treat a populated `merge_commit_sha` as confirmation.
 
         GitLab quirk: `base.sha` is `null` immediately after `create_pr`
         and only populates on a later fetch (e.g. `merge_pr`'s response
@@ -319,12 +320,12 @@ def register(mcp: FastMCP) -> None:
         state (approved / changes-requested / commented); assignees
         don't. Requires the project's `pulls.create` permission.
 
-        Azure DevOps quirk: the returned `merge_commit_sha` (with
-        `mergeable: true`) can already be populated on this very
-        create response, before any merge has happened — Azure DevOps
-        computes a speculative pre-merge preview commit natively. Do
-        not read it as proof of a merge; check `merged` / `status`
-        instead.
+        Speculative pre-merge preview: the returned `merge_commit_sha`
+        (with `mergeable: true`) can already be populated on this very
+        create response, before any merge has happened — both GitHub
+        and Azure DevOps compute a speculative pre-merge preview commit
+        natively. Do not read it as proof of a merge; check `merged` /
+        `status` instead.
 
         GitLab quirk: `base.sha` is `null` on this create response and
         only populates on a later fetch (e.g. via `merge_pr`'s response
@@ -345,10 +346,13 @@ def register(mcp: FastMCP) -> None:
                     requested_reviewers=requested_reviewers or [],
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
-                # ticket #195 finding 2: normalize Azure's raw base-branch
-                # activation-failure text; non-matching errors pass through
-                # unchanged.
-                raise _rewrap_azure_bad_base(exc, base=base)
+                # ticket #195 finding 2 / ticket #214: normalize Azure's raw
+                # base-branch activation-failure text and GitHub's raw
+                # PullRequest.base validation text; non-matching errors pass
+                # through unchanged.
+                raise _rewrap_github_bad_base(
+                    _rewrap_azure_bad_base(exc, base=base), base=base,
+                )
             return {"project_id": project.id, "pull_request": asdict(pr)}
         return _safe(go)
 

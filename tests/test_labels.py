@@ -486,20 +486,32 @@ def test_ado_delete_label_unsupported_returns_error(monkeypatch: pytest.MonkeyPa
 
 
 def test_ado_list_labels_returns_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """list_labels on Azure DevOps returns a label list (best-effort tags)."""
+    """list_labels on Azure DevOps returns a label list (best-effort tags).
+
+    lib-python-projects v0.3.3 (#172) rescoped list_labels away from the
+    org/project tag catalog (`_apis/wit/tags`, which also lists catalog-only
+    tags not applied to any work item) to the union of `System.Tags`
+    actually present on the project's work items: a WIQL query for every
+    work-item id, then a batched `workitemsbatch` fetch of `System.Tags`.
+    """
     project = _ado_project()
     tools = _register_tools_with(monkeypatch, project)
     # Remove token env so no token is required for list (token-optional).
     monkeypatch.delenv(project.token_env, raising=False)
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if "_apis/wit/tags" in req.url.path:
+        if req.method == "POST" and req.url.path.endswith("/_apis/wit/wiql"):
+            return _json_resp({
+                "workItems": [{"id": 101}, {"id": 102}],
+            })
+        if req.method == "POST" and req.url.path.endswith(
+            "/_apis/wit/workitemsbatch"
+        ):
             return _json_resp({
                 "value": [
-                    {"name": "sprint-1"},
-                    {"name": "sprint-2"},
+                    {"id": 101, "fields": {"System.Tags": "sprint-1"}},
+                    {"id": 102, "fields": {"System.Tags": "sprint-2"}},
                 ],
-                "count": 2,
             })
         raise AssertionError(f"unexpected request: {req.url}")
 

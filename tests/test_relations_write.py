@@ -142,11 +142,15 @@ def _gl_issue(iid: int, **overrides) -> dict:
 # ---------- GitHub: child / parent (Sub-Issues API) -------------------------
 
 
-def test_github_add_relation_child_posts_sub_issue(
+def test_github_add_relation_parent_posts_sub_issue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """add_relation(A, kind=child, target=B) → POST /issues/A/sub_issues
-    with `sub_issue_id` set to B's internal id."""
+    """add_relation(A, kind=parent, target=B) → POST /issues/A/sub_issues
+    with `sub_issue_id` set to B's internal id (A becomes B's parent).
+
+    lib-python-projects v0.3.3 (#171) corrected the previously-inverted
+    parent/child write direction: `kind=parent` now targets the ticket's
+    own sub_issues endpoint with the target as the sub-issue."""
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -167,18 +171,23 @@ def test_github_add_relation_child_posts_sub_issue(
 
     _install_github_mock(monkeypatch, handler)
     rel = GitHubProvider().add_relation(
-        _github_project(), "tok", "5", "child", "#7",
+        _github_project(), "tok", "5", "parent", "#7",
     )
-    assert rel.kind == "child"
+    assert rel.kind == "parent"
     assert rel.ticket_id == "#7"
     assert captured["body"] == {"sub_issue_id": 10_007}
 
 
-def test_github_add_relation_parent_swaps_to_child_on_wire(
+def test_github_add_relation_child_swaps_to_parent_on_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """add_relation(A, kind=parent, target=B) → POST /issues/B/sub_issues
-    with `sub_issue_id` set to A's internal id (canonical child form)."""
+    """add_relation(A, kind=child, target=B) → POST /issues/B/sub_issues
+    with `sub_issue_id` set to A's internal id (B becomes A's parent).
+
+    lib-python-projects v0.3.3 (#171) corrected the previously-inverted
+    parent/child write direction: `kind=child` now targets the target's
+    own sub_issues endpoint with the ticket as the sub-issue, resolving
+    the ticket's own internal id (with 404 handling) first."""
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -200,9 +209,9 @@ def test_github_add_relation_parent_swaps_to_child_on_wire(
 
     _install_github_mock(monkeypatch, handler)
     rel = GitHubProvider().add_relation(
-        _github_project(), "tok", "5", "parent", "#7",
+        _github_project(), "tok", "5", "child", "#7",
     )
-    assert rel.kind == "parent"
+    assert rel.kind == "child"
     assert rel.ticket_id == "#7"
     assert captured["body"] == {"sub_issue_id": 10_005}
 
@@ -210,6 +219,8 @@ def test_github_add_relation_parent_swaps_to_child_on_wire(
 def test_github_remove_relation_child_deletes_sub_issue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """child(A→B): B is A's parent → DELETE fires on B's (the target's) own
+    sub_issue endpoint (lib-python-projects v0.3.3, #171)."""
     seen: list[str] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -218,7 +229,7 @@ def test_github_remove_relation_child_deletes_sub_issue(
             return _json(_gh_issue(7))
         if (
             req.method == "DELETE"
-            and req.url.path == "/repos/acme/backend/issues/5/sub_issue"
+            and req.url.path == "/repos/acme/backend/issues/7/sub_issue"
         ):
             return _json({"ok": True})
         raise AssertionError(f"unexpected {req.method} {req.url}")
@@ -435,9 +446,16 @@ def test_github_add_relation_duplicate_of_stamps_modified_on_human_ticket(
 def test_github_remove_relation_duplicate_of_reopens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """lib-python-projects v0.3.3 (#173) added an existence pre-check: the
+    source issue's body must actually contain the `Duplicate of #N` marker
+    before removal proceeds, so the mock source body must carry it."""
     captured: dict[str, object] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/repos/acme/backend/issues/5":
+            return _json(_gh_issue(
+                5, body="#ai-generated\n\nDuplicate of #7\n\noriginal description",
+            ))
         if req.method == "GET":
             return _json(_gh_issue(7))
         if req.method == "PATCH" and req.url.path == "/repos/acme/backend/issues/5":

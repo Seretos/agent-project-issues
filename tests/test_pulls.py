@@ -490,6 +490,10 @@ def test_get_pr_surfaces_review_comments(
                 _review_comment_payload(11),
                 _review_comment_payload(12, in_reply_to_id=11, body="agreed"),
             ])
+        # lib-python-projects v0.3.3 (#148): get_pr now also fetches
+        # submitted reviews to populate pr.reviews/reviewers/review_decision.
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7/reviews":
+            return _json([])
         raise AssertionError(f"unexpected request: {req.method} {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -936,6 +940,13 @@ def test_get_pr_surfaces_github_specific_fields(
             and req.url.path == "/repos/acme/backend/pulls/7/comments"
         ):
             return _json([])
+        # lib-python-projects v0.3.3 (#148): get_pr now also fetches
+        # submitted reviews to populate pr.reviews/reviewers/review_decision.
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/pulls/7/reviews"
+        ):
+            return _json([])
         raise AssertionError(f"unexpected request: {req.method} {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -950,5 +961,7 @@ def test_get_pr_surfaces_github_specific_fields(
     assert pr["pipeline_status"] is None
     assert pr["approvals_required"] is None
     assert pr["approvals_received"] is None
-    # review_decision is sourced from GraphQL — REST mapping leaves None.
+    # No submitted reviews in this fixture (empty /pulls/7/reviews), so
+    # review_decision has no signal to derive from (lib-python-projects
+    # v0.3.3, #148).
     assert pr["review_decision"] is None

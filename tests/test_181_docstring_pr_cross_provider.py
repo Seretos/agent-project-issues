@@ -7,10 +7,10 @@ correct/native — but the tool docstrings in
 agent could misinterpret provider responses. This is a docstring-only fix;
 no behavior changed.
 
-  (a) Azure DevOps can populate `merge_commit_sha` (with `mergeable: true`)
-      speculatively right after PR creation — a native pre-merge preview,
-      not proof a merge happened. Documented on both `get_pr` and
-      `create_pr`.
+  (a) GitHub and Azure DevOps can both populate `merge_commit_sha` (with
+      `mergeable: true`) speculatively right after PR creation — a native
+      pre-merge preview, not proof a merge happened. Documented on both
+      `get_pr` and `create_pr`.
   (b) Azure DevOps adds the merging user to `requested_reviewers` as a
       native side effect of `merge_pr`.
   (c) GitLab's `base.sha` is `null` immediately after `create_pr` and only

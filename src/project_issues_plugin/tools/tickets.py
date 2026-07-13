@@ -30,6 +30,8 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _rewrap_404,
     _rewrap_422_assignee,
+    _rewrap_azure_unknown_field,
+    _rewrap_label_404,
     _rewrap_work_item_type_404,
     _safe,
 )
@@ -489,10 +491,13 @@ def register(mcp: FastMCP) -> None:
             _require_issues_create(project)
             token = _require_token(project)
             provider = _provider_for(project)
-            ticket = provider.create_ticket(
-                project, token, title, body, labels or [], assignees or [],
-                status=status, custom_fields=custom_fields,
-            )
+            try:
+                ticket = provider.create_ticket(
+                    project, token, title, body, labels or [], assignees or [],
+                    status=status, custom_fields=custom_fields,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
             return {"project_id": project.id, "ticket": asdict(ticket)}
         return _safe(go)
 
@@ -690,15 +695,31 @@ def register(mcp: FastMCP) -> None:
             try:
                 ticket = provider.update_ticket(project, token, normalized_id, **kwargs)
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
-                # 404 and 422 are disjoint statuses, so applying both
-                # rewraps unconditionally is safe regardless of order —
-                # each is a no-op pass-through when its own gate doesn't
-                # match (ticket #195 finding 1).
+                # 404 and 422 are disjoint statuses, so applying the 404
+                # and 422 rewraps unconditionally is safe regardless of
+                # order — each is a no-op pass-through when its own gate
+                # doesn't match (ticket #195 finding 1). `_rewrap_404`
+                # and `_rewrap_label_404` both gate on status == 404 but
+                # discriminate on message content instead: `_rewrap_404`
+                # now skips a "label ... does not exist" 404 so it
+                # doesn't clobber that message into a misleading
+                # "ticket not found", and `_rewrap_label_404` is the one
+                # that actually rewraps it into an actionable message
+                # naming the offending label (ticket #217). A genuine
+                # bad-ticket-id 404 doesn't match the label pattern, so
+                # it's still rewrapped by `_rewrap_404` as before.
+                # ticket #218 finding 3c: an Azure 400 for an unrecognised
+                # custom_fields key is disjoint from the 404s (bad ticket
+                # id / bad label) and the 422 (bad assignee) above, so it
+                # can be chained unconditionally alongside them — it's a
+                # no-op pass-through on any status other than 400.
                 exc = _rewrap_404(
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
                 )
-                raise _rewrap_422_assignee(exc, assignees_add=assignees_add)
+                exc = _rewrap_label_404(exc, labels_add=labels_add)
+                exc = _rewrap_422_assignee(exc, assignees_add=assignees_add)
+                raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
             return {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
@@ -778,6 +799,11 @@ def register(mcp: FastMCP) -> None:
         scoping. GitHub and GitLab have no structured field schema and
         always return `"fields": []` (not an error — it is a stable fact
         about those providers, not "unsupported" or "retry later").
+        Because GitHub exposes no field schema, the board write-key is
+        not discoverable here: to set a GitHub board column, call
+        `create_ticket`/`update_ticket` with
+        `custom_fields={"Status": <native>}`, where `<native>` comes
+        from `list_board_columns`.
 
         The `work_item_type` parameter optionally scopes the field set to
         a specific Azure DevOps work-item type (e.g. `"Task"`, `"Issue"`).
@@ -874,6 +900,13 @@ def register(mcp: FastMCP) -> None:
         DevOps (`azure-boards` binding). GitLab has no board concept and
         always returns `"columns": []` — a stable fact about the
         provider, not an error, mirroring `list_custom_fields`.
+
+        On GitHub, the returned `native` name is also the *value* to
+        write to move a card between columns — the write key is the
+        Projects-v2 field name (conventionally `"Status"`). Call
+        `create_ticket`/`update_ticket` with
+        `custom_fields={"Status": <native>}` to set it; see those tools'
+        docstrings for the full contract.
 
         Unlike `list_custom_fields`, a **missing or misconfigured**
         `board` block on a provider that does support boards is NOT

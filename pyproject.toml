@@ -15,11 +15,11 @@ dependencies = [
   # is a fast-forward-only pointer to the latest 0.x-compatible commit.
   # Bump to `release/Nx` once the lib reaches Nx.0.0 with breaking changes.
   "lib-python-config @ git+https://github.com/Seretos/lib-python-config@release/0.x",
-  # Pinned to an exact immutable tag (v0.3.3). New lib versions arrive via an
+  # Pinned to an exact immutable tag (v0.3.4). New lib versions arrive via an
   # explicit chore ticket that updates this pin — not silently through a moving
   # branch. See scripts/sync-libs.ps1 which force-reinstalls this ref to
   # prevent a local editable-install from shadowing the pinned release.
-  "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@v0.3.3",
+  "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@v0.3.4",
   # pydantic / ruamel.yaml / httpx come transitively via lib-python-projects;
   # they are kept out of this list intentionally so the plugin can only
   # talk to providers through the lib's BaseProvider surface.

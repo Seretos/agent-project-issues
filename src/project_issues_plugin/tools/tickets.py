@@ -778,6 +778,11 @@ def register(mcp: FastMCP) -> None:
         scoping. GitHub and GitLab have no structured field schema and
         always return `"fields": []` (not an error — it is a stable fact
         about those providers, not "unsupported" or "retry later").
+        Because GitHub exposes no field schema, the board write-key is
+        not discoverable here: to set a GitHub board column, call
+        `create_ticket`/`update_ticket` with
+        `custom_fields={"Status": <native>}`, where `<native>` comes
+        from `list_board_columns`.
 
         The `work_item_type` parameter optionally scopes the field set to
         a specific Azure DevOps work-item type (e.g. `"Task"`, `"Issue"`).
@@ -874,6 +879,13 @@ def register(mcp: FastMCP) -> None:
         DevOps (`azure-boards` binding). GitLab has no board concept and
         always returns `"columns": []` — a stable fact about the
         provider, not an error, mirroring `list_custom_fields`.
+
+        On GitHub, the returned `native` name is also the *value* to
+        write to move a card between columns — the write key is the
+        Projects-v2 field name (conventionally `"Status"`). Call
+        `create_ticket`/`update_ticket` with
+        `custom_fields={"Status": <native>}` to set it; see those tools'
+        docstrings for the full contract.
 
         Unlike `list_custom_fields`, a **missing or misconfigured**
         `board` block on a provider that does support boards is NOT

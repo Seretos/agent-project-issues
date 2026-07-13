@@ -129,16 +129,17 @@ def register(mcp: FastMCP) -> None:
         `ticket_id` request parameter above, which identifies the
         source ticket.
 
-        The whole returned `relation` object is an **echo of this
-        call's own target side**, resolved live from your `target` /
-        `kind` inputs and framed from `ticket_id` (the source) outward
-        — it is NOT an entry out of `get_ticket(...).relations[]`. In
-        particular it does not reflect what the source ticket's own
-        relations list will show afterward (that list is framed the
-        opposite way, from the source ticket's perspective) and it is
-        not itself one of that list's entries; call
-        `get_ticket(ticket_id, include_relations=True)` afterward if
-        you need the source ticket's actual relations view.
+        The returned `relation` object is **fully hydrated** — when
+        `resolved` is `true` it was fetched live from the provider, so
+        `title` / `state` / `url` are real — and has the **same shape
+        as an entry in `get_ticket(ticket_id,
+        include_relations=True).relations[]`** (and as `list_hierarchy`'s
+        `parent`/`children` entries): `kind`, `ticket_id`, `title`,
+        `url`, `state`, `is_pull_request`, `resolved`. It describes only
+        the single relation just created, framed from the source
+        `ticket_id` outward (`relation.ticket_id` is the target); to see
+        the source ticket's full relations list, call
+        `get_ticket(ticket_id, include_relations=True)`.
 
         `resolved` documents how the relation metadata was obtained:
           - `true`  — target was fetched from the provider API; title /

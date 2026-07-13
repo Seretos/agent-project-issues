@@ -30,6 +30,7 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _rewrap_404,
     _rewrap_422_assignee,
+    _rewrap_label_404,
     _rewrap_work_item_type_404,
     _safe,
 )
@@ -690,14 +691,24 @@ def register(mcp: FastMCP) -> None:
             try:
                 ticket = provider.update_ticket(project, token, normalized_id, **kwargs)
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
-                # 404 and 422 are disjoint statuses, so applying both
-                # rewraps unconditionally is safe regardless of order —
-                # each is a no-op pass-through when its own gate doesn't
-                # match (ticket #195 finding 1).
+                # 404 and 422 are disjoint statuses, so applying the 404
+                # and 422 rewraps unconditionally is safe regardless of
+                # order — each is a no-op pass-through when its own gate
+                # doesn't match (ticket #195 finding 1). `_rewrap_404`
+                # and `_rewrap_label_404` both gate on status == 404 but
+                # discriminate on message content instead: `_rewrap_404`
+                # now skips a "label ... does not exist" 404 so it
+                # doesn't clobber that message into a misleading
+                # "ticket not found", and `_rewrap_label_404` is the one
+                # that actually rewraps it into an actionable message
+                # naming the offending label (ticket #217). A genuine
+                # bad-ticket-id 404 doesn't match the label pattern, so
+                # it's still rewrapped by `_rewrap_404` as before.
                 exc = _rewrap_404(
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
                 )
+                exc = _rewrap_label_404(exc, labels_add=labels_add)
                 raise _rewrap_422_assignee(exc, assignees_add=assignees_add)
             return {
                 "project_id": project.id,

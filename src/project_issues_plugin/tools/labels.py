@@ -26,11 +26,15 @@ from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 
 from lib_python_projects import resolve_token
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
+from lib_python_projects.providers.github import GitHubError
+from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _provider_for,
     _require_issues_modify,
     _require_token,
     _resolve,
+    _rewrap_label_already_exists,
     _safe,
 )
 
@@ -223,10 +227,13 @@ def register(mcp: FastMCP) -> None:
                 _validate_label_name(new_name)
             if color is not None and project.provider == "github":
                 _validate_github_color(color)
-            label = provider.update_label(
-                project, token, name,
-                new_name=new_name, color=color, description=description,
-            )
+            try:
+                label = provider.update_label(
+                    project, token, name,
+                    new_name=new_name, color=color, description=description,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_label_already_exists(exc, new_name=new_name)
             return {
                 "project_id": project.id,
                 "label": asdict(label),

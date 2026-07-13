@@ -19,3 +19,4 @@ dist/
 # the release tarball is what ships to end users.
 /bin/
 *.pyinstaller.tmp/
+.process-ticket-result.json

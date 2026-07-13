@@ -36,6 +36,7 @@ from project_issues_plugin.tools._providers import (
     _resolve,
     _rewrap_404,
     _rewrap_azure_bad_base,
+    _rewrap_github_bad_base,
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
@@ -345,10 +346,13 @@ def register(mcp: FastMCP) -> None:
                     requested_reviewers=requested_reviewers or [],
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
-                # ticket #195 finding 2: normalize Azure's raw base-branch
-                # activation-failure text; non-matching errors pass through
-                # unchanged.
-                raise _rewrap_azure_bad_base(exc, base=base)
+                # ticket #195 finding 2 / ticket #214: normalize Azure's raw
+                # base-branch activation-failure text and GitHub's raw
+                # PullRequest.base validation text; non-matching errors pass
+                # through unchanged.
+                raise _rewrap_github_bad_base(
+                    _rewrap_azure_bad_base(exc, base=base), base=base,
+                )
             return {"project_id": project.id, "pull_request": asdict(pr)}
         return _safe(go)
 

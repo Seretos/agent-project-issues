@@ -22,6 +22,7 @@ from project_issues_plugin.tools import tickets as ticket_tools
 from project_issues_plugin.tools._providers import (
     _rewrap_422_assignee,
     _rewrap_azure_bad_base,
+    _rewrap_github_bad_base,
 )
 
 
@@ -370,4 +371,107 @@ def test_rewrap_azure_bad_base_passes_through_non_400() -> None:
     message contains TF401398."""
     exc = AzureDevOpsError(500, "TF401398: whatever")
     out = _rewrap_azure_bad_base(exc, base="main")
+    assert out is exc
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 (ticket #214): create_pr / GitHub 422 bad-base-branch rewrap
+# ---------------------------------------------------------------------------
+
+
+class _MockGitHubProviderBadBase:
+    """Fake GitHub provider whose create_pr raises a raw 422 for an
+    unusable base branch, mirroring GitHub's real
+    `Validation Failed: PullRequest.base (invalid)` response body."""
+
+    def create_pr(self, project, token, title, body, head, base, **kwargs):
+        raise GitHubError(422, "Validation Failed: PullRequest.base (invalid)")
+
+
+class _MockGitHubProviderOtherValidation:
+    def create_pr(self, project, token, title, body, head, base, **kwargs):
+        raise GitHubError(
+            422, "Validation Failed: Issue.assignees='x' (invalid)",
+        )
+
+
+class _MockGitHubProvider500ForCreatePr:
+    def create_pr(self, project, token, title, body, head, base, **kwargs):
+        raise GitHubError(500, "Internal Server Error")
+
+
+def test_create_pr_github_bad_base_branch_hides_raw_github_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`create_pr` against a non-existent base branch on GitHub must not
+    leak GitHub's raw 'Validation Failed: PullRequest.base (invalid)'
+    body verbatim; the message names the `base` branch instead."""
+    tools = _register_pull_tools_with_provider(
+        monkeypatch, _MockGitHubProviderBadBase(),
+        provider_key="github", token_env="GITHUB_TOKEN_ACME",
+    )
+
+    out = tools["create_pr"](
+        project_id="acme", title="t", body="b", head="feature/x", base="no-such-branch",
+    )
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    message = out["error"]
+    assert "no-such-branch" in message
+    assert "verify the branch exists" in message
+    assert "Validation Failed" not in message
+    assert "PullRequest.base" not in message
+
+
+def test_create_pr_github_unrelated_422_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 422 unrelated to the base branch (e.g. an invalid assignee) is
+    not touched by the GitHub bad-base rewrap and surfaces via the
+    normal `_safe` translation."""
+    tools = _register_pull_tools_with_provider(
+        monkeypatch, _MockGitHubProviderOtherValidation(),
+        provider_key="github", token_env="GITHUB_TOKEN_ACME",
+    )
+
+    out = tools["create_pr"](
+        project_id="acme", title="t", body="b", head="feature/x", base="main",
+    )
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    assert "Issue.assignees=" in out["error"]
+
+
+def test_create_pr_github_non_422_error_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-422 GitHubError (e.g. 500) is untouched by the GitHub
+    bad-base rewrap."""
+    tools = _register_pull_tools_with_provider(
+        monkeypatch, _MockGitHubProvider500ForCreatePr(),
+        provider_key="github", token_env="GITHUB_TOKEN_ACME",
+    )
+
+    out = tools["create_pr"](
+        project_id="acme", title="t", body="b", head="feature/x", base="main",
+    )
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    assert "Internal Server Error" in out["error"]
+
+
+def test_rewrap_github_bad_base_passes_through_non_matching_422() -> None:
+    """Direct unit test: a 422 that doesn't mention GitHub's
+    `PullRequest.base` field (e.g. an invalid assignee) passes through
+    unchanged."""
+    exc = GitHubError(422, "Validation Failed: Issue.assignees='x' (invalid)")
+    out = _rewrap_github_bad_base(exc, base="main")
+    assert out is exc
+
+
+def test_rewrap_github_bad_base_passes_through_non_422() -> None:
+    """Direct unit test: any non-422 status is untouched, even if the
+    message matches PullRequest.base."""
+    exc = GitHubError(500, "PullRequest.base (invalid)")
+    out = _rewrap_github_bad_base(exc, base="main")
     assert out is exc

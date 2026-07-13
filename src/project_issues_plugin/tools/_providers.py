@@ -304,6 +304,39 @@ def _rewrap_azure_bad_base(exc, *, base: str):
     )
 
 
+_GITHUB_BAD_BASE_RE = re.compile(r"PullRequest\.base", re.IGNORECASE)
+
+
+def _rewrap_github_bad_base(exc, *, base: str):
+    """Rewrap a GitHub 422 caused by an unusable `base` branch.
+
+    Ticket #214: `create_pr` against a non-existent base branch surfaces
+    GitHub's raw validation body verbatim, e.g. `"GitHub 422: Validation
+    Failed: PullRequest.base (invalid)"`. Gated narrowly (status == 422
+    AND the message names GitHub's `PullRequest.base` field, mirroring
+    `_rewrap_azure_bad_base`'s #195 finding 2 counterpart) so unrelated
+    422s (e.g. an invalid title/label/assignee) pass through untouched.
+
+    The replacement message is built from our own `base` input already
+    in scope, not by echoing GitHub's raw body — so no internal GitHub
+    identifiers leak through.
+
+    For non-matching errors the original exception is returned unchanged
+    so callers can `raise _rewrap_github_bad_base(exc, ...)` unconditionally,
+    matching the `_rewrap_404` / `_rewrap_azure_bad_base` contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 422:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if not _GITHUB_BAD_BASE_RE.search(message):
+        return exc
+    return type(exc)(
+        422,
+        f"base branch '{base}' cannot be used for this pull request — "
+        "verify the branch exists in the repository",
+    )
+
+
 # --------- error translation -------------------------------------------------
 
 
@@ -345,6 +378,7 @@ __all__ = [
     "_rewrap_work_item_type_404",
     "_rewrap_422_assignee",
     "_rewrap_azure_bad_base",
+    "_rewrap_github_bad_base",
     "_safe",
     "load_projects",
     "resolve_token",

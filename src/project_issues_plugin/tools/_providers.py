@@ -167,6 +167,9 @@ def _normalize_target(project: ProjectConfig, raw):
     return _refs.normalize_target(raw, project)
 
 
+_LABEL_404_RE = re.compile(r"label .+ does not exist", re.IGNORECASE)
+
+
 def _rewrap_404(exc, *, project_id: str, kind: str, ident: str):
     """Rewrap a provider 404 to include project + id context.
 
@@ -179,8 +182,24 @@ def _rewrap_404(exc, *, project_id: str, kind: str, ident: str):
 
     For non-404 errors the original exception is returned unchanged so
     callers can `raise _rewrap_404(exc, ...)` unconditionally.
+
+    Ticket #217: a 404 raised by the lib's `_assert_labels_exist` (e.g.
+    `update_ticket(labels_add=["nonexistent-label"])`) is NOT a
+    bad-ticket-id lookup failure — it's a distinguishable, already
+    actionable "label '...' does not exist in <project>" message. This
+    helper's only gate is `status == 404`, so without this check it
+    would clobber that message into a misleading "ticket '<id>#<n>' not
+    found", even though the ticket id itself is fine. Skip (pass
+    through unchanged) so `_rewrap_label_404` gets a chance to handle it
+    instead — mirrors the disjoint-gate pattern the other `_rewrap_*`
+    helpers use (e.g. `_rewrap_404` vs `_rewrap_422_assignee` are
+    disjoint on status; here both match 404 but are disjoint on
+    message content).
     """
     if not hasattr(exc, "status") or exc.status != 404:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if _LABEL_404_RE.search(message):
         return exc
     provider_name = type(exc).__name__.replace("Error", "")
     return type(exc)(
@@ -267,6 +286,58 @@ def _rewrap_422_assignee(exc, *, assignees_add: list[str] | None):
         422,
         "one or more of the requested assignees are not valid GitHub "
         f"users/collaborators: {names}",
+    )
+
+
+# --------- error translation rewrap helpers (ticket #217) --------------------
+
+
+_LABEL_NAME_RE = re.compile(r"label ['\"]([^'\"]+)['\"] does not exist")
+
+
+def _rewrap_label_404(exc, *, labels_add: list[str] | None):
+    """Rewrap a GitHub 404 caused by a nonexistent `labels_add` name.
+
+    Ticket #217: `update_ticket(labels_add=["nonexistent-label"])`
+    raises a distinguishable `GitHubError(404, "label '...' does not
+    exist in <project.id>")` from the lib's `_assert_labels_exist`, but
+    `_rewrap_404` (gated only on `status == 404`) used to clobber it
+    into a misleading "ticket '<id>#<n>' not found" — as if the ticket
+    id itself were bad. `_rewrap_404` now skips messages matching
+    `_LABEL_404_RE` so this helper gets a chance to run instead. Gated
+    narrowly (status == 404 AND the message matches `_LABEL_404_RE`,
+    mirroring how `_rewrap_422_assignee` gates on the `assignees` field)
+    so an unrelated 404 (e.g. a genuine bad ticket id) passes through
+    untouched and still gets `_rewrap_404`'s "not found" treatment.
+
+    When the offending label name can be parsed out of the lib's
+    message it is named directly; otherwise the message falls back to
+    naming the full `labels_add` input list so the agent still knows
+    what to check.
+
+    For non-matching errors the original exception is returned
+    unchanged so callers can `raise _rewrap_label_404(exc, ...)`
+    unconditionally, matching the `_rewrap_404` / `_rewrap_422_assignee`
+    contract.
+    """
+    if not hasattr(exc, "status") or exc.status != 404:
+        return exc
+    message = getattr(exc, "message", str(exc))
+    if not _LABEL_404_RE.search(message):
+        return exc
+    match = _LABEL_NAME_RE.search(message)
+    if match:
+        label = match.group(1)
+        return type(exc)(
+            404,
+            f"label '{label}' does not exist; create it first or check "
+            "existing labels",
+        )
+    names = ", ".join(labels_add) if labels_add else "(unknown)"
+    return type(exc)(
+        404,
+        "one or more of the requested labels do not exist; create them "
+        f"first or check existing labels: {names}",
     )
 
 
@@ -377,6 +448,7 @@ __all__ = [
     "_rewrap_404",
     "_rewrap_work_item_type_404",
     "_rewrap_422_assignee",
+    "_rewrap_label_404",
     "_rewrap_azure_bad_base",
     "_rewrap_github_bad_base",
     "_safe",

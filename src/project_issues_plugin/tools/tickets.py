@@ -418,8 +418,11 @@ def register(mcp: FastMCP) -> None:
                 "status change via a Projects-v2 workflow automation — e.g. "
                 "writing the 'Done' column can auto-close the underlying issue "
                 "— this is provider-side automation, not controlled by this "
-                "server; call get_ticket(..., include_custom_fields=True) "
-                "afterward to confirm the resulting status. "
+                "server. During this cascade window, this call's own returned "
+                "status and updated_at may still reflect pre-cascade, stale "
+                "values — they are not guaranteed to include the cascade's "
+                "effect. Re-call get_ticket(..., include_custom_fields=True) "
+                "afterward for guaranteed-fresh status. "
                 "Call list_custom_fields(project_id) to discover available "
                 "field reference names and their allowed values first. "
                 "None or {} means 'no overrides' and is always a no-op."
@@ -480,9 +483,12 @@ def register(mcp: FastMCP) -> None:
         On GitHub, writing a board column at creation time can cascade into a
         ticket status change via a Projects-v2 workflow automation — e.g.
         writing the "Done" column can auto-close the underlying issue. This
-        is provider-side automation and is not controlled by this server;
-        call `get_ticket(..., include_custom_fields=True)` afterward to
-        confirm the resulting status.
+        is provider-side automation and is not controlled by this server.
+        During this cascade window, this call's own returned `status` and
+        `updated_at` may still reflect pre-cascade, stale values — they are
+        not guaranteed to include the cascade's effect. Re-call
+        `get_ticket(..., include_custom_fields=True)` afterward for
+        guaranteed-fresh status.
 
         Requires the project's `issues.create` permission.
         """
@@ -536,8 +542,12 @@ def register(mcp: FastMCP) -> None:
                 "this call is custom_fields-only or combined with standard "
                 "fields. Writing a board column on GitHub can cascade into a "
                 "status change via provider-side workflow automation (e.g. a "
-                "'Done' column auto-closing the issue) — confirm with "
-                "get_ticket(..., include_custom_fields=True) afterward. On "
+                "'Done' column auto-closing the issue). During this cascade "
+                "window, this call's own returned status and updated_at may "
+                "still reflect pre-cascade, stale values — they are not "
+                "guaranteed to include the cascade's effect. Re-call "
+                "get_ticket(..., include_custom_fields=True) afterward for "
+                "guaranteed-fresh status. On "
                 "GitLab, custom_fields remains unsupported: it is silently "
                 "dropped when combined with standard fields, but a "
                 "custom_fields-only call returns an error. "
@@ -632,9 +642,12 @@ def register(mcp: FastMCP) -> None:
         surface as an error after standard fields have already landed (the
         underlying provider call is not atomic). Writing a board column can
         also cascade into a status change via provider-side workflow
-        automation (e.g. a "Done" column auto-closing the issue) — confirm
-        the result with `get_ticket(..., include_custom_fields=True)`
-        afterward. On GitLab the parameter is still unsupported: it is
+        automation (e.g. a "Done" column auto-closing the issue). During
+        this cascade window, this call's own returned `status` and
+        `updated_at` may still reflect pre-cascade, stale values — they are
+        not guaranteed to include the cascade's effect. Re-call
+        `get_ticket(..., include_custom_fields=True)` afterward for
+        guaranteed-fresh status. On GitLab the parameter is still unsupported: it is
         silently dropped when other standard fields are present; a
         `custom_fields`-only call on GitLab returns a descriptive error
         rather than silently mutating nothing of what was asked. Passing

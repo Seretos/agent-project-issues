@@ -132,6 +132,32 @@ def test_update_ticket_custom_fields_warns_about_status_cascade():
 
 
 # ---------------------------------------------------------------------------
+# agent-project-issues#226 — the cascade note must go further than generic
+# "confirm the resulting status" advice: it must explicitly warn that this
+# call's OWN returned status/updated_at can still be pre-cascade/stale, and
+# push the caller to re-`get_ticket` for guaranteed-fresh state.
+# ---------------------------------------------------------------------------
+
+
+def test_create_ticket_cascade_note_warns_own_response_may_be_stale():
+    desc = _param_description(_ticket_tools["create_ticket"], "custom_fields")
+    doc = _ticket_tools["create_ticket"].__doc__ or ""
+    combined = desc + " " + doc
+    assert "stale" in combined.lower() or "pre-cascade" in combined.lower()
+    assert "get_ticket" in combined
+    assert "guaranteed" in combined.lower()
+
+
+def test_update_ticket_cascade_note_warns_own_response_may_be_stale():
+    desc = _param_description(_ticket_tools["update_ticket"], "custom_fields")
+    doc = _ticket_tools["update_ticket"].__doc__ or ""
+    combined = desc + " " + doc
+    assert "stale" in combined.lower() or "pre-cascade" in combined.lower()
+    assert "get_ticket" in combined
+    assert "guaranteed" in combined.lower()
+
+
+# ---------------------------------------------------------------------------
 # Item 3 — no code change expected here; guard this repo's own `column`
 # docs (list_tickets / list_tickets_across_projects) already mention Azure
 # DevOps/Azure Boards, so they never regress toward the lib's

@@ -561,6 +561,14 @@ def register(mcp: FastMCP) -> None:
         normalized away and cannot be set through this tool — passing
         either as `state` returns `{"error": "..."}`.
 
+        Azure DevOps reviewer side effect: `"approve"` and
+        `"request_changes"` add or update the reviewing user in the PR's
+        `reviewers` collection with their scored vote (+10 / -10). A
+        `"comment"` (vote 0) does not create a scored `reviewers` entry
+        — Azure surfaces the commenter only as a transient
+        `requested_reviewers` entry instead. Treat a review as recorded
+        from `reviewers`, not `requested_reviewers`.
+
         `commit_sha`, when set, pins the review to a specific commit on
         GitHub (`commit_id`). GitLab cannot pin a review to a commit: it
         ignores `commit_sha` and the returned review always has
@@ -630,11 +638,11 @@ def register(mcp: FastMCP) -> None:
         shape `get_pr` returns — so `merged: true` and
         `merge_commit_sha` are available without a follow-up `get_pr`.
 
-        Azure DevOps quirk: merging a PR adds the merging user to
-        `requested_reviewers` as a native side effect of the merge
-        operation itself — reviewer/assignee fields can mutate as a
-        result of merging, not just PR-state fields like `merged` /
-        `status`.
+        Azure DevOps note: despite an earlier report, merging a PR does
+        NOT add the merging user to `requested_reviewers` — that side
+        effect could not be reproduced. Merging mutates only PR-state
+        fields such as `merged`, `status`, and `merge_commit_sha`;
+        reviewer/assignee collections are left untouched by the merge.
         """
         def go() -> dict:
             project = _resolve(project_id)

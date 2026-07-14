@@ -11,8 +11,9 @@ no behavior changed.
       `mergeable: true`) speculatively right after PR creation — a native
       pre-merge preview, not proof a merge happened. Documented on both
       `get_pr` and `create_pr`.
-  (b) Azure DevOps adds the merging user to `requested_reviewers` as a
-      native side effect of `merge_pr`.
+  (b) Merging a PR does NOT add the merging user to `requested_reviewers`
+      (an earlier report of this was retracted as unreproducible);
+      merge mutates only PR-state fields. Documented on `merge_pr`.
   (c) GitLab's `base.sha` is `null` immediately after `create_pr` and only
       populates on a later fetch. Documented on both `get_pr` and
       `create_pr`.
@@ -113,17 +114,22 @@ def test_create_pr_docstring_documents_gitlab_base_sha_null_quirk():
 
 
 # ---------------------------------------------------------------------------
-# Item (b) — Azure DevOps merge -> requested_reviewers mutation, on
+# Item (b) — Azure DevOps merge does NOT mutate requested_reviewers, on
 # merge_pr.
 # ---------------------------------------------------------------------------
 
 
-def test_merge_pr_docstring_documents_ado_requested_reviewers_side_effect():
-    doc = _normalize_ws(_pull_tools["merge_pr"].__doc__ or "")
-    assert "Azure DevOps" in doc
+def test_merge_pr_docstring_documents_no_requested_reviewers_side_effect():
+    doc = _normalize_ws(_pull_tools["merge_pr"].__doc__ or "").lower()
+    assert "azure devops" in doc
     assert "requested_reviewers" in doc
-    assert "side effect" in doc
-    assert "merging user" in doc
+    # The corrected note negates the previously-claimed side effect. Check
+    # for "not add" specifically (not a bare "does not" substring, which
+    # false-positives on the unrelated "does not itself merge" rebase
+    # sentence already present in this docstring before the fix).
+    assert "not add" in doc
+    # Merge mutates only PR-state fields, per the correction.
+    assert "merged" in doc and "status" in doc
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +145,16 @@ def test_submit_pr_review_docstring_documents_self_approval_divergence():
     )
     assert "GitLab" in doc
     assert "allows self-approval" in doc or "self-approval outright" in doc
+
+
+def test_submit_pr_review_docstring_documents_ado_reviewers_side_effect():
+    doc = _normalize_ws(_pull_tools["submit_pr_review"].__doc__ or "")
+    assert "Azure DevOps" in doc
+    # approve / request_changes land in the scored reviewers collection...
+    assert "reviewers" in doc
+    # ...while comment surfaces only as a transient requested_reviewers entry.
+    assert "requested_reviewers" in doc
+    assert "transient" in doc
 
 
 # ---------------------------------------------------------------------------

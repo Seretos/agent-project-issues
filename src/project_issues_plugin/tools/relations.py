@@ -51,6 +51,47 @@ def register(mcp: FastMCP) -> None:
         """Create a typed relation from `ticket_id` (the source) to
         `target` (the destination).
 
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "relation": {
+            "kind":             str,
+            "ticket_id":        str,
+            "title":            str,
+            "url":              str,
+            "state":            str,
+            "is_pull_request":  bool,
+            "resolved":         bool | null
+          }
+        }
+        ```
+
+        `relation.ticket_id` is the **target/other** ticket's id (the
+        "to" end resolved from `target`) — distinct from the
+        `ticket_id` request parameter above, which identifies the
+        source ticket.
+
+        The returned `relation` object is **fully hydrated** — when
+        `resolved` is `true` it was fetched live from the provider, so
+        `title` / `state` / `url` are real — and has the **same shape
+        as an entry in `get_ticket(ticket_id,
+        include_relations=True).relations[]`** (and as `list_hierarchy`'s
+        `parent`/`children` entries): `kind`, `ticket_id`, `title`,
+        `url`, `state`, `is_pull_request`, `resolved`. It describes only
+        the single relation just created, framed from the source
+        `ticket_id` outward (`relation.ticket_id` is the target); to see
+        the source ticket's full relations list, call
+        `get_ticket(ticket_id, include_relations=True)`.
+
+        `resolved` documents how the relation metadata was obtained:
+          - `true`  — target was fetched from the provider API; title /
+            state / url are live.
+          - `false` — target was inferred from body or text scanning;
+            title / state may be empty.
+          - `null`  — liveness is unknown (provider did not indicate).
+
         Direction matters for the asymmetric kinds. `ticket_id` is
         always the "from" end and `target` the "to" end:
           - `blocks`:     `ticket_id` blocks `target`.
@@ -106,47 +147,6 @@ def register(mcp: FastMCP) -> None:
             not independently verified from this repo.)
 
         Requires the project's `issues.modify` permission.
-
-        Returns:
-
-        ```
-        {
-          "project_id": str,
-          "relation": {
-            "kind":             str,
-            "ticket_id":        str,
-            "title":            str,
-            "url":              str,
-            "state":            str,
-            "is_pull_request":  bool,
-            "resolved":         bool | null
-          }
-        }
-        ```
-
-        `relation.ticket_id` is the **target/other** ticket's id (the
-        "to" end resolved from `target`) — distinct from the
-        `ticket_id` request parameter above, which identifies the
-        source ticket.
-
-        The returned `relation` object is **fully hydrated** — when
-        `resolved` is `true` it was fetched live from the provider, so
-        `title` / `state` / `url` are real — and has the **same shape
-        as an entry in `get_ticket(ticket_id,
-        include_relations=True).relations[]`** (and as `list_hierarchy`'s
-        `parent`/`children` entries): `kind`, `ticket_id`, `title`,
-        `url`, `state`, `is_pull_request`, `resolved`. It describes only
-        the single relation just created, framed from the source
-        `ticket_id` outward (`relation.ticket_id` is the target); to see
-        the source ticket's full relations list, call
-        `get_ticket(ticket_id, include_relations=True)`.
-
-        `resolved` documents how the relation metadata was obtained:
-          - `true`  — target was fetched from the provider API; title /
-            state / url are live.
-          - `false` — target was inferred from body or text scanning;
-            title / state may be empty.
-          - `null`  — liveness is unknown (provider did not indicate).
         """
         def go() -> dict:
             project = _resolve(project_id)

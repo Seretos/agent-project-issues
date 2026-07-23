@@ -201,6 +201,50 @@ def test_list_tickets_across_projects_summary_mentions_column_filtering():
 
 
 # ---------------------------------------------------------------------------
+# ticket agent-project-issues#230 — `ensure_board_column` must be documented
+# in both its own docstring and README (permissions table, bullet list, and
+# a note in the "Board columns (optional)" section).
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_board_column_docstring_mentions_board_manage():
+    doc = _ticket_tools["ensure_board_column"].__doc__ or ""
+    assert "board.manage" in doc
+
+
+def test_ensure_board_column_docstring_mentions_idempotent_create():
+    doc = _ticket_tools["ensure_board_column"].__doc__ or ""
+    assert "idempotent" in doc.lower() or "no-op" in doc.lower()
+
+
+def test_ensure_board_column_docstring_mentions_provider_support():
+    doc = _ticket_tools["ensure_board_column"].__doc__ or ""
+    assert "GitHub" in doc
+    assert "Azure" in doc
+    assert "GitLab" in doc
+
+
+def _readme_text() -> str:
+    import pathlib
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    return (repo_root / "README.md").read_text(encoding="utf-8")
+
+
+def test_readme_permissions_table_documents_board_manage():
+    readme = _readme_text()
+    assert "board.manage" in readme
+    assert "ensure_board_column" in readme
+
+
+def test_readme_board_columns_section_documents_ensure_board_column():
+    readme = _readme_text()
+    idx = readme.index("#### Board columns (optional)")
+    section = readme[idx: idx + 4000]
+    assert "ensure_board_column" in section
+    assert "board.manage" in section
+
+
+# ---------------------------------------------------------------------------
 # Hygiene guard — mirrors test_tool_docstring_hygiene.py: none of the new
 # prose introduced here may contain the literal substring "ticket #".
 # ---------------------------------------------------------------------------
@@ -220,6 +264,7 @@ def test_new_prose_contains_no_internal_ticket_references():
         "list_tickets_across_projects.__doc__": (
             _bulk_tools["list_tickets_across_projects"].__doc__ or ""
         ),
+        "ensure_board_column.__doc__": _ticket_tools["ensure_board_column"].__doc__ or "",
     }
     violations = [name for name, text in texts.items() if "ticket #" in text.lower()]
     assert not violations, f"internal ticket references found in: {violations}"

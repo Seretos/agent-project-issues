@@ -167,6 +167,8 @@ projects:
 
 Both `owner`/`project_number` (GitHub) and `team`/`board` (Azure DevOps) can be omitted from the YAML — the block stays schema-valid — but `list_board_columns` (and the `column` filter) raise a descriptive error at call time if the binding is used without them, rather than silently no-op-ing.
 
+**Auto-default onto the board (GitHub Projects v2 only).** When a `github-projects-v2` `board:` binding is configured, `create_ticket` auto-defaults a new ticket onto the board's first configured column (`columns[0]`) whenever the caller doesn't already pass an explicit value for the binding's `status_field` key (conventionally `"Status"`) in `custom_fields` — so a plain `create_ticket(...)` call lands the new issue on the board instead of leaving it invisible until someone remembers to set `custom_fields={"Status": ...}` by hand. Pass `custom_fields` with the status-field key set to choose a different column explicitly, or pass `off_board=True` to opt the ticket out of the board entirely. This default is best-effort: if resolving the board columns fails for any reason, the ticket is still created — with a `board_warning` string attached to the response — rather than blocking creation. Azure DevOps and GitLab are unaffected (Azure's `System.State` already keeps new work items on-board; GitLab has no board concept), and the default only ever applies at creation time — `update_ticket` never auto-attaches a ticket to a column.
+
 
 
 Resolution happens in three legs, in order. **The first leg that produces results wins entirely — subsequent legs are skipped.**

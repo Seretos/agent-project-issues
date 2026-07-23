@@ -112,3 +112,33 @@ def test_github_board_columns_match_readme_example(loaded_example_config) -> Non
 def test_azure_board_columns_match_readme_example(loaded_example_config) -> None:
     project = _by_id(loaded_example_config, "acme-ado-frontend")
     assert project.board.columns == ["New", "Approved", "Doing", "Done"]
+
+
+# ---------------------------------------------------------------------------
+# ticket agent-project-issues#230: `board.manage` (gates `ensure_board_column`)
+# must be documented, commented-out, in both board-carrying example entries —
+# the example must still load with the safe manage=False default.
+# ---------------------------------------------------------------------------
+
+
+def test_github_project_board_manage_defaults_false(loaded_example_config) -> None:
+    project = _by_id(loaded_example_config, "acme-backend")
+    assert project.permissions.board.manage is False
+
+
+def test_azuredevops_project_board_manage_defaults_false(loaded_example_config) -> None:
+    project = _by_id(loaded_example_config, "acme-ado-frontend")
+    assert project.permissions.board.manage is False
+
+
+def test_config_example_documents_board_manage_flag() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    example = repo_root / "config.example.yml"
+    text = example.read_text(encoding="utf-8")
+    # Commented (not live) — the example must keep manage=False by default.
+    assert "board:" in text
+    assert "manage: false" in text
+    assert text.count("manage: false") >= 2, (
+        "expected a commented `manage: false` under both board-carrying "
+        "permissions blocks (acme-backend, acme-ado-frontend)"
+    )

@@ -24,6 +24,7 @@ from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
+    _require_board_manage,
     _require_issues_create,
     _require_issues_modify,
     _require_token,
@@ -1056,6 +1057,73 @@ def register(mcp: FastMCP) -> None:
                     for c in columns
                 ],
             }
+        return _safe(go)
+
+    @mcp.tool()
+    def ensure_board_column(project_id: str, column_name: str) -> dict:
+        """Idempotently create a missing board column.
+
+        Create-if-missing: if `column_name` (case-insensitively) already
+        exists on the live board, this is a no-op — no columns are ever
+        removed or renamed. Otherwise it is added to the live board.
+
+        Supported on GitHub (`github-projects-v2` binding, adds an
+        option to the `board.binding.status_field` single-select field)
+        and Azure DevOps (`azure-boards` binding, adds a column to the
+        bound team's board). GitLab has no board concept and returns an
+        `{"error": ...}` payload noting the provider is unsupported —
+        mirroring `list_board_columns`' GitLab handling, but as an error
+        here rather than an empty list, since there is no board to
+        manage at all.
+
+        Requires the project's `board.manage` permission. Like
+        `pulls.merge`, this flag has no flat-form equivalent and
+        defaults to False on existing configs — the user must
+        explicitly opt in before this tool can mutate a live board.
+
+        Returns `{"project_id": str, "provider": str, "column_name": str, ...}`.
+        On GitHub the extra key is `"created"` (bool: `True` if the
+        option was newly added, `False` if it already existed). On
+        Azure DevOps the extra key is `"column"`, the resolved
+        `BoardColumnSpec` (`logical`, `native`, `option_id`, `states`,
+        `is_split`) for the live column — whether it was just created or
+        already present.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            _require_board_manage(project)
+            token = _require_token(project)
+            provider = _provider_for(project)
+            if not hasattr(provider, "ensure_board_column"):
+                raise NotImplementedError(
+                    f"provider '{project.provider}' does not support board "
+                    "management (ensure_board_column) — e.g. GitLab has no "
+                    "board concept"
+                )
+            result = provider.ensure_board_column(project, token, column_name)
+            payload: dict[str, Any] = {
+                "project_id": project.id,
+                "provider": project.provider,
+                "column_name": column_name,
+            }
+            if isinstance(result, bool):
+                # GitHub Projects v2: True when the option was newly
+                # added, False when it already existed (no-op).
+                payload["created"] = result
+            else:
+                # Azure Boards: the live BoardColumnSpec, whether
+                # pre-existing or freshly created — Azure's PUT-based
+                # flow doesn't expose a created/existing boolean the way
+                # GitHub's field mutation does. Mirrors list_board_columns'
+                # column shape (states as a list, not a tuple).
+                payload["column"] = {
+                    "logical": result.logical,
+                    "native": result.native,
+                    "option_id": result.option_id,
+                    "states": list(result.states),
+                    "is_split": result.is_split,
+                }
+            return payload
         return _safe(go)
 
     @mcp.tool()

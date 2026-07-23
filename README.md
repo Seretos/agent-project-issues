@@ -167,6 +167,8 @@ projects:
 
 Both `owner`/`project_number` (GitHub) and `team`/`board` (Azure DevOps) can be omitted from the YAML — the block stays schema-valid — but `list_board_columns` (and the `column` filter) raise a descriptive error at call time if the binding is used without them, rather than silently no-op-ing.
 
+**Creating a missing column.** `ensure_board_column(project_id, column_name)` idempotently creates `column_name` on the live board if it doesn't already exist (case-insensitively) — a no-op otherwise. Supported on GitHub (Projects v2) and Azure DevOps (Azure Boards); GitLab returns an error since it has no board concept. Gated by `permissions.board.manage`, which defaults to false — opt in deliberately before an agent can mutate a live board's columns.
+
 **Auto-default onto the board (GitHub Projects v2 only).** When a `github-projects-v2` `board:` binding is configured, `create_ticket` auto-defaults a new ticket onto the board's first configured column (`columns[0]`) whenever the caller doesn't already pass an explicit value for the binding's `status_field` key (conventionally `"Status"`) in `custom_fields` — so a plain `create_ticket(...)` call lands the new issue on the board instead of leaving it invisible until someone remembers to set `custom_fields={"Status": ...}` by hand. Pass `custom_fields` with the status-field key set to choose a different column explicitly, or pass `off_board=True` to opt the ticket out of the board entirely. This default is best-effort: if resolving the board columns fails for any reason, the ticket is still created — with a `board_warning` string attached to the response — rather than blocking creation. Azure DevOps and GitLab are unaffected (Azure's `System.State` already keeps new work items on-board; GitLab has no board concept), and the default only ever applies at creation time — `update_ticket` never auto-attaches a ticket to a column.
 
 
@@ -247,6 +249,7 @@ Read access is always implicit (token-gated). Each write namespace has its own f
 
 - `permissions.issues.create` / `permissions.issues.modify` — gate `create_ticket` / `update_ticket` / `add_comment` / `update_comment`.
 - `permissions.pulls.create` / `permissions.pulls.modify` / `permissions.pulls.merge` — gate `create_pr` / `update_pr`+`add_pr_comment` / `merge_pr` respectively. `pulls.merge` defaults to false even when the other PR flags are true — opt in deliberately.
+- `permissions.board.manage` — gates `ensure_board_column`. Defaults to false even when other write flags are true — opt in deliberately, mirroring `pulls.merge`.
 
 ### Schema reference (v1)
 
@@ -283,6 +286,7 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 | `pulls.create`         | bool  | `false` | `create_pr` |
 | `pulls.modify`         | bool  | `false` | `update_pr`, `add_pr_comment` |
 | `pulls.merge`          | bool  | `false` | `merge_pr` (opt in deliberately) |
+| `board.manage`         | bool  | `false` | `ensure_board_column` (opt in deliberately) |
 
 ## Alternative installs
 

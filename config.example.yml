@@ -43,6 +43,8 @@ projects:
         create: true
         modify: false
         merge: false
+      # board:
+      #   manage: false            # opt-in; lets ensure_board_column create a missing column
 
   - id: read-only-gitlab-example
     provider: gitlab
@@ -88,3 +90,5 @@ projects:
         create: true
         modify: true
         merge: false
+      # board:
+      #   manage: false            # opt-in; lets ensure_board_column create a missing column

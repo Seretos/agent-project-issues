@@ -10,6 +10,7 @@ match the nested `Permissions` model:
 
   - `_require_issues_create`  / `_require_issues_modify`
   - `_require_pulls_create`   / `_require_pulls_modify`  / `_require_pulls_merge`
+  - `_require_board_manage`
 
 Library layering (agent-plugin-dev#5):
   - Domain models (`ProjectConfig`, `resolve_token`, `load_projects`)
@@ -145,6 +146,17 @@ def _require_pulls_merge(project: ProjectConfig) -> None:
         raise PermissionError(
             f"project '{project.id}' does not permit merging pull requests. "
             "Tell the user the project is configured without pulls.merge permission."
+        )
+
+
+# --------- board namespace ----------------------------------------------------
+
+
+def _require_board_manage(project: ProjectConfig) -> None:
+    if not project.permissions.board.manage:
+        raise PermissionError(
+            f"project '{project.id}' does not permit managing board columns. "
+            "Tell the user the project is configured without board.manage permission."
         )
 
 
@@ -578,6 +590,7 @@ __all__ = [
     "_require_pulls_create",
     "_require_pulls_modify",
     "_require_pulls_merge",
+    "_require_board_manage",
     "_normalize_id",
     "_normalize_target",
     "_rewrap_404",

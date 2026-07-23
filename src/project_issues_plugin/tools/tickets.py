@@ -54,6 +54,62 @@ def _status_cache_clear() -> None:
     _status_cache.clear()
 
 
+def _default_board_custom_fields(
+    project, provider, token, custom_fields: dict[str, Any] | None, off_board: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Best-effort default of a new ticket onto the board's first column.
+
+    Ticket #232: a GitHub Projects-v2 board project left a new issue off
+    the board unless the caller already knew to pass
+    `custom_fields={"Status": <native>}` — the gap that left
+    agent-worktree#93/#94 invisible for 3 days. When the project has a
+    `github-projects-v2` board binding and the caller did NOT already
+    set the board's `status_field` key, this defaults the ticket onto
+    `project.board.columns[0]` (the first configured logical column).
+
+    Scope: GitHub Projects v2 only. Azure DevOps (`System.State` keeps
+    new work items on-board already) and GitLab (no board concept) are
+    untouched — this returns `(custom_fields, None)` unchanged for both.
+
+    Returns `(effective_custom_fields, board_warning)`. Never raises:
+    resolution (the `list_board_columns` call, an empty-columns result,
+    or a missed logical-column lookup) is entirely best-effort — on ANY
+    failure the original `custom_fields` is returned unchanged alongside
+    a `board_warning` string, so ticket creation is never blocked by a
+    board-column resolution problem.
+    """
+    if off_board:
+        return custom_fields, None
+    board = getattr(project, "board", None)
+    if board is None:
+        return custom_fields, None
+    binding = getattr(board, "binding", None)
+    if getattr(binding, "kind", None) != "github-projects-v2":
+        return custom_fields, None
+    status_field = getattr(binding, "status_field", None) or "Status"
+    if custom_fields and status_field in custom_fields:
+        # Caller already chose a column explicitly — respect it verbatim.
+        return custom_fields, None
+    target_logical = board.columns[0]
+    try:
+        columns = provider.list_board_columns(project, token)
+        if not columns:
+            raise ValueError("project has no resolvable board columns")
+        native = next(
+            (c.native for c in columns if c.logical == target_logical),
+            columns[0].native,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort, never blocks creation
+        return custom_fields, (
+            f"could not auto-default the new ticket onto board column "
+            f"{target_logical!r}: {exc}. Ticket was created without a board "
+            "assignment — set it manually via update_ticket(custom_fields=...)."
+        )
+    merged = dict(custom_fields or {})
+    merged[status_field] = native
+    return merged, None
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_tickets(
@@ -425,9 +481,28 @@ def register(mcp: FastMCP) -> None:
                 "afterward for guaranteed-fresh status. "
                 "Call list_custom_fields(project_id) to discover available "
                 "field reference names and their allowed values first. "
-                "None or {} means 'no overrides' and is always a no-op."
+                "On a github-projects-v2 board project, if this omits the "
+                "board's status_field key (None, {}, or a dict that doesn't "
+                "set it), the new ticket is auto-defaulted onto the board's "
+                "first configured column (project.board.columns[0]) — "
+                "best-effort: a resolution failure never blocks creation, it "
+                "just attaches a 'board_warning' to the response instead. "
+                "Pass this key explicitly to choose a different column, or "
+                "set off_board=True to skip the board entirely. Azure DevOps "
+                "and GitLab are unaffected by this default; for them None or "
+                "{} remains a plain no-op."
             ))
         ] = None,
+        off_board: Annotated[
+            bool,
+            Field(description=(
+                "GitHub Projects-v2 boards only: set True to opt the new "
+                "ticket OUT of the automatic default-onto-first-column "
+                "behavior (see custom_fields). Has no effect when the "
+                "project has no github-projects-v2 board binding, or when "
+                "custom_fields already sets the board's status_field key."
+            )),
+        ] = False,
     ) -> dict:
         """Create a new ticket.
 
@@ -476,9 +551,18 @@ def register(mcp: FastMCP) -> None:
         Progress"}` moves the issue's board card to the "In Progress"
         column. `update_ticket`'s `custom_fields` shares this
         same GitHub board-write contract for changes made after creation.
-        `None`/`{}` is a no-op. Errors (e.g. a missing board binding) surface
-        as `{"error": ...}`, not a traceback; the ticket is not created in
-        that case.
+        On a `github-projects-v2` board project, omitting the board's
+        `status_field` key here (`None`/`{}`, or a dict that doesn't set
+        it) auto-defaults the new ticket onto the board's first
+        configured column (`project.board.columns[0]`) instead of
+        leaving it off the board entirely — best-effort, so a resolution
+        failure never blocks creation; it attaches a `board_warning`
+        string to the response instead. Set `off_board=True` to skip the
+        board entirely; `update_ticket` never auto-defaults — this is
+        create-time only. On Azure DevOps and GitLab, `None`/`{}` remains
+        a plain no-op, unaffected by this default. Errors (e.g. a missing
+        board binding) surface as `{"error": ...}`, not a traceback; the
+        ticket is not created in that case.
 
         On GitHub, writing a board column at creation time can cascade into a
         ticket status change via a Projects-v2 workflow automation — e.g.
@@ -497,14 +581,22 @@ def register(mcp: FastMCP) -> None:
             _require_issues_create(project)
             token = _require_token(project)
             provider = _provider_for(project)
+            effective_custom_fields, board_warning = _default_board_custom_fields(
+                project, provider, token, custom_fields, off_board,
+            )
             try:
                 ticket = provider.create_ticket(
                     project, token, title, body, labels or [], assignees or [],
-                    status=status, custom_fields=custom_fields,
+                    status=status, custom_fields=effective_custom_fields,
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
-                raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
-            return {"project_id": project.id, "ticket": asdict(ticket)}
+                raise _rewrap_azure_unknown_field(
+                    exc, custom_fields=effective_custom_fields,
+                )
+            result = {"project_id": project.id, "ticket": asdict(ticket)}
+            if board_warning:
+                result["board_warning"] = board_warning
+            return result
         return _safe(go)
 
     _UPDATE_TICKET_FIELDS = (
@@ -628,7 +720,12 @@ def register(mcp: FastMCP) -> None:
         `custom_fields` passes provider-specific `{field_ref: value}` overrides
         to the underlying provider, sharing the same board-binding/board-write
         contract as `create_ticket`'s `custom_fields` (see that tool's
-        docstring for the full per-provider semantics). On Azure DevOps, full
+        docstring for the full per-provider semantics). Unlike `create_ticket`,
+        `update_ticket` never auto-defaults a ticket onto a board column —
+        `create_ticket`'s default-onto-`columns[0]` behavior (and its
+        `off_board` opt-out) is create-time only; moving an existing ticket
+        onto a column here always requires an explicit `custom_fields` value.
+        On Azure DevOps, full
         dotted field references such as `Custom.ProcessState` or `System.Tags`
         are used. On GitHub, the key is the Projects-v2 board-column field
         NAME (conventionally `"Status"`) and the value is the native

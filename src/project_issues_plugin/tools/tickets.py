@@ -530,6 +530,14 @@ def register(mcp: FastMCP) -> None:
         use `update_ticket`'s `labels_add` / `labels_remove` parameters
         instead.
 
+        Label catalog requirement: on GitHub (and presumably GitLab)
+        every name in `labels` must already exist in the repository's
+        label catalog — passing a not-yet-existing label fails with a
+        404 (e.g. `label 'X' does not exist`). There is no
+        create-on-the-fly here, unlike Azure DevOps' freeform tags.
+        Call `create_label` first for any label that might not already
+        exist.
+
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When
         supplied, it must be a value from the provider's state-space —
@@ -677,6 +685,13 @@ def register(mcp: FastMCP) -> None:
         `ai-generated`. Do not pass the marker labels yourself. For
         initial label assignment at creation time, use `create_ticket`'s
         `labels` parameter (a flat list, not add/remove).
+
+        Label catalog requirement: on GitHub (and presumably GitLab)
+        every name in `labels_add` must already exist in the
+        repository's label catalog — a not-yet-existing label fails
+        with a 404, unlike Azure DevOps' freeform tags (created on the
+        fly). Call `create_label` first for any label that might not
+        already exist.
 
         When `body` is supplied, it is rewritten so the first line is
         exactly one `#ai-*` marker matching the ticket's post-update

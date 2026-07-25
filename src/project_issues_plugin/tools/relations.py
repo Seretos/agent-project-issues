@@ -45,7 +45,7 @@ def register(mcp: FastMCP) -> None:
     def add_relation(
         project_id: str,
         ticket_id: str,
-        kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix.")],
+        kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix. Direction: ticket_id is always the 'from' end — kind='parent' means ticket_id is the parent of target; kind='child' means ticket_id is a child of target (target is the parent).")],
         target: Annotated[str, Field(description="Target issue reference. Preferred form: '#N' (e.g. '#7'). Also accepts a bare integer ('7') or a full issue URL. Cross-repo 'owner/repo#N' references are rejected by the provider.")],
     ) -> dict:
         """Create a typed relation from `ticket_id` (the source) to
@@ -174,7 +174,7 @@ def register(mcp: FastMCP) -> None:
     def remove_relation(
         project_id: str,
         ticket_id: str,
-        kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix.")],
+        kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix. Direction: ticket_id is always the 'from' end — kind='parent' means ticket_id is the parent of target; kind='child' means ticket_id is a child of target (target is the parent).")],
         target: str,
     ) -> dict:
         """Remove a typed relation between `ticket_id` and `target`.

@@ -9,7 +9,11 @@ description = "Claude Code plugin: MCP server for GitHub/GitLab/Azure DevOps iss
 requires-python = ">=3.11"
 authors = [{ name = "Arne von Appen" }]
 dependencies = [
-  "mcp>=1.2",
+  # Stopgap upper bound: mcp 2.0.0 removed the `mcp.server.fastmcp` package
+  # (apparently renamed to `mcp.server.mcpserver`), and every module under
+  # `src/project_issues_plugin/tools/` imports `FastMCP` from the old path.
+  # Pinned below 2 until a deliberate migration to the 2.x server API.
+  "mcp>=1.2,<2",
   # Floats on the libs' `release/0.x` moving branch so minor/patch releases
   # flow in on the next install/build without a plugin-side bump. The branch
   # is a fast-forward-only pointer to the latest 0.x-compatible commit.

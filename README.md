@@ -4,6 +4,8 @@
 
 Let your AI coding agent read and write **GitHub / GitLab / Azure DevOps issues** safely. MCP tools for listing/creating/updating tickets and adding comments, with automatic safety markers (`ai-generated` / `ai-modified` labels, `#ai-generated` comment prefix). Per-project permissions and automatic project discovery from provider tokens and the local git remote when no config exists.
 
+Ships with a bundled `project-issues` skill covering label-catalog, board-column, and relation-direction operating rules, so agents don't need those rules re-documented in every consuming project's `CLAUDE.md`.
+
 ## Quick install
 
 ```

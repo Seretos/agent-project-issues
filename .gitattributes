@@ -7,3 +7,7 @@
 # for build-side tooling that ever stages these paths in a source tree.
 bin/project-issues binary
 bin/project-issues.exe binary
+
+# Skill markdown must stay LF on disk regardless of core.autocrlf, since
+# Claude Code / tests compare it byte-for-byte (see ticket #242).
+skills/**/SKILL.md text eol=lf

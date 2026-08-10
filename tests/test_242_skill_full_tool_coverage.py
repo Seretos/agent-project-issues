@@ -24,17 +24,18 @@ Follows the repo's per-ticket test-file convention and copies the
 `_StubMCP` / `_register` / `_repo_root` / `_skill_text` helpers from
 `tests/test_239_bundled_skill.py` so this file is self-contained.
 
-Also resolves the ticket's "duplicate SKILL.md" flag (see
-`test_repo_has_exactly_one_skill_md` below): investigation found no
-second `SKILL.md` and no `.claude/worktrees/` directory anywhere in
-this worktree, and the path is not `.gitignore`-excluded — so it was
-not tracked on `main` and the finding is not reproducible here. R8
-pins that as a permanent guard rather than leaving it as an
-unverified claim.
+Also addresses the ticket's "duplicate SKILL.md" flag (see
+`test_repo_has_exactly_one_skill_md` below): a duplicate does exist in
+some checkouts at `.claude/worktrees/bump-lib-v0.2.3/skills/project-issues/SKILL.md`,
+but only as an untracked artifact excluded via the per-clone local
+`.git/info/exclude`, not the shared `.gitignore` — which is why it does
+not materialize in every worktree. R8 therefore guards only *tracked*
+content (via `git ls-files`), which is deterministic across checkouts.
 """
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -295,9 +296,25 @@ def test_tool_map_module_list_matches_server_registration():
 
 
 def test_skill_uses_lf_line_endings():
-    assert b"\r\n" not in _skill_path().read_bytes(), (
-        "SKILL.md must use LF-only line endings — CRLF causes Claude Code "
-        "to silently ignore the file"
+    """Checks the *committed blob*, not the working-tree file.
+
+    On Windows checkouts with core.autocrlf=true, git's LF->CRLF smudge
+    filter mangles the working-tree copy of any file that isn't pinned to
+    `eol=lf` in .gitattributes (see the `skills/**/SKILL.md text eol=lf`
+    rule added alongside this fix). Reading the committed blob instead of
+    the on-disk bytes makes this guard independent of the checkout's
+    autocrlf setting and any working-tree filter behaviour.
+    """
+    result = subprocess.run(
+        ["git", "cat-file", "blob", "HEAD:skills/project-issues/SKILL.md"],
+        cwd=_repo_root(),
+        capture_output=True,
+        check=True,
+    )
+    blob = result.stdout
+    assert b"\r\n" not in blob, (
+        "the committed SKILL.md blob must use LF-only line endings — CRLF "
+        "causes Claude Code to silently ignore the file"
     )
 
 
@@ -309,18 +326,31 @@ def test_skill_uses_lf_line_endings():
 def test_repo_has_exactly_one_skill_md():
     """Ticket #242 flagged a duplicate copy at
     `.claude/worktrees/bump-lib-v0.2.3/skills/project-issues/SKILL.md`.
-    Investigated and NOT reproducible: this worktree has no
-    `.claude/worktrees/` directory at all (`.claude/` contains only
-    `settings.json`), and the path is not `.gitignore`-excluded, so if
-    it were tracked on `main` it would be materialized here. This test
-    is an expected-green guard recording that finding, not a fix for a
-    reproduced bug — a future regression (a real second SKILL.md
-    landing on `main`) will turn it red.
+
+    That duplicate does exist in some checkouts, but only as an
+    *untracked* artifact: it is excluded via the per-clone local
+    `.git/info/exclude` (`**/.claude/worktrees/`), not via the shared,
+    version-controlled `.gitignore`. Because that exclude file lives
+    outside the repo's tracked content, a fresh clone/worktree may or
+    may not have it on disk depending on what local worktree tooling has
+    touched that checkout — so scanning the filesystem (`rglob`) is
+    environment-dependent by construction and is not a reliable guard.
+
+    This test instead scans only *tracked* files via `git ls-files`, so
+    it is deterministic across checkouts and only turns red if a real
+    second `SKILL.md` is actually committed to the branch.
     """
-    matches = sorted(
-        p for p in _repo_root().rglob("SKILL.md") if ".git" not in p.parts
+    result = subprocess.run(
+        ["git", "ls-files", "--", "*SKILL.md"],
+        cwd=_repo_root(),
+        capture_output=True,
+        check=True,
+        text=True,
     )
-    assert len(matches) == 1, f"expected exactly one SKILL.md, found: {matches}"
-    assert matches[0] == _repo_root() / "skills" / "project-issues" / "SKILL.md", (
-        f"the sole SKILL.md moved to an unexpected location: {matches[0]}"
+    matches = sorted(
+        line for line in result.stdout.splitlines() if Path(line).name == "SKILL.md"
+    )
+    assert len(matches) == 1, f"expected exactly one tracked SKILL.md, found: {matches}"
+    assert matches[0] == "skills/project-issues/SKILL.md", (
+        f"the sole tracked SKILL.md moved to an unexpected location: {matches[0]}"
     )

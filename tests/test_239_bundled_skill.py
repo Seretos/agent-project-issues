@@ -226,6 +226,13 @@ _NON_TOOL_WHITELIST = {
     "states", "is_split", "column", "columns", "error", "labels",
     "config_error", "board", "manage", "board.manage", "projects.yml",
     "projects.yaml", "hints.default_open",
+    # Added by ticket #242 (pipeline/label/relation/custom-field prose):
+    "branch", "tag", "commit_sha", "recent", "hint", "run_id", "failure",
+    "conclusion", "log_excerpt", "mode", "around_failure", "max_lines",
+    "annotations", "name", "new_name", "color", "description",
+    "read_only_kinds", "mentions", "closed_by", "provider_support",
+    "parent", "children", "relations_truncated", "work_item_type",
+    "reference_name", "allowed_values", "job_id", "fields",
 }
 
 

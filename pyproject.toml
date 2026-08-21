@@ -35,6 +35,7 @@ build = [
 ]
 test = [
   "pytest>=8",
+  "pytest-timeout>=2.3",
 ]
 
 [tool.setuptools]
@@ -47,3 +48,10 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra --strict-markers"
+# Ticket #244: the suite is 728 tests across 57 files, all provider HTTP
+# mocked, with no per-test bound -- a single hung socket or mock can block
+# `python -m pytest` indefinitely, which in agent-driven runs wedges the
+# calling agent. Bound every test at 60s so a hang fails loudly instead. If
+# a legitimate test ever needs longer than this, raise the value here --
+# don't delete the key.
+timeout = 60

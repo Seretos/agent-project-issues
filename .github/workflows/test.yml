@@ -39,6 +39,15 @@ jobs:
           cache: "pip"
           cache-dependency-path: pyproject.toml
 
+      - name: Setup Node 20
+        # ticket #245: hooks/security_hint.mjs is exercised by
+        # tests/test_245_security_hint_optout.py's subprocess tests, which
+        # skip themselves when `node` isn't on PATH — without this step
+        # those tests silently no-op in CI instead of actually running.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install plugin + test deps
         # pwsh-Core is preinstalled on both windows-latest and
         # ubuntu-22.04 runners, so the shell line is identical for

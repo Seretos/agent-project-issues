@@ -1,12 +1,17 @@
-"""Pipeline / CI-run tools exposed to the agent.
+"""Pipeline / CI-run tools exposed to the agent, plus ref/release reads.
 
 Single unified `list_pipeline_runs` with five addressing modes
 (`branch` / `tag` / `commit_sha` / `ticket_id` / `recent`) plus a
 `get_pipeline_run` detail tool that can also surface failure context
-(annotations + log excerpt) for failed runs.
+(annotations + log excerpt) for failed runs. `trigger_pipeline` (gated
+by `pipelines.trigger`) dispatches a new run; `get_ref` and
+`list_releases` are read-only lookups for resolving refs and listing
+published releases.
 
-All reads are token-gated only; there is no permission flag (mirrors
-`list_tickets` / `get_ticket` / `list_prs`).
+All reads (including `get_ref` / `list_releases`) are token-gated only;
+there is no permission flag (mirrors `list_tickets` / `get_ticket` /
+`list_prs`). `trigger_pipeline` is the one write op in this module and
+requires `pipelines.trigger`.
 """
 from __future__ import annotations
 
@@ -25,6 +30,8 @@ from project_issues_plugin.tools._log_slicing import slice_log
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
+    _require_pipelines_trigger,
+    _require_token,
     _resolve,
     _rewrap_404,
     _safe,
@@ -112,6 +119,9 @@ def register(mcp: FastMCP) -> None:
         recent: Annotated[bool, Field(description="One-of addressing argument. When True (and no other addressing arg is set), lists the most recent runs across the project with no ref filter. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set.")] = False,
         status: Literal["queued", "in_progress", "completed", "all"] = "all",
         limit: int = 10,
+        workflow: Annotated[str | None, Field(description="Filter (not an addressing argument — combine with any of branch/tag/commit_sha/ticket_id/recent). Matches the run's workflow name case-insensitively; a bare name ('release') and a workflow file name ('release.yml'/'release.yaml') are equivalent.")] = None,
+        event: Annotated[str | None, Field(description="Filter (not an addressing argument). Matches the run's triggering event. Accepts the canonical vocabulary (manual/workflow_dispatch/push/schedule/pull_request/api) which is resolved to the provider-native string, or a provider-native string directly (e.g. 'individualCI', 'merge_request_event').")] = None,
+        since: Annotated[str | None, Field(description="Filter (not an addressing argument). ISO-8601 timestamp; only runs created at/after this time are returned. Malformed values return a structured error rather than silently filtering everything out.")] = None,
     ) -> dict:
         """List CI/CD pipeline runs for a project.
 
@@ -132,6 +142,22 @@ def register(mcp: FastMCP) -> None:
         `completed`); `"all"` (default) returns runs regardless of state.
         `limit` is capped at the provider's max page size (100).
 
+        `workflow` / `event` / `since` are additional filters — NOT
+        addressing arguments, combine with any of the five addressing
+        modes above:
+          - `workflow`: matches the run's workflow name case-insensitively;
+            a bare name (`"release"`) and a workflow file name
+            (`"release.yml"`/`"release.yaml"`) are equivalent.
+          - `event`: matches the run's triggering event. Accepts the
+            canonical vocabulary (`manual`/`workflow_dispatch`/`push`/
+            `schedule`/`pull_request`/`api`), which is resolved to each
+            provider's native string, or a provider-native string
+            directly (e.g. `"individualCI"`, `"merge_request_event"`).
+          - `since`: an ISO-8601 timestamp; only runs created at/after
+            this time are returned. A malformed `since` returns a
+            structured `{"error": ...}` rather than silently filtering
+            every run out.
+
         Return shape:
         ```
         {
@@ -148,8 +174,9 @@ def register(mcp: FastMCP) -> None:
         addressing mode — not just for `recent`/`ticket`. The more
         specific tag/ticket resolution-failure hints take precedence;
         otherwise a generic "no runs found" hint names the addressing
-        mode and, when a non-`all` `status` filter is active, notes
-        that the filter may be excluding matching runs.
+        mode and, when a non-`all` `status` filter is active or a
+        `workflow`/`event`/`since` filter is active, notes that the
+        filter(s) may be excluding matching runs.
 
         Run details (`name`, `branch`, `head_sha`, `event`, `status`,
         `conclusion`, `url`, `created_at`, `updated_at`, `run_attempt`)
@@ -206,25 +233,29 @@ def register(mcp: FastMCP) -> None:
 
             if recent:
                 runs, _ = provider.list_runs_recent(
-                    project, token, status=status, limit=limit
+                    project, token, status=status, limit=limit,
+                    workflow=workflow, event=event, since=since,
                 )
                 addressed_by = "recent"
                 addressed_desc = "recent pipeline/CI runs"
             elif branch:
                 runs, _ = provider.list_runs_for_branch(
-                    project, token, branch, status=status, limit=limit
+                    project, token, branch, status=status, limit=limit,
+                    workflow=workflow, event=event, since=since,
                 )
                 addressed_by = "branch"
                 addressed_desc = f"pipeline/CI runs for branch '{branch}'"
             elif commit_sha:
                 runs, _ = provider.list_runs_for_commit(
-                    project, token, commit_sha, status=status, limit=limit
+                    project, token, commit_sha, status=status, limit=limit,
+                    workflow=workflow, event=event, since=since,
                 )
                 addressed_by = "commit"
                 addressed_desc = f"pipeline/CI runs for commit '{commit_sha}'"
             elif tag:
                 runs, resolved_refs = provider.list_runs_for_tag(
-                    project, token, tag, status=status, limit=limit
+                    project, token, tag, status=status, limit=limit,
+                    workflow=workflow, event=event, since=since,
                 )
                 addressed_by = "tag"
                 addressed_desc = f"pipeline/CI runs for tag '{tag}'"
@@ -237,7 +268,8 @@ def register(mcp: FastMCP) -> None:
                 # ticket mode
                 normalized_ticket = _normalize_id(project, ticket_id)
                 runs, resolved_refs = provider.list_runs_for_ticket(
-                    project, token, normalized_ticket, status=status, limit=limit  # type: ignore[arg-type]
+                    project, token, normalized_ticket, status=status, limit=limit,  # type: ignore[arg-type]
+                    workflow=workflow, event=event, since=since,
                 )
                 addressed_by = "ticket"
                 addressed_desc = "pipeline/CI runs for this ticket"
@@ -260,9 +292,22 @@ def register(mcp: FastMCP) -> None:
                     "CI/CD pipeline configured, or this ref/filter simply "
                     "has no runs yet"
                 )
+                active_filters = []
                 if status != "all":
+                    active_filters.append(f"status filter '{status}'")
+                # Ticket #245: name whichever workflow/event/since filter is
+                # active so an agent doesn't waste a retry assuming the
+                # project simply has no CI, when in fact the filter is what
+                # excluded every run.
+                if workflow:
+                    active_filters.append(f"workflow filter '{workflow}'")
+                if event:
+                    active_filters.append(f"event filter '{event}'")
+                if since:
+                    active_filters.append(f"since filter '{since}'")
+                if active_filters:
                     hint += (
-                        f" (status filter '{status}' is active and may be "
+                        f" ({', '.join(active_filters)} active and may be "
                         "excluding matching runs)"
                     )
 
@@ -492,5 +537,205 @@ def register(mcp: FastMCP) -> None:
                 "run_id": run_id,
                 "job_id": job_id,
                 **sliced,
+            }
+        return _safe(go)
+
+    @mcp.tool()
+    def trigger_pipeline(
+        project_id: str,
+        workflow: Annotated[str, Field(description="Workflow identifier to dispatch. GitHub: a filename ('release.yml') or numeric workflow id — a bare display name (e.g. 'Release') is rejected before any HTTP call, since GitHub's dispatch endpoint doesn't accept one. GitLab: accepted for cross-provider signature parity but not sent to the API (a GitLab project runs a single .gitlab-ci.yml pipeline). Azure DevOps: pipeline definition id/name.")],
+        ref: Annotated[str, Field(description="Branch or tag to run the pipeline on. Defaults to 'main'.")] = "main",
+        inputs: Annotated[dict[str, str] | None, Field(description="workflow_dispatch / pipeline input variables, e.g. {'environment': 'staging'}. Must be a flat dict of str->str.")] = None,
+        wait_for_run: Annotated[bool, Field(description="When True (default), poll for the dispatched run and return it under `run`. If the run isn't observed before wait_timeout_seconds elapses, the dispatch has still succeeded — `run` comes back None and `hint` explains to poll list_pipeline_runs/get_pipeline_run instead of re-dispatching. When False, the run is not polled for at all (same degraded {run: None|value, hint} shape applies; GitHub always returns run=None here since its dispatch endpoint gives back no id to resolve, while GitLab/Azure DevOps may return the freshly created run immediately).")] = True,
+        wait_timeout_seconds: Annotated[int, Field(description="Max seconds to poll for the run when wait_for_run=True. Hard-capped at 120 — a larger value is silently clamped, not rejected.")] = 30,
+    ) -> dict:
+        """Trigger a CI/CD pipeline run.
+
+        Requires the project's `pipelines.trigger` permission — a new
+        namespace with no flat-form equivalent, defaulting to False on
+        every existing config. The gate fires before the token is even
+        checked, so a denied project reports the permission problem
+        first regardless of token state.
+
+        Dispatch always happens synchronously and raises on a genuine
+        HTTP failure (bad workflow name, bad ref, provider error) — only
+        the *observing* of the resulting run is best-effort:
+
+        - `wait_for_run=True` (default): polls for the run for up to
+          `wait_timeout_seconds` (capped at 120). On success, `run` is
+          the full `PipelineRun` (same shape as `list_pipeline_runs` /
+          `get_pipeline_run`). If the poll times out, `run` is `None`
+          and `hint` explains that the dispatch itself still succeeded
+          — poll `list_pipeline_runs` (with `branch`/`tag=ref` or
+          `recent=True`) or `get_pipeline_run` afterwards rather than
+          re-triggering.
+        - `wait_for_run=False`: skips polling entirely. `run` reflects
+          whatever the provider's dispatch call returns synchronously
+          (`None` on GitHub, since its dispatch endpoint gives back no
+          run id).
+
+        `triggered` is always `True` once this returns without an
+        `error` — it reflects that the dispatch request itself
+        succeeded, independent of whether `run` could be resolved.
+
+        Return shape:
+        ```
+        {
+          "project_id": str,
+          "triggered": true,
+          "run": PipelineRun | None,
+          "hint": str | None,
+        }
+        ```
+        """
+        if not workflow or not workflow.strip():
+            return {"error": "workflow must not be empty"}
+        if not ref or not ref.strip():
+            return {"error": "ref must not be empty"}
+        if inputs is not None and not isinstance(inputs, dict):
+            return {
+                "error": (
+                    f"inputs must be a dict of str->str (got "
+                    f"{type(inputs).__name__})"
+                )
+            }
+
+        # Ticket #245: hard cap at 120s regardless of what's requested —
+        # silently clamped, not rejected, so a caller that just wants "as
+        # long as reasonably possible" doesn't need to know the cap.
+        effective_timeout = max(0, min(wait_timeout_seconds, 120))
+
+        def go() -> dict:
+            project = _resolve(project_id)
+            _require_pipelines_trigger(project)
+            token = _require_token(project)
+            provider = _provider_for(project)
+            run = provider.trigger_pipeline(
+                project, token, workflow,
+                ref=ref, inputs=inputs,
+                wait=wait_for_run, timeout=float(effective_timeout),
+            )
+            hint: str | None = None
+            if run is None:
+                if wait_for_run:
+                    hint = (
+                        "dispatch succeeded but the run was not observed "
+                        f"within {effective_timeout}s — poll "
+                        "list_pipeline_runs (branch/tag matching the "
+                        f"triggered ref {ref!r}, or recent=True) or "
+                        "get_pipeline_run to find it once it appears; do "
+                        "not re-trigger."
+                    )
+                else:
+                    hint = (
+                        "dispatch succeeded; wait_for_run=False means the "
+                        "run was not polled for — use list_pipeline_runs "
+                        f"(branch/tag matching the triggered ref {ref!r}, "
+                        "or recent=True) or get_pipeline_run to find it."
+                    )
+            return {
+                "project_id": project.id,
+                "triggered": True,
+                "run": asdict(run) if run is not None else None,
+                "hint": hint,
+            }
+        return _safe(go)
+
+    @mcp.tool()
+    def get_ref(
+        project_id: str,
+        ref: Annotated[str, Field(description="Branch name, tag name, or commit sha to resolve. Resolution order is branch -> tag -> commit, so a branch and a tag sharing the same name resolve as the branch.")],
+    ) -> dict:
+        """Resolve a ref (branch, tag, or commit sha) to its commit sha.
+
+        `sha` in the response is always the peeled **commit** sha — for
+        an annotated tag this is the commit the tag object ultimately
+        points to, never the tag object's own sha. `kind` reports which
+        of `"branch"` / `"tag"` / `"commit"` the ref resolved as.
+
+        Return shape: `{"project_id": str, "ref": {"name", "kind", "sha", "url"}}`.
+
+        A `ref` that resolves as none of the three returns a structured
+        `{"error": ...}` naming the project and ref, same treatment as a
+        provider 404 elsewhere in this module.
+
+        Read-only: no permission flag required (token-gated only, like
+        `list_pipeline_runs`) — succeeds even on a project with every
+        permission flag set to False.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            # optional — public repos work without a token (read-only,
+            # mirrors list_pipeline_runs/get_pipeline_run/
+            # get_pipeline_step_log above). _require_token is reserved for
+            # write ops (see trigger_pipeline).
+            token = resolve_token(project)
+            try:
+                resolved = provider.get_ref(project, token, ref)
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="ref", ident=ref,
+                )
+            if resolved is None:
+                raise LookupError(
+                    f"ref '{project.id}#{ref}' not found — no branch, tag, "
+                    "or commit in the project matches; verify the ref exists."
+                )
+            return {"project_id": project.id, "ref": asdict(resolved)}
+        return _safe(go)
+
+    @mcp.tool()
+    def list_releases(
+        project_id: str,
+        limit: Annotated[int, Field(description="Max releases to return, most recent first. Capped at the provider's max page size.")] = 10,
+    ) -> dict:
+        """List published releases for a project, most recent first.
+
+        `sha` on each release is the peeled commit sha the release's
+        tag points to. Azure DevOps has no native "release" concept
+        distinct from an annotated Git tag — its releases are annotated
+        tags mapped into this shape, with `draft`/`prerelease` always
+        `False` (not representable there). GitLab has no prerelease
+        flag either, so `prerelease` is always `False` there too.
+
+        Return shape:
+        ```
+        {
+          "project_id": str,
+          "releases": [{"tag", "name", "sha", "url", "draft", "prerelease",
+                        "created_at", "published_at", "body"}, ...],
+          "hint": str | None,
+        }
+        ```
+
+        `hint` is populated when `releases` is empty. Read-only: no
+        permission flag required (token-gated only) — succeeds even on
+        a project with every permission flag set to False.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            # optional — public repos work without a token (read-only,
+            # mirrors list_pipeline_runs/get_pipeline_run/
+            # get_pipeline_step_log above). _require_token is reserved for
+            # write ops (see trigger_pipeline).
+            token = resolve_token(project)
+            try:
+                releases = provider.list_releases(project, token, limit=limit)
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="releases", ident=project.id,
+                )
+            hint: str | None = None
+            if not releases:
+                hint = (
+                    f"no releases found for '{project.id}' — the project "
+                    "may have no published releases yet"
+                )
+            return {
+                "project_id": project.id,
+                "releases": [asdict(r) for r in releases],
+                "hint": hint,
             }
         return _safe(go)

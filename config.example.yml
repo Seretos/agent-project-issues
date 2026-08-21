@@ -45,6 +45,8 @@ projects:
         merge: false
       # board:
       #   manage: false            # opt-in; lets ensure_board_column create a missing column
+      # pipelines:
+      #   trigger: false           # opt-in; lets trigger_pipeline dispatch a new CI run
 
   - id: read-only-gitlab-example
     provider: gitlab
@@ -92,3 +94,5 @@ projects:
         merge: false
       # board:
       #   manage: false            # opt-in; lets ensure_board_column create a missing column
+      # pipelines:
+      #   trigger: false           # opt-in; lets trigger_pipeline dispatch a new CI run

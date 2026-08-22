@@ -515,18 +515,32 @@ def test_get_pr_surfaces_review_comments(
 def test_add_pr_review_comment_new_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New-thread mode POSTs path/line/commit_id with the body."""
+    """New-thread mode POSTs path/line/commit_id with the body.
+
+    lib-python-projects v0.3.11: plain `POST /pulls/{n}/comments` (which
+    used to auto-submit its own review per call) is gone. With no caller
+    -owned PENDING review yet, `add_pr_review_comment` now: (1) pre-checks
+    `GET .../reviews` for one, (2) seeds a brand-new PENDING review via
+    `POST .../reviews` with the comment embedded in its `comments: [...]`
+    array, then (3) re-fetches `GET .../reviews/{id}/comments` (the seeded
+    review doesn't echo the created comment) and takes the last entry.
+    """
     tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7/reviews":
+            return _json([])
+        if req.method == "POST" and path == "/repos/acme/backend/pulls/7/reviews":
+            captured["create_body"] = json.loads(req.content)
+            return _json({"id": 501, "node_id": "PRR_kw501", "state": "PENDING"})
         if (
-            req.method == "POST"
-            and req.url.path == "/repos/acme/backend/pulls/7/comments"
+            req.method == "GET"
+            and path == "/repos/acme/backend/pulls/7/reviews/501/comments"
         ):
-            captured["body"] = json.loads(req.content)
-            return _json(_review_comment_payload(99))
+            return _json([_review_comment_payload(99)])
         raise AssertionError(f"unexpected: {req.method} {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -539,29 +553,54 @@ def test_add_pr_review_comment_new_thread(
         commit_sha="deadbeef",
     )
     assert "error" not in result, result
-    posted = captured["body"]
-    assert posted["path"] == "src/foo.py"
-    assert posted["line"] == 42
-    assert posted["commit_id"] == "deadbeef"
-    assert posted["side"] == "RIGHT"
-    assert posted["body"].startswith("#ai-generated\n\n")
+    created = captured["create_body"]
+    assert created["commit_id"] == "deadbeef"
+    assert len(created["comments"]) == 1
+    seeded_comment = created["comments"][0]
+    assert seeded_comment["path"] == "src/foo.py"
+    assert seeded_comment["line"] == 42
+    assert seeded_comment["side"] == "RIGHT"
+    assert seeded_comment["body"].startswith("#ai-generated\n\n")
     assert result["review_comment"]["id"] == "99"
     # Top-of-thread → discussion_id == own id (no `in_reply_to_id` set).
     assert result["review_comment"]["discussion_id"] == "99"
 
 
 def test_add_pr_review_comment_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reply mode POSTs body+in_reply_to with no positional metadata."""
+    """Reply mode adds a reply to a (newly created) pending review.
+
+    lib-python-projects v0.3.11: replies can no longer use the old
+    auto-submitting `POST .../comments` shape either — once a pending
+    review is in play, GitHub only accepts new comments via GraphQL. With
+    no caller-owned PENDING review yet, `add_pr_review_comment` now: (1)
+    pre-checks `GET .../reviews`, (2) resolves `in_reply_to`'s GraphQL
+    `node_id` via `GET .../pulls/comments/{id}`, (3) creates a bare
+    PENDING review via `POST .../reviews`, (4) attaches the reply via the
+    `addPullRequestReviewComment(inReplyTo:)` GraphQL mutation, and (5)
+    re-fetches the new comment via `GET .../pulls/comments/{id}` for the
+    return value (the GraphQL mutation only echoes `databaseId`).
+    """
     tools = _register_tools_with(monkeypatch, _project(pulls_modify=True))
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if (
-            req.method == "POST"
-            and req.url.path == "/repos/acme/backend/pulls/7/comments"
-        ):
-            captured["body"] = json.loads(req.content)
+        path = req.url.path
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/7/reviews":
+            return _json([])
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/comments/99":
+            return _json({"id": 99, "node_id": "PRRC_kw99"})
+        if req.method == "POST" and path == "/repos/acme/backend/pulls/7/reviews":
+            captured["create_body"] = json.loads(req.content)
+            return _json({"id": 501, "node_id": "PRR_kw501", "state": "PENDING"})
+        if req.method == "POST" and path == "/graphql":
+            gql = json.loads(req.content)
+            captured["graphql"] = gql
+            assert gql["query"] == github_provider._ADD_REVIEW_COMMENT_REPLY_MUTATION
+            return _json(
+                {"data": {"addPullRequestReviewComment": {"comment": {"databaseId": 100}}}}
+            )
+        if req.method == "GET" and path == "/repos/acme/backend/pulls/comments/100":
             return _json(_review_comment_payload(100, in_reply_to_id=99))
         raise AssertionError(f"unexpected: {req.method} {req.url}")
 
@@ -573,9 +612,13 @@ def test_add_pr_review_comment_reply(monkeypatch: pytest.MonkeyPatch) -> None:
         in_reply_to="99",
     )
     assert "error" not in result, result
-    posted = captured["body"]
-    assert posted["in_reply_to"] == 99
-    assert "path" not in posted and "line" not in posted
+    # A fresh reply-only pending review is created bare — no seeded comments.
+    assert captured["create_body"] == {}
+    gql_vars = captured["graphql"]["variables"]
+    assert gql_vars["reviewId"] == "PRR_kw501"
+    assert gql_vars["inReplyTo"] == "PRRC_kw99"
+    assert gql_vars["body"].startswith("#ai-generated\n\n")
+    assert result["review_comment"]["id"] == "100"
     assert result["review_comment"]["in_reply_to"] == "99"
     # Reply → discussion_id == parent anchor (= `in_reply_to_id`).
     assert result["review_comment"]["discussion_id"] == "99"
@@ -645,6 +688,15 @@ def test_submit_pr_review_approve(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        # lib-python-projects v0.3.11: submit_pr_review now pre-checks for
+        # a caller-owned PENDING review before deciding which endpoint to
+        # POST to; no pending review here, so it falls back to the
+        # original create-and-submit path this test already exercises.
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/pulls/7/reviews"
+        ):
+            return _json([])
         if (
             req.method == "POST"
             and req.url.path == "/repos/acme/backend/pulls/7/reviews"
@@ -688,6 +740,15 @@ def test_submit_pr_review_passes_commit_sha(
     captured: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
+        # lib-python-projects v0.3.11: submit_pr_review now pre-checks for
+        # a caller-owned PENDING review before deciding which endpoint to
+        # POST to; no pending review here, so it falls back to the
+        # original create-and-submit path this test already exercises.
+        if (
+            req.method == "GET"
+            and req.url.path == "/repos/acme/backend/pulls/7/reviews"
+        ):
+            return _json([])
         if (
             req.method == "POST"
             and req.url.path == "/repos/acme/backend/pulls/7/reviews"

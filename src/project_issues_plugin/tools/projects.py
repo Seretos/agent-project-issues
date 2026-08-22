@@ -245,6 +245,9 @@ def _project_to_dict(p: ProjectConfig) -> dict:
                 "modify": pulls_modify,
                 "merge": pulls_merge,
             },
+            "board": {
+                "manage": p.permissions.board.manage,
+            },
         },
         "permissions_source": permissions_source,
         "permissions_probe_error": permissions_probe_error,
@@ -365,14 +368,22 @@ def register(mcp: FastMCP) -> None:
         `permissions`. A project with `source="git-remote"` was inferred
         from the local git repository and is read-only.
 
-        Inspect `permissions.issues` and `permissions.pulls` separately.
-        Read is always implicit (token-gated):
+        Inspect `permissions.issues`, `permissions.pulls`, and
+        `permissions.board` separately. Read is always implicit
+        (token-gated):
 
             "permissions": {
               "read":   true,
               "issues": {"create": ..., "modify": ...},
-              "pulls":  {"create": ..., "modify": ..., "merge": ...}
+              "pulls":  {"create": ..., "modify": ..., "merge": ...},
+              "board":  {"manage": ...}
             }
+
+        `permissions.board.manage` gates `ensure_board_column` — check it
+        before calling that tool to avoid learning the restriction via a
+        failed write. It is always sourced from config verbatim (never
+        derived by the token-probe path, which has no board concept, so
+        auto-discovered projects always report `board.manage: false`).
 
         Inspect `state` before reporting to the user:
           - "ok":           use `projects` as-is.  Note: `state="ok"`
@@ -518,7 +529,8 @@ def register(mcp: FastMCP) -> None:
         Same diagnostic fields as `list_projects` (`runtime.os`,
         debug-gated `runtime.config_files_searched` /
         `config_file_loaded`, per-match `token_error`,
-        per-match `permissions_source` including `"token-discovery"`).
+        per-match `permissions_source` including `"token-discovery"`),
+        including the `permissions.board.manage` field described there.
 
         When the token-discovery result list was capped, the top-level
         `hint` field explains the truncation and notes that tuning the

@@ -90,18 +90,20 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
   alone don't convey: the pipeline drill-down chain, label rename semantics,
   relation direction, and board write keys.
 
-## Labels: create the catalog entry first
+## Labels: create the catalog entry first (GitHub only)
 
-On GitHub (and presumably GitLab), every label name passed to
-`create_ticket`'s `labels` or `update_ticket`'s `labels_add` must already
-exist in the repository's label catalog — there is no create-on-the-fly.
-Passing a label that isn't already in the catalog fails (GitHub: a 404,
-`label 'X' does not exist`). Call `create_label` first for any label that
-might not already exist, then reference it by name.
+On GitHub, every label name passed to `create_ticket`'s `labels` or
+`update_ticket`'s `labels_add` must already exist in the repository's
+label catalog — there is no create-on-the-fly. Passing a label that
+isn't already in the catalog fails with a 404, `label 'X' does not
+exist`. Call `create_label` first for any label that might not
+already exist, then reference it by name.
 
-On Azure DevOps, tags are freeform — created on the fly as part of the
-ticket call, no catalog step needed. Do not generalize that behavior to
-GitHub/GitLab.
+GitLab does NOT share this restriction: an unknown label is created
+on the fly as part of the `create_ticket` / `update_ticket` call. On
+Azure DevOps, tags are likewise freeform — created on the fly, no
+catalog step needed. Do not generalize the GitHub catalog
+requirement to GitLab or Azure DevOps.
 
 The full catalog CRUD surface is `list_labels` (read, token-optional —
 works on public repos without a token), plus `create_label`,

@@ -558,6 +558,14 @@ def register(mcp: FastMCP) -> None:
             must be prepared to handle/tolerate the GitHub error.
           - `"request_changes"` — request changes (a body is required;
             on GitLab this also issues a best-effort `unapprove`).
+            GitHub applies the identical self-review block described
+            in the `approve` bullet above — the error message contains
+            GitHub's underlying text `Can not request changes on your
+            own pull request`, wrapped the same way as `approve`'s
+            error (`GitHub 422: ...` with `(GitHub platform
+            restriction; use another account)` appended). GitLab
+            permits self-review here too, as with `approve`. See the
+            `approve` bullet above for the full mechanics.
           - `"comment"`         — leave a review-level comment without
             changing approval state (a body is required).
 

@@ -139,12 +139,16 @@ def register(mcp: FastMCP) -> None:
             `_gitlab_remove_hierarchy_relation`); both ends are resolved
             to GraphQL work-item ids first, raising `RelationNotFound`
             if either side can't be resolved.
-          - `duplicate_of` triggers a body-edit and closes the source
-            on GitHub and GitLab — the marker line `#ai-generated` /
-            `#ai-modified` is preserved correctly via the shared
-            marker helper. (Azure DevOps' `duplicate_of` side-effect
-            is implemented in the `lib-python-projects` lib and is
-            not independently verified from this repo.)
+          - `duplicate_of` appends a `Duplicate of #N` line to the
+            source issue's body AND closes the source, on GitHub and GitLab
+            — the marker line `#ai-generated` / `#ai-modified` is
+            preserved correctly via the shared marker helper.
+            (Azure DevOps' `duplicate_of` side-effect is implemented
+            in the `lib-python-projects` lib and is not independently
+            verified from this repo.) Call `remove_relation(...,
+            kind="duplicate_of")` to reverse it — it reopens the
+            source and strips the `Duplicate of #N` line from the
+            body.
 
         Requires the project's `issues.modify` permission.
         """

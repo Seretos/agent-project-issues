@@ -303,6 +303,8 @@ def test_list_pipeline_runs_commit_sha_empty_returns_hint(
             return _json({"sha": "abc123"})
         if req.url.path == "/repos/acme/backend/actions/runs":
             return _json({"workflow_runs": []})
+        if req.url.path == "/repos/acme/backend/actions/workflows":
+            return _json({"workflows": [{"id": 1, "name": "CI"}]})
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -500,6 +502,8 @@ def test_list_pipeline_runs_recent_empty_returns_hint(
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/repos/acme/backend/actions/runs":
             return _json({"workflow_runs": []})
+        if req.url.path == "/repos/acme/backend/actions/workflows":
+            return _json({"workflows": [{"id": 1, "name": "CI"}]})
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -526,6 +530,8 @@ def test_list_pipeline_runs_recent_empty_with_status_filter_hints_filter_aware(
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/repos/acme/backend/actions/runs":
             return _json({"workflow_runs": []})
+        if req.url.path == "/repos/acme/backend/actions/workflows":
+            return _json({"workflows": [{"id": 1, "name": "CI"}]})
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)
@@ -552,6 +558,8 @@ def test_list_pipeline_runs_recent_empty_hint_is_provider_neutral(
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/repos/acme/backend/actions/runs":
             return _json({"workflow_runs": []})
+        if req.url.path == "/repos/acme/backend/actions/workflows":
+            return _json({"workflows": [{"id": 1, "name": "CI"}]})
         raise AssertionError(f"unexpected request: {req.url}")
 
     _install_mock(monkeypatch, handler)

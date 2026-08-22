@@ -455,8 +455,8 @@ def test_update_label_accepts_name_param(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["body"]["color"] == "00ff00"
 
 
-def test_update_label_missing_name_returns_soft_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """update_label with no `name` argument returns a soft error dict, not a ValidationError."""
+def test_update_label_missing_name_is_rejected_by_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    """update_label with no `name` argument is rejected at the signature boundary (TypeError), not a soft error dict."""
     project = _github_project()
     tools = _register_tools_with(monkeypatch, project)
 
@@ -465,9 +465,8 @@ def test_update_label_missing_name_returns_soft_error(monkeypatch: pytest.Monkey
 
     _install_github_mock(monkeypatch, handler)
 
-    result = tools["update_label"](project_id="acme")
-    assert "error" in result, f"expected error key, got: {result}"
-    assert "name" in result["error"].lower()
+    with pytest.raises(TypeError):
+        tools["update_label"](project_id="acme")
 
 
 def test_ado_delete_label_unsupported_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:

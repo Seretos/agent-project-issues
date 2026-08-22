@@ -177,7 +177,7 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     def update_label(
         project_id: str,
-        name: Annotated[str | None, Field(description="Name of the label to look up (lookup key only — never mutated by this call). To rename the label, supply `new_name`.")] = None,
+        name: Annotated[str, Field(description="Name of the label to look up (lookup key only — never mutated by this call). To rename the label, supply `new_name`.")],
         new_name: Annotated[str | None, Field(description="New name for the label (renames it). Leave unset to keep the current name.")] = None,
         color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB'. Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
@@ -186,10 +186,11 @@ def register(mcp: FastMCP) -> None:
 
         Requires the project's `issues.modify` permission.
 
-        `name` is the label's **current** name, used only to look it up
-        — it is never changed by this call. To rename the label, pass the
-        desired name as `new_name`; leave `new_name` unset to keep the
-        current name and only change `color` / `description`.
+        `name` is the label's **current** name (required), used only to
+        look it up — it is never changed by this call. To rename the
+        label, pass the desired name as `new_name`; leave `new_name`
+        unset to keep the current name and only change `color` /
+        `description`.
 
         At least one of `new_name`, `color`, or `description` must be
         supplied; passing none returns ``{"error": "..."}`` without making
@@ -202,7 +203,6 @@ def register(mcp: FastMCP) -> None:
         `create_label`.
 
         Returns ``{"error": "..."}`` when:
-          - `name` is not supplied.
           - None of `new_name` / `color` / `description` is supplied.
           - The label does not exist (404).
           - The provider does not support label mutation (Azure DevOps).
@@ -216,8 +216,6 @@ def register(mcp: FastMCP) -> None:
         ```
         """
         def go() -> dict:
-            if name is None:
-                return {"error": "name is required"}
             project = _resolve(project_id)
             _require_issues_modify(project)
             token = _require_token(project)

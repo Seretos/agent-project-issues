@@ -219,16 +219,27 @@ def _rewrap_404(exc, *, project_id: str, kind: str, ident: str):
     helpers use (e.g. `_rewrap_404` vs `_rewrap_422_assignee` are
     disjoint on status; here both match 404 but are disjoint on
     message content).
+
+    Ticket #251 finding 3: do NOT append a `({provider} {status})` tag
+    to the rebuilt message. Every concrete provider error's own
+    `__init__`/`__str__` already bakes on a `"{Provider} {status}: "`
+    prefix (e.g. `GitLabError` renders `"GitLab 404: <message>"`), so
+    re-appending a provider/status suffix here doubles it up (GitLab,
+    Azure DevOps) -- `GitHubError` happened to mask this by stripping a
+    trailing `(GitHub NNN)` suffix, hiding the bug for GitHub only.
+    Findings 1-2 of #251 are provider-layer gaps tracked separately in
+    lib-python-projects#208; this helper only owns finding 3. Matches
+    every sibling `_rewrap_*` helper in this module, none of which
+    append a provider tag.
     """
     if not hasattr(exc, "status") or exc.status != 404:
         return exc
     message = getattr(exc, "message", str(exc))
     if _LABEL_404_RE.search(message):
         return exc
-    provider_name = type(exc).__name__.replace("Error", "")
     return type(exc)(
         404,
-        f"{kind} '{project_id}#{ident}' not found ({provider_name} 404)",
+        f"{kind} '{project_id}#{ident}' not found",
     )
 
 

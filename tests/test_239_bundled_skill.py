@@ -156,13 +156,28 @@ def test_skill_documents_label_catalog_precondition():
 
 
 def test_skill_label_claim_matches_tool_docstrings():
-    """Already passes — #237/PR #238 already landed these docstrings;
-    this just guards the skill's claim against drifting from them."""
+    """Drift guard for #248: SKILL.md's label-catalog section and both
+    tool docstrings must agree that the catalog requirement is
+    GitHub-only — none of the three may still claim (via the retracted
+    "presumably GitLab" wording) that GitLab enforces a pre-existing
+    catalog, and the skill text must say GitLab creates labels on the
+    fly instead.
+    """
     tools = _register(ticket_tools)
+    # Whitespace-normalized so a line-wrapped "created\non the fly" still
+    # matches the same way as an unwrapped occurrence would.
+    skill_text = " ".join(_skill_text().split())
+    assert "presumably" not in skill_text
+    assert re.search(r"gitlab.{0,80}created on the fly", skill_text, re.IGNORECASE) or \
+        re.search(r"created on the fly.{0,80}gitlab", skill_text, re.IGNORECASE), (
+        "SKILL.md must describe GitLab as creating unknown labels on the fly"
+    )
     for name in ("create_ticket", "update_ticket"):
-        doc = tools[name].__doc__ or ""
+        doc = " ".join((tools[name].__doc__ or "").split())
         assert "create_label" in doc
         assert "catalog" in doc
+        assert "presumably" not in doc
+        assert "GitLab" in doc
 
 
 # --------------------------------------------------------------------------

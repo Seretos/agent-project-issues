@@ -331,6 +331,14 @@ def register(mcp: FastMCP) -> None:
         only populates on a later fetch (e.g. via `merge_pr`'s response
         or a subsequent `get_pr` call) — don't treat the transient
         `null` as a missing or error value.
+
+        Zero-diff `head` branches diverge by provider: if `head` has no
+        commits ahead of `base`, GitHub rejects the create with a 422
+        (`No commits between <base> and <head>`), while GitLab creates
+        the merge request anyway with an empty diff. Both are native
+        platform behavior. If you need uniform behavior across
+        providers, confirm `head` is actually ahead of `base` before
+        calling.
         """
         def go() -> dict:
             if head == base:

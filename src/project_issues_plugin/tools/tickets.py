@@ -530,13 +530,17 @@ def register(mcp: FastMCP) -> None:
         use `update_ticket`'s `labels_add` / `labels_remove` parameters
         instead.
 
-        Label catalog requirement: on GitHub (and presumably GitLab)
-        every name in `labels` must already exist in the repository's
-        label catalog — passing a not-yet-existing label fails with a
-        404 (e.g. `label 'X' does not exist`). There is no
-        create-on-the-fly here, unlike Azure DevOps' freeform tags.
-        Call `create_label` first for any label that might not already
-        exist.
+        Label catalog requirement: on GitHub every name in `labels`
+        must already exist in the repository's label catalog —
+        passing a not-yet-existing label fails with a 404 (e.g.
+        `label 'X' does not exist`), with no create-on-the-fly.
+        GitLab does NOT share this restriction: an unknown label is
+        created on the fly as part of the call, like Azure DevOps'
+        freeform tags. Calling `create_label` first is required on
+        GitHub (a missing label 404s) and optional on GitLab (an
+        unknown label is auto-created), but calling it for a label
+        that already exists still returns a conflict error on
+        GitLab too, same as GitHub's 422.
 
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When
@@ -686,12 +690,16 @@ def register(mcp: FastMCP) -> None:
         initial label assignment at creation time, use `create_ticket`'s
         `labels` parameter (a flat list, not add/remove).
 
-        Label catalog requirement: on GitHub (and presumably GitLab)
-        every name in `labels_add` must already exist in the
-        repository's label catalog — a not-yet-existing label fails
-        with a 404, unlike Azure DevOps' freeform tags (created on the
-        fly). Call `create_label` first for any label that might not
-        already exist.
+        Label catalog requirement: on GitHub every name in
+        `labels_add` must already exist in the repository's label
+        catalog — a not-yet-existing label fails with a 404. GitLab
+        does NOT share this restriction: like Azure DevOps' freeform
+        tags, an unknown label is created on the fly. Calling
+        `create_label` first is required on GitHub (a missing label
+        404s) and optional on GitLab (an unknown label is
+        auto-created), but calling it for a label that already
+        exists still returns a conflict error on GitLab too, same
+        as GitHub's 422.
 
         When `body` is supplied, it is rewritten so the first line is
         exactly one `#ai-*` marker matching the ticket's post-update

@@ -108,12 +108,12 @@ works on public repos without a token), plus `create_label`,
 `update_label`, and `delete_label` (the three writes require
 `issues.modify`).
 
-On `update_label`, `name` looks the label up — it is a lookup key only
-and is never itself mutated. To rename a label, pass the new name as
-`new_name`; leave `new_name` unset to keep the current name and only
-change `color`/`description`. At least one of `new_name`, `color`, or
-`description` must be supplied, or the call errors before making any
-HTTP request.
+On `update_label`, `name` is required and looks the label up — it is a
+lookup key only and is never itself mutated. To rename a label, pass the
+new name as `new_name`; leave `new_name` unset to keep the current name
+and only change `color`/`description`. At least one of `new_name`,
+`color`, or `description` must be supplied, or the call errors before
+making any HTTP request.
 
 Color formats are provider-specific: GitHub wants a bare 6-digit hex
 string with no leading hash, validated locally before the API call;

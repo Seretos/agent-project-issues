@@ -540,7 +540,8 @@ def register(mcp: FastMCP) -> None:
         GitHub (a missing label 404s) and optional on GitLab (an
         unknown label is auto-created), but calling it for a label
         that already exists still returns a conflict error on
-        GitLab too, same as GitHub's 422.
+        GitLab too — a different status than GitHub's 422, but an
+        error either way.
 
         `status` is optional. When omitted, the ticket lands in the
         project's `hints.default_open` state (the normal case). When
@@ -698,8 +699,8 @@ def register(mcp: FastMCP) -> None:
         `create_label` first is required on GitHub (a missing label
         404s) and optional on GitLab (an unknown label is
         auto-created), but calling it for a label that already
-        exists still returns a conflict error on GitLab too, same
-        as GitHub's 422.
+        exists still returns a conflict error on GitLab too — a
+        different status than GitHub's 422, but an error either way.
 
         When `body` is supplied, it is rewritten so the first line is
         exactly one `#ai-*` marker matching the ticket's post-update

@@ -64,7 +64,9 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
 - **pipelines** — `list_pipeline_runs` list CI/CD runs by
   branch/tag/commit/ticket; `get_pipeline_run` fetch one run's detail
   and failures; `get_pipeline_step_log` fetch a failing job's bounded
-  log.
+  log; `trigger_pipeline` dispatch a new pipeline run;
+  `get_ref` resolve a branch/tag/commit to its commit sha;
+  `list_releases` list a project's published releases.
 - **relations** — `add_relation` create a typed relation between
   tickets; `remove_relation` remove a typed relation;
   `list_relation_kinds` discover supported relation kinds;
@@ -219,6 +221,43 @@ CI/pipeline triage is a three-tool chain, each step narrowing scope:
 GitLab has no structured CI annotations — `annotations` on a GitLab
 failing job is always empty. `log_excerpt` is the only failure context
 available there; don't wait for annotations that will never appear.
+
+`list_pipeline_runs` also accepts `workflow` / `event` / `since`
+filters that combine with any addressing argument — they are filters,
+not a sixth addressing mode. `workflow` matches by name (a bare name
+and a `.yml`/`.yaml` filename are equivalent); `event` accepts the
+canonical vocabulary (`manual`, `push`, `schedule`, `pull_request`,
+`api`) resolved to each provider's native string; `since` is an
+ISO-8601 timestamp and returns a structured error rather than silently
+filtering everything out when malformed.
+
+**Triggering a pipeline run** is a dispatch-then-poll flow, gated by
+`pipelines.trigger` (defaults to `false` on every existing config — a
+new namespace with no flat-form equivalent, opt in deliberately):
+
+1. `trigger_pipeline(project_id, workflow, ref, inputs)` dispatches the
+   run. `wait_for_run=True` (default) polls for the resulting run for
+   up to `wait_timeout_seconds` (hard-capped at 120s) and returns it
+   under `run`.
+2. If the poll times out, the dispatch has still succeeded —
+   `trigger_pipeline` degrades instead of raising: `run` comes back
+   `None` and `hint` says to poll `list_pipeline_runs` /
+   `get_pipeline_run` afterwards rather than re-triggering. The same
+   degraded `{run: None, hint}` shape applies when `wait_for_run=False`
+   is passed explicitly (no polling attempted at all). `triggered`
+   stays `True` in both cases — it reflects that the dispatch request
+   itself succeeded, independent of whether the run could be resolved.
+3. Once you have a `run_id` (either from `trigger_pipeline`'s `run` or
+   from a follow-up `list_pipeline_runs`/`get_pipeline_run` poll), the
+   normal drill-down chain above applies.
+
+`get_ref(project_id, ref)` resolves a branch, tag, or commit sha to its
+peeled commit sha and reports which kind it resolved as (`branch` /
+`tag` / `commit`; resolution order is branch -> tag -> commit).
+`list_releases(project_id, limit)` lists published releases, most
+recent first. Both are read-only (token-gated only, no permission
+flag) — unlike `trigger_pipeline`, they work even on a project with
+every permission flag set to `false`.
 
 ## Parallel writes and error semantics
 

@@ -1,5 +1,5 @@
 {
-  "description": "Injects a .seretos/ managed-settings security reminder on the first qualifying prompt and every 10th thereafter (if not already configured), when a .seretos/ directory is present in the project tree.",
+  "description": "Injects a .seretos/ managed-settings security reminder on the first qualifying prompt and every 10th thereafter (if not already configured), when a .seretos/ directory is present in the project tree. Set PROJECT_ISSUES_SECURITY_HINT_DISABLED to a truthy value to opt out entirely.",
   "hooks": {
     "UserPromptSubmit": [
       {

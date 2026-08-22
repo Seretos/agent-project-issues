@@ -32,6 +32,7 @@ from lib_python_projects.providers.azuredevops import (
     AzureDevOpsError,
     AzureDevOpsProvider,
 )
+from lib_python_projects.providers.base import ProviderError
 from lib_python_projects.providers.github import GitHubError, GitHubProvider
 from lib_python_projects.providers.gitlab import GitLabError, GitLabProvider
 
@@ -157,6 +158,17 @@ def _require_board_manage(project: ProjectConfig) -> None:
         raise PermissionError(
             f"project '{project.id}' does not permit managing board columns. "
             "Tell the user the project is configured without board.manage permission."
+        )
+
+
+# --------- pipelines namespace ------------------------------------------------
+
+
+def _require_pipelines_trigger(project: ProjectConfig) -> None:
+    if not project.permissions.pipelines.trigger:
+        raise PermissionError(
+            f"project '{project.id}' does not permit triggering pipelines. "
+            "Tell the user the project is configured without pipelines.trigger permission."
         )
 
 
@@ -578,6 +590,13 @@ def _safe(call):
         return {"error": str(exc)}
     except AzureDevOpsError as exc:
         return {"error": str(exc)}
+    except ProviderError as exc:
+        # Catches provider-agnostic lib errors that aren't one of the three
+        # concrete provider subclasses above — e.g. `apply_run_filters`'s
+        # `since=`-validation `ProviderError(400, ...)` (ticket #245),
+        # which is raised directly on `base.ProviderError`, not on a
+        # per-provider subclass.
+        return {"error": str(exc)}
 
 
 __all__ = [
@@ -591,6 +610,7 @@ __all__ = [
     "_require_pulls_modify",
     "_require_pulls_merge",
     "_require_board_manage",
+    "_require_pipelines_trigger",
     "_normalize_id",
     "_normalize_target",
     "_rewrap_404",

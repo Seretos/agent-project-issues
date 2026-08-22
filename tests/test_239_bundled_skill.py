@@ -233,6 +233,11 @@ _NON_TOOL_WHITELIST = {
     "read_only_kinds", "mentions", "closed_by", "provider_support",
     "parent", "children", "relations_truncated", "work_item_type",
     "reference_name", "allowed_values", "job_id", "fields",
+    # Added by ticket #245 (pipeline workflow/event/since filters and the
+    # trigger_pipeline dispatch-then-poll flow):
+    "api", "commit", "event", "false", "manual", "pull_request", "push",
+    "run", "schedule", "since", "triggered", "wait_timeout_seconds",
+    "workflow",
 }
 
 

@@ -217,8 +217,15 @@ CI/pipeline triage is a three-tool chain, each step narrowing scope:
    (a window centred on the first error-looking line); when no such
    line is found it degrades to tail behaviour and reports back mode
    "around_failure->tail" so the degradation is visible. Output is
-   always bounded by `max_lines` (hard-capped at 1000) — this tool
-   never returns the full unbounded log.
+   always bounded by `max_lines` (hard-capped at 1000) AND by 40,000
+   characters (hard-capped regardless of what's requested — a long-line
+   CI log can pack far more than 40k characters into 1000 lines, so the
+   line cap alone isn't a safe bound) — this tool never returns the
+   full unbounded log. An optional `max_chars` argument can tighten
+   that 40,000-character cap further, but never loosen it. Character
+   trimming, when it kicks in, preserves each mode's anchor rather than
+   blindly chopping from one end (e.g. `tail` keeps the tail of the
+   log, `around_failure` keeps content closest to the matched line).
 
 GitLab has no structured CI annotations — `annotations` on a GitLab
 failing job is always empty. `log_excerpt` is the only failure context

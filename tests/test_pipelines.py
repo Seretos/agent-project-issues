@@ -1231,3 +1231,110 @@ def test_get_pipeline_step_log_404_rewrapped_with_context(
     assert "error" in result
     assert "acme#5001/9999" in result["error"]
     assert "pipeline job log" in result["error"]
+
+
+# ---------- ticket #262: get_pipeline_step_log max_chars ---------------------
+
+
+def test_get_pipeline_step_log_max_chars_bounds_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R5 (driving test): the tool layer accepts a `max_chars` param
+    and forwards it through to `slice_log`, bounding the response's
+    `lines` even when `max_lines` alone would not have."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no plain HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    # Long enough that 50 chars is well below what max_lines=200 alone
+    # would return.
+    wide_text = "\n".join(f"L{i:04d}".ljust(200, "x") for i in range(50))
+    monkeypatch.setattr(
+        github_provider.GitHubProvider, "get_step_log",
+        lambda self, project, token, run_id, job_id: wide_text,
+    )
+
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001",
+        mode="tail", max_lines=200, max_chars=50,
+    )
+    assert "error" not in result, result
+    assert len(result["lines"]) <= 50
+
+
+def test_get_pipeline_step_log_non_positive_max_chars_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R5: `max_chars` is validated the same way `max_lines` already
+    is — a non-positive value returns a structured error naming the
+    parameter, no HTTP call is made."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no HTTP call expected; got {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5001", job_id="7001", max_chars=0,
+    )
+    assert "error" in result
+    assert "max_chars" in result["error"]
+
+
+def test_get_pipeline_run_log_excerpt_not_char_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6 (scope-containment guard, not a #262 driving test): the new
+    40k character hard cap lives in `_log_slicing.slice_log` and is
+    reached only via `get_pipeline_step_log`, which explicitly calls
+    `slice_log`. `get_pipeline_run`'s `job.log_excerpt` never routes
+    through `slice_log` at all, so it must stay byte-identical to
+    whatever the lib computed — this must pass before AND after #262's
+    change; it documents the containment boundary, not new behavior."""
+    tools = _register_tools_with(monkeypatch, _project())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == "/repos/acme/backend/actions/runs/5001":
+            return _json(_run_payload(
+                5001, name="test", status="completed", conclusion="failure",
+            ))
+        if path == "/repos/acme/backend/actions/runs/5001/jobs":
+            return _json({
+                "jobs": [
+                    {
+                        "id": 7001,
+                        "name": "pytest",
+                        "html_url": "https://github.com/acme/backend/actions/runs/5001/job/7001",
+                        "conclusion": "failure",
+                        "check_run_url": "https://api.github.com/repos/acme/backend/check-runs/9999",
+                        "steps": [
+                            {"name": "checkout", "conclusion": "success"},
+                            {"name": "run tests", "conclusion": "failure"},
+                        ],
+                    }
+                ]
+            })
+        if path == "/repos/acme/backend/check-runs/9999/annotations":
+            return _json([])
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    huge_excerpt = "A" * 50_000
+    monkeypatch.setattr(
+        github_provider, "_extract_log_excerpt", lambda *a, **k: huge_excerpt,
+    )
+    monkeypatch.setattr(
+        github_provider, "_fetch_job_log",
+        lambda token, log_url, **kwargs: "irrelevant raw log text\n" * 10,
+    )
+
+    result = tools["get_pipeline_run"](project_id="acme", run_id="5001")
+    assert "error" not in result, result
+    job = result["run"]["failure"]["failing_jobs"][0]
+    assert job["log_excerpt"] == huge_excerpt
+    assert len(job["log_excerpt"]) > 40_000

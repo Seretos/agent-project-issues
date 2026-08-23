@@ -71,10 +71,10 @@ import sys
 import time
 from typing import Literal
 
-# Compiled separator pattern reused by `_score()` for sub-token splitting.
-# Splits on any run of non-alphanumeric characters (hyphens, underscores,
-# dots, slashes, etc.) so that e.g. "proj-iss" and "agent-project-issues"
-# share common sub-tokens.
+# Compiled separator pattern reused by `_score_match()` / `_score()` for
+# sub-token splitting. Splits on any run of non-alphanumeric characters
+# (hyphens, underscores, dots, slashes, etc.) so that e.g. "proj-iss" and
+# "agent-project-issues" share common sub-tokens.
 _TOKEN_SEP = re.compile(r"[^a-z0-9]+")
 
 from mcp.server.fastmcp import FastMCP
@@ -284,25 +284,53 @@ def _runtime_block(result: ProjectsLoadResult) -> dict:
     return block
 
 
-def _score(query: str, project: ProjectConfig) -> int:
-    """Substring-based scoring against id, path, description. 0 = no match."""
+# Ticket #258: structured confidence label alongside the raw numeric score.
+# Derived from the scoring *branch* that set the base score, never from the
+# numeric total, so it doesn't reproduce the `~100`-`~300` gray-zone
+# ambiguity of the plain score.
+MatchConfidence = Literal["exact", "id", "path", "description", "weak"]
+
+
+def _score_match(
+    query: str, project: ProjectConfig,
+) -> tuple[int, MatchConfidence | None]:
+    """Substring-based scoring against id, path, description, plus a
+    structured `MatchConfidence` label derived from whichever base-score
+    branch fired (never from the numeric total).
+
+    Returns `(score, match_confidence)`. `match_confidence is None` iff
+    `score == 0` (empty/whitespace query, or nothing matched at all).
+    """
     q = query.lower().strip()
     if not q:
-        return 0
+        return 0, None
     id_lc = project.id.lower()
     desc_lc = project.description.lower()
     path_lc = project.display_path.lower()
     score = 0
+    confidence: MatchConfidence | None = None
+    # Highest-precedence base branch first; bases are strictly ordered
+    # (1000 > 500 > 300 > 200 > 100) so `score = max(score, ...)` and label
+    # assignment never disagree on which branch "won".
     if q == id_lc:
         score = max(score, 1000)
+        confidence = "exact"
     if id_lc.startswith(q):
         score = max(score, 500)
+        if confidence is None:
+            confidence = "id"
     if q in id_lc:
         score = max(score, 300)
+        if confidence is None:
+            confidence = "id"
     if q in path_lc:
         score = max(score, 200)
+        if confidence is None:
+            confidence = "path"
     if q in desc_lc:
         score = max(score, 100)
+        if confidence is None:
+            confidence = "description"
     for token in q.split():
         if len(token) < 3:
             continue
@@ -330,7 +358,20 @@ def _score(query: str, project: ProjectConfig) -> int:
             for cp in desc_parts:
                 if qp in cp or cp in qp:
                     score += 10
-    return score
+    if score > 0 and confidence is None:
+        # Score built entirely from word-token / sub-token bonuses — no
+        # base branch fired. Weak: incidental, not a real match.
+        confidence = "weak"
+    return score, confidence
+
+
+def _score(query: str, project: ProjectConfig) -> int:
+    """Substring-based scoring against id, path, description. 0 = no match.
+
+    Thin wrapper over `_score_match()` for callers that only need the raw
+    numeric score.
+    """
+    return _score_match(query, project)[0]
 
 
 _STATE_HINTS = {
@@ -483,32 +524,59 @@ def register(mcp: FastMCP) -> None:
 
         **Query behavior:**
           - Empty or whitespace-only query returns **all** projects
-            (alphabetical by id), each with `score: 0`. Use this to
-            enumerate without a separate `list_projects` call — though
-            for a plain unranked dump of every project, `list_projects`
-            (non-paginated, no `limit`) is the simpler choice. Reach for
-            `search_projects` when you want relevance ranking or a bounded
-            `limit` over a large set.
+            (alphabetical by id), each with `score: 0` and
+            `match_confidence: null`. Use this to enumerate without a
+            separate `list_projects` call — though for a plain unranked
+            dump of every project, `list_projects` (non-paginated, no
+            `limit`) is the simpler choice. Reach for `search_projects`
+            when you want relevance ranking or a bounded `limit` over a
+            large set.
           - Non-empty query → fuzzy match by id / description / path,
             sorted by relevance descending.
 
-        **Interpreting `score` (this is a FUZZY matcher — read before
-        treating a match as real):** a non-empty query can return
-        incidental low-score hits — e.g. the query and an unrelated
-        project sharing a common sub-token like "project". Higher is
-        more confident: `>= 300` means the query is a substring of the
-        id; `>= 200` a substring of the path; a score `< 100` is usually
-        an incidental description / sub-token hit rather than a real
-        match. The whole `~100`–`~300` band (below the `>= 300` id-substring
+        **Interpreting `match_confidence` (this is a FUZZY matcher — read
+        before treating a match as real):** each match carries a
+        `match_confidence` string alongside the raw `score`, derived from
+        *which rule* matched rather than from the numeric total — that is
+        what avoids the gray-zone ambiguity a bare score threshold has.
+        One of:
+          - `"exact"` — the query equals the id exactly.
+          - `"id"` — the query is a prefix of, or a substring of, the id.
+          - `"path"` — the query is a substring of the path (no id hit).
+          - `"description"` — the query is a substring of the description
+            only (no id / path hit).
+          - `"weak"` — no id / path / description substring matched at
+            all; the score is built entirely from incidental word-token or
+            sub-token overlap (e.g. the query and an unrelated project
+            sharing a common sub-token like "project"). Treat with
+            suspicion: probably not a real match.
+          - `null` — `score` is `0` (nothing matched; only occurs for the
+            empty-query enumeration case, since non-matches are filtered
+            out of `matches`).
+        `match_confidence` is never upgraded/downgraded by the additive
+        bonuses: e.g. a description-only match whose accumulated score
+        happens to exceed 300 is still reported as `"description"`, not
+        `"id"`.
+
+        For a plain "does project X exist?" check, prefer an exact-id
+        comparison (or enumerate via `list_projects`) instead of relying
+        on `matches` being empty or non-empty — even `"weak"` matches are
+        included in `matches` (see the `score` footnote below).
+
+        *Footnote — raw `score` thresholds (superseded by
+        `match_confidence` above, kept for reference):* higher is more
+        confident: `>= 300` means the query is a substring of the id;
+        `>= 200` a substring of the path; a score `< 100` is usually an
+        incidental description / sub-token hit rather than a real match.
+        The whole `~100`–`~300` band (below the `>= 300` id-substring
         floor) is a gray zone: a score in that range is only a path
         (`>= 200`) or description (`>= 100`) substring hit, or an
         accumulated sub-token/word-token score built from several partial
         hits — it is NOT reliably a real match either way. So "no real
         match" does NOT reliably show up as an empty `matches` list, and a
-        non-empty `matches` list in this band does NOT reliably mean a real
-        match. For a plain "does project X exist?" check, prefer an
-        exact-id comparison (or enumerate via `list_projects`) instead of
-        relying on `matches` being empty or non-empty.
+        non-empty `matches` list in this band does NOT reliably mean a
+        real match. Use `match_confidence` instead of re-deriving this
+        banding yourself.
 
         **Pagination fields (always present):**
           - `total: int` — total number of candidates before the `limit`
@@ -537,10 +605,11 @@ def register(mcp: FastMCP) -> None:
         cap requires a future lib-side limit parameter.
 
         Token-cheap knob:
-          - `fields="light"`: return only ``{id, provider, score}`` per
-            match and omit the ``runtime`` block. Useful when you only
-            need project IDs. Prefer `list_projects(fields="light")` when
-            you want every project cheaply without ranking.
+          - `fields="light"`: return only
+            ``{id, provider, score, match_confidence}`` per match and omit
+            the ``runtime`` block. Useful when you only need project IDs.
+            Prefer `list_projects(fields="light")` when you want every
+            project cheaply without ranking.
           - `fields="full"` (default): full behaviour as described above.
         """
         result = load_projects(
@@ -559,20 +628,20 @@ def register(mcp: FastMCP) -> None:
                 sorted_projects = sorted(result.projects, key=lambda p: p.id.lower())
                 total = len(sorted_projects)
                 results = [
-                    {**_project_to_light(p), "score": 0}
+                    {**_project_to_light(p), "score": 0, "match_confidence": None}
                     for p in sorted_projects[:cap]
                 ]
             else:
-                scored_light: list[tuple[int, ProjectConfig]] = []
+                scored_light: list[tuple[int, MatchConfidence | None, ProjectConfig]] = []
                 for p in result.projects:
-                    s = _score(query, p)
+                    s, conf = _score_match(query, p)
                     if s > 0:
-                        scored_light.append((s, p))
-                scored_light.sort(key=lambda pair: pair[0], reverse=True)
+                        scored_light.append((s, conf, p))
+                scored_light.sort(key=lambda triple: triple[0], reverse=True)
                 total = len(scored_light)
                 results = [
-                    {**_project_to_light(p), "score": s}
-                    for s, p in scored_light[:cap]
+                    {**_project_to_light(p), "score": s, "match_confidence": conf}
+                    for s, conf, p in scored_light[:cap]
                 ]
             truncated = total > cap
             hint = _discovery_truncated_hint or _STATE_HINTS.get(result.state)
@@ -599,18 +668,21 @@ def register(mcp: FastMCP) -> None:
             sorted_projects = sorted(result.projects, key=lambda p: p.id.lower())
             total = len(sorted_projects)
             results = [
-                {**_project_to_dict(p), "score": 0}
+                {**_project_to_dict(p), "score": 0, "match_confidence": None}
                 for p in sorted_projects[:cap]
             ]
         else:
-            scored: list[tuple[int, ProjectConfig]] = []
+            scored: list[tuple[int, MatchConfidence | None, ProjectConfig]] = []
             for p in result.projects:
-                s = _score(query, p)
+                s, conf = _score_match(query, p)
                 if s > 0:
-                    scored.append((s, p))
-            scored.sort(key=lambda pair: pair[0], reverse=True)
+                    scored.append((s, conf, p))
+            scored.sort(key=lambda triple: triple[0], reverse=True)
             total = len(scored)
-            results = [{**_project_to_dict(p), "score": s} for s, p in scored[:cap]]
+            results = [
+                {**_project_to_dict(p), "score": s, "match_confidence": conf}
+                for s, conf, p in scored[:cap]
+            ]
         truncated = total > cap
         # When the config loaded fine but nothing matched the query,
         # the global `_STATE_HINTS["ok"]` is None (no hint is right for

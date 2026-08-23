@@ -1098,7 +1098,7 @@ def register(mcp: FastMCP) -> None:
         `{"error": ...}` payload noting the provider is unsupported —
         mirroring `list_board_columns`' GitLab handling, but as an error
         here rather than an empty list, since there is no board to
-        manage at all.
+        manage at all. This capability check runs first: the unsupported-provider error is returned regardless of the project's `board.manage` permission or whether a token is configured.
 
         Requires the project's `board.manage` permission. Like
         `pulls.merge`, this flag has no flat-form equivalent and
@@ -1115,15 +1115,22 @@ def register(mcp: FastMCP) -> None:
         """
         def go() -> dict:
             project = _resolve(project_id)
-            _require_board_manage(project)
-            token = _require_token(project)
             provider = _provider_for(project)
+            # Intentionally ahead of the permission/token gates below — not a
+            # gate bypass. Provider identity is already public (list_projects
+            # returns it ungated) and GitLab's lack of board support is
+            # already surfaced unconditionally by list_board_columns; nothing
+            # new leaks. The write itself stays fully gated: this only
+            # upgrades the message a doomed request gets, from a misleading
+            # permission/token error to an accurate "not supported" one.
             if not hasattr(provider, "ensure_board_column"):
                 raise NotImplementedError(
                     f"provider '{project.provider}' does not support board "
                     "management (ensure_board_column) — e.g. GitLab has no "
                     "board concept"
                 )
+            _require_board_manage(project)
+            token = _require_token(project)
             result = provider.ensure_board_column(project, token, column_name)
             payload: dict[str, Any] = {
                 "project_id": project.id,

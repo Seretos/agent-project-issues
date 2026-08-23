@@ -143,7 +143,7 @@ Board columns are a two-step operation, not a single write:
 `ensure_board_column` can idempotently create a missing column, but it is
 gated on the project's `board.manage` permission — it is not part of the
 normal move-a-card flow and will fail with a permission error unless the
-project has explicitly opted in.
+project has explicitly opted in. However, on GitLab the call reports the provider as unsupported before any permission check, since GitLab has no board concept to manage in the first place.
 
 ## Custom fields and board write keys
 

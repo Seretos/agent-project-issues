@@ -585,6 +585,20 @@ def register(mcp: FastMCP) -> None:
         `requested_reviewers` entry instead. Treat a review as recorded
         from `reviewers`, not `requested_reviewers`.
 
+        Azure DevOps self-review: Azure applies no platform-level
+        self-review block, and this call itself has no self-review
+        handling either. Both `"approve"` and `"request_changes"` on
+        your own PR succeed here and are recorded as a normal vote
+        (+10 / -10) in `reviewers`, unlike GitHub, which rejects both
+        with a 422. A repository or branch policy can still matter
+        later: with "Prohibit the most recent pusher from approving
+        their own changes" enabled, that recorded self-vote will not
+        satisfy the required-reviewer/approval gate — the rejection
+        surfaces at PR completion/merge time (`merge_pr` raises when
+        `mergeStatus` is `"rejectedByPolicy"`), not from this call.
+        So a policy-blocked self-review is not visible as an error
+        here; check for it at merge time instead.
+
         `commit_sha`, when set, pins the review to a specific commit on
         GitHub (`commit_id`). GitLab cannot pin a review to a commit: it
         ignores `commit_sha` and the returned review always has

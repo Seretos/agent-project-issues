@@ -487,7 +487,7 @@ def test_search_projects_light_returns_id_provider_score(monkeypatch):
     matches = result["matches"]
     assert len(matches) >= 1
     m = matches[0]
-    assert set(m.keys()) == {"id", "provider", "score"}
+    assert set(m.keys()) == {"id", "provider", "score", "match_confidence"}
     assert m["id"] == "acme"
     assert m["provider"] == "github"
     assert isinstance(m["score"], int)
@@ -506,7 +506,7 @@ def test_search_projects_light_empty_query_no_runtime(monkeypatch):
     result = tools["search_projects"](query="", fields="light")
     assert "runtime" not in result
     m = result["matches"][0]
-    assert set(m.keys()) == {"id", "provider", "score"}
+    assert set(m.keys()) == {"id", "provider", "score", "match_confidence"}
 
 
 def test_search_projects_full_unchanged(monkeypatch):

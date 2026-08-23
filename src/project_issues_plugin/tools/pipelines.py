@@ -436,6 +436,7 @@ def register(mcp: FastMCP) -> None:
         job_id: Annotated[str, Field(description="Numeric string identifying the failing job within the run. Obtain from get_pipeline_run's run.failure.failing_jobs[].job_id — do not guess or construct it.")],
         mode: Literal["tail", "around_failure", "errors_only"] = "around_failure",
         max_lines: int = 200,
+        max_chars: Annotated[int | None, Field(description="Optional character-based bound on the response's `lines` text, on top of `max_lines`. Internally hard-capped at 40,000 characters regardless of what's requested — passing a larger value (or omitting it) does not loosen that cap, it only widens up to it. Pass a smaller value to tighten the bound further (e.g. to fit a smaller downstream budget). None (default) uses the 40,000-character hard cap.")] = None,
     ) -> dict:
         """Fetch one failing job's full log, bounded to a small slice.
 
@@ -444,8 +445,22 @@ def register(mcp: FastMCP) -> None:
         compact `log_excerpt` (~30 lines clamped around the failing
         step) isn't enough context. Unlike a raw log fetch, this tool
         ALWAYS bounds its output to at most `max_lines` (hard-capped at
-        1000 regardless of what's requested) — it never returns the
-        full, unbounded log text into the conversation.
+        1000 regardless of what's requested) AND to at most 40,000
+        characters (ticket #262 — a real CI log can pack far more than
+        40k characters into 1000 lines when lines are long, e.g. a
+        verbose pytest run, which nominally respects `max_lines` while
+        still blowing well past a sane text budget) — it never returns
+        the full, unbounded log text into the conversation. `max_chars`
+        can only tighten that 40,000-character cap further, never
+        loosen it.
+
+        Character trimming (when it kicks in) preserves each mode's
+        anchor rather than blindly chopping from one end: `"tail"`
+        keeps the tail of the log, `"errors_only"` keeps the head of
+        each retained matching line, `"around_failure"` keeps content
+        closest to the matched error line. `truncated`/`more_available`
+        cover both the line-based and character-based bounds — there is
+        no separate flag for each.
 
         `run_id` / `job_id` are the same identifiers surfaced on a
         failing job from `get_pipeline_run`
@@ -519,6 +534,10 @@ def register(mcp: FastMCP) -> None:
             return {
                 "error": f"max_lines must be a positive int (got {max_lines!r})."
             }
+        if max_chars is not None and (not isinstance(max_chars, int) or max_chars <= 0):
+            return {
+                "error": f"max_chars must be a positive int or None (got {max_chars!r})."
+            }
 
         def go() -> dict:
             project = _resolve(project_id)
@@ -531,7 +550,7 @@ def register(mcp: FastMCP) -> None:
                     exc, project_id=project.id, kind="pipeline job log",
                     ident=f"{run_id}/{job_id}",
                 )
-            sliced = slice_log(log_text, mode=mode, max_lines=max_lines)
+            sliced = slice_log(log_text, mode=mode, max_lines=max_lines, max_chars=max_chars)
             return {
                 "project_id": project.id,
                 "run_id": run_id,

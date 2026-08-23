@@ -253,6 +253,8 @@ _NON_TOOL_WHITELIST = {
     "api", "commit", "event", "false", "manual", "pull_request", "push",
     "run", "schedule", "since", "triggered", "wait_timeout_seconds",
     "workflow",
+    # Added by ticket #262 (get_pipeline_step_log character-based hard cap):
+    "max_chars", "tail",
 }
 
 

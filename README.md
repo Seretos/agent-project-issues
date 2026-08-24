@@ -250,7 +250,7 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 Read access is always implicit (token-gated). Each write namespace has its own flags:
 
 - `permissions.issues.create` / `permissions.issues.modify` — gate `create_ticket` / `update_ticket` / `add_comment` / `update_comment`.
-- `permissions.pulls.create` / `permissions.pulls.modify` / `permissions.pulls.merge` — gate `create_pr` / `update_pr`+`add_pr_comment` / `merge_pr` respectively. `pulls.merge` defaults to false even when the other PR flags are true — opt in deliberately.
+- `permissions.pulls.create` / `permissions.pulls.modify` / `permissions.pulls.merge` — gate `create_pr` / `update_pr`+`add_pr_comment`+`add_pr_review_comment`+`submit_pr_review` / `merge_pr` respectively. On Azure DevOps, `submit_pr_review` casts a reviewer vote; reviewing is treated as modifying the PR, so it falls under `pulls.modify` too — there is no separate review permission flag. `pulls.merge` defaults to false even when the other PR flags are true — opt in deliberately.
 - `permissions.board.manage` — gates `ensure_board_column`. Defaults to false even when other write flags are true — opt in deliberately, mirroring `pulls.merge`.
 - `permissions.pipelines.trigger` — gates `trigger_pipeline`. New namespace, no flat-form equivalent, defaults to false — opt in deliberately, mirroring `pulls.merge` / `board.manage`.
 
@@ -287,7 +287,7 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 | `issues.create`        | bool  | `false` | `create_ticket` |
 | `issues.modify`        | bool  | `false` | `update_ticket`, `add_comment`, `update_comment` |
 | `pulls.create`         | bool  | `false` | `create_pr` |
-| `pulls.modify`         | bool  | `false` | `update_pr`, `add_pr_comment` |
+| `pulls.modify`         | bool  | `false` | `update_pr`, `add_pr_comment`, `add_pr_review_comment`, `submit_pr_review` |
 | `pulls.merge`          | bool  | `false` | `merge_pr` (opt in deliberately) |
 | `board.manage`         | bool  | `false` | `ensure_board_column` (opt in deliberately) |
 | `pipelines.trigger`    | bool  | `false` | `trigger_pipeline` (opt in deliberately) |
@@ -338,6 +338,8 @@ Pull-request surface mirrors the ticket surface and is gated by the `permissions
 - `create_pr(project_id, title, body, head, base, draft, labels, assignees)` — gated by `pulls.create`. Applies the `ai-generated` label automatically.
 - `update_pr(project_id, pr_id, title, body, status, base, labels_add, labels_remove, assignees_add, assignees_remove)` — gated by `pulls.modify`. `status` accepts only `"open"` / `"closed"`; merging is a separate tool. The `ai-modified` label is added when the PR wasn't originally AI-generated.
 - `add_pr_comment(project_id, pr_id, body)` — gated by `pulls.modify`. The body is automatically prefixed with `#ai-generated\n\n`.
+- `add_pr_review_comment(project_id, pr_id, body, path, line, side, commit_sha, in_reply_to)` — inline/diff-anchored comment, two modes (new thread via `path`+`line`+`commit_sha`, reply via `in_reply_to`); body is marker-prefixed automatically; gated by `pulls.modify` (reviewing is treated as modifying the PR; no separate review flag).
+- `submit_pr_review(project_id, pr_id, state, body, commit_sha)` — `state` is `approve` / `request_changes` / `comment`; on Azure DevOps this is a reviewer vote (`approve` → +10, `request_changes` → -10, `comment` → vote 0, no scored `reviewers` entry); gated by `pulls.modify` (reviewing is treated as modifying the PR; no separate review flag).
 - `merge_pr(project_id, pr_id, merge_method, commit_title, commit_message)` — gated by `pulls.merge`. `merge_method` is `"merge"`, `"squash"`, or `"rebase"`. Existing configs cannot merge without an explicit `pulls.merge = true` opt-in (no flat-form equivalent).
 
 ## Pipeline / CI tools

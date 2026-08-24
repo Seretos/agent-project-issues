@@ -296,7 +296,20 @@ def test_list_custom_fields_non_404_error_passes_through_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-404 AzureDevOpsError (e.g. 401/500) is not touched by the
-    work-item-type rewrap; it surfaces via the normal _safe translation."""
+    work-item-type rewrap; it surfaces via the normal _safe translation.
+
+    Ticket #266 requirement B (B-azure): a raw 401 additionally picks up
+    `_safe`'s Azure DevOps scope hint, appended after the original message
+    — never substituted for it. The hint is a single fixed module-level
+    constant applied to every Azure DevOps call, so for a non-pipeline
+    endpoint like `list_custom_fields` it must name the scope that is
+    actually relevant here (Work Items) without asserting Build is
+    unconditionally required — Build is only mentioned as conditional on
+    triggering pipelines. The GUID assertion below is the pre-existing
+    #182 finding-1 pin and must keep passing unmodified; the new
+    assertions after it are #266's driving coverage for the Azure 401
+    hint. RED today: `_safe`'s AzureDevOpsError branch returns `str(exc)`
+    unchanged, so no hint is appended and 'Work Items' is absent."""
     mock = _MockADOProvider404(status=401)
     tools, _ = _register_with_provider(monkeypatch, mock)
 
@@ -306,6 +319,26 @@ def test_list_custom_fields_non_404_error_passes_through_unchanged(
     # The raw (unwrapped) message, including the GUID, passes through since
     # the rewrap only fires on 404.
     assert _ADO_GUID in out["error"]
+
+    # #266 requirement B (B-azure) driving coverage: the Azure hint is
+    # appended after the original (GUID-bearing) message, not substituted
+    # for it, and names the scope actually relevant to this endpoint
+    # (Work Items) without over-claiming that Build is unconditionally
+    # required — `list_custom_fields` has no relationship to Build, so the
+    # hint must only mention Build as conditional on triggering pipelines,
+    # not as a flat requirement for this call.
+    message = out["error"]
+    assert "Work Items" in message, f"expected the Azure 'Work Items' scope hint; got: {message!r}"
+    assert "if triggering pipelines" in message, (
+        "expected the Build mention to be phrased conditionally (not an "
+        f"unconditional requirement for this non-pipeline endpoint); got: {message!r}"
+    )
+    guid_index = message.index(_ADO_GUID)
+    hint_index = message.index("Work Items")
+    assert hint_index > guid_index, (
+        f"expected the hint appended after the original message, not "
+        f"substituted for it; got: {message!r}"
+    )
 
 
 def _param_description(fn: Callable, param: str) -> str:

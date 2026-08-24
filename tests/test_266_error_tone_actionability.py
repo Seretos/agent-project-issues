@@ -1,6 +1,6 @@
 """Tests for ticket #266 — error-message tone/actionability consistency.
 
-Two behavioural requirements:
+Three behavioural requirements:
 
   A. The seven `_require_*` permission gates in `tools/_providers.py`
      stop asking the agent to relay a message ("Tell the user the
@@ -13,25 +13,33 @@ Two behavioural requirements:
   B. A raw 401 from any of the three providers, surfaced through
      `_safe`, picks up a provider-specific scope hint (GitHub: `repo`
      scope; GitLab: `api` scope; Azure DevOps: Work Items scope, plus a
-     conditional mention of Build for pipeline operations rather than an
-     unconditional claim, since the hint is a single fixed constant
-     applied to every Azure DevOps call including non-pipeline ones)
-     appended to the original message — applied centrally via a new
-     `_with_auth_hint(exc, hint) -> str` helper wired into `_safe`'s
-     three provider `except` blocks. Non-401 errors and bare
+     Build mention) appended to the original message — applied
+     centrally via `_with_auth_hint(exc, hint) -> str`, wired into
+     `_safe`'s three provider `except` blocks. Non-401 errors and bare
      `ProviderError` are untouched.
+
+  C. (attempt 2, the sole remaining gap) The Azure DevOps Build mention
+     in `_AZUREDEVOPS_AUTH_HINT` must not be conditioned on "triggering
+     pipelines" — pipeline READ operations (`list_pipeline_runs`,
+     `get_pipeline_run`, `get_pipeline_step_log`) hit the same
+     `/_apis/build/*` surface without ever going through the
+     trigger-only gate `_require_pipelines_trigger`, so the old "if
+     triggering pipelines" phrasing understated when Build is actually
+     needed. The fix stays a single fixed module constant applied to
+     every Azure DevOps call — no per-call-site hint selection.
 
 Mirrors the fake-provider-raises pattern used in `test_error_rewrap_251.py`
 (pipeline tools) and `test_257_error_surface_consistency.py` (ticket
 tools) — a mock provider is registered directly into
 `providers_mod._PROVIDERS` so no HTTP mocking is needed.
 
-Phase = tests: production code is NOT implemented yet. `_with_auth_hint`
-does not exist on the current code, so B4(a)/(b) below are expected to
-fail with `ImportError`/`AttributeError` (not a plain assertion
-failure) — that is valid RED for a not-yet-written helper. All other
-tests fail because today's gate messages still say "Tell the user ..."
-and `_safe` does not append any 401 hint yet.
+Phase = tests (attempt 2): requirements A and B's production code is
+already implemented and review-approved (commit b7c4cf9) — the tests
+for them stay green throughout as a no-regression baseline. Requirement
+C is the only new RED here: `_AZUREDEVOPS_AUTH_HINT` still reads
+"...also Build if triggering pipelines" on the current code, so the new
+`test_C_*` driving test below (and the updated assertions in
+`tests/test_list_custom_fields.py`) fail against that stale wording.
 """
 from __future__ import annotations
 
@@ -217,10 +225,14 @@ def test_A4_require_token_message_unchanged() -> None:
 
 
 def _project(provider: str, project_id: str = "acme") -> ProjectConfig:
+    # Azure DevOps validates `path` as 'organization/project/repository'
+    # (3 segments) — GitHub/GitLab accept the generic 2-segment form used
+    # everywhere else in this file; only azuredevops needs the longer shape.
+    path = "myorg/myproject/myrepo" if provider == "azuredevops" else f"{project_id}/backend"
     return ProjectConfig(
         id=project_id,
         provider=provider,
-        path=f"{project_id}/backend",
+        path=path,
         token_env=f"TOKEN_{project_id.upper()}",
         permissions=Permissions(
             issues=IssuesPermissions(create=True, modify=True),
@@ -383,4 +395,66 @@ def test_B4c_401_through_rewrap_then_safe_gets_exactly_one_hint(
     # hint was appended exactly once, not doubled by chained rewraps.
     assert out["error"].count(" — ") == 1, (
         f"expected exactly one hint separator; got: {out['error']!r}"
+    )
+
+
+def test_B_rate_limit_status_gets_no_hint() -> None:
+    """Edge-case pin (not new behaviour): a rate-limit-flavored non-401
+    status (GitHub 429, Azure DevOps 403) never picks up the auth-scope
+    hint — only a literal 401 does. Already passes today; kept here as
+    documentation of the non-overlap requirement rather than as its own
+    RED-driving test."""
+    from project_issues_plugin.tools._providers import _safe
+
+    def go_github():
+        raise GitHubError(429, "API rate limit exceeded")
+
+    out = _safe(go_github)
+    assert out == {"error": "GitHub 429: API rate limit exceeded"}
+
+    def go_azure():
+        raise AzureDevOpsError(403, "TF400813: forbidden")
+
+    out = _safe(go_azure)
+    assert out == {"error": "Azure DevOps 403: TF400813: forbidden"}
+
+
+# ---------------------------------------------------------------------------
+# Requirement C — Azure DevOps Build hint must cover reads, not just trigger
+# ---------------------------------------------------------------------------
+
+
+class _MockAzureDevOpsProvider401:
+    def get_run(self, project, token, run_id, *, include_failure_excerpt=True):
+        raise AzureDevOpsError(401, "401 Unauthorized")
+
+
+def test_C_azure_401_on_pipeline_read_hint_covers_reads_not_only_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Driving test for requirement C (attempt 2's sole remaining gap): an
+    Azure DevOps 401 raised from a pipeline READ (`get_pipeline_run`,
+    which is token-gated only and never routes through
+    `_require_pipelines_trigger`) must still state that Build is needed
+    for pipeline operations generally — not phrased as conditional on
+    triggering. RED today: `_AZUREDEVOPS_AUTH_HINT` still reads "...also
+    Build if triggering pipelines", so the positive assertion below
+    fails (the operation-scoped phrase is absent) and the negative
+    assertion fails too (the stale trigger-conditional phrase is still
+    present)."""
+    tools = _register_pipelines(
+        monkeypatch, _MockAzureDevOpsProvider401(), "azuredevops",
+    )
+
+    out = tools["get_pipeline_run"](project_id="acme", run_id="678")
+
+    assert "error" in out, f"expected error dict; got: {out}"
+    message = out["error"]
+    assert message.startswith("Azure DevOps 401: 401 Unauthorized")
+    assert "Build for any pipeline operation, read or trigger" in message, (
+        f"expected the operation-scoped Build hint; got: {message!r}"
+    )
+    assert "if triggering pipelines" not in message, (
+        "Build mention must not be conditioned on triggering pipelines "
+        f"any more; got: {message!r}"
     )

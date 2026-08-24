@@ -607,9 +607,9 @@ _GITLAB_AUTH_HINT = (
 _AZUREDEVOPS_AUTH_HINT = (
     "check that the Azure DevOps PAT is present and not expired, and that "
     "it has the scopes this operation needs (Work Items for ticket/field "
-    "operations; also Build if triggering pipelines); call list_projects "
-    "and check this project's token_env / token_available / token_error "
-    "fields"
+    "operations; Build for any pipeline operation, read or trigger); call "
+    "list_projects and check this project's token_env / token_available / "
+    "token_error fields"
 )
 
 

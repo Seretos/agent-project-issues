@@ -108,8 +108,10 @@ def _require_token(project: ProjectConfig) -> str:
 def _require_issues_create(project: ProjectConfig) -> None:
     if not project.permissions.issues.create:
         raise PermissionError(
-            f"project '{project.id}' does not permit creating tickets. "
-            "Tell the user the project is configured without issues.create permission."
+            f"project '{project.id}' does not permit creating tickets: "
+            f"permissions.issues.create is false in {_CONFIG_FILENAME} "
+            f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
+            "from the tools — report it to the user."
         )
 
 
@@ -117,8 +119,9 @@ def _require_issues_modify(project: ProjectConfig) -> None:
     if not project.permissions.issues.modify:
         raise PermissionError(
             f"project '{project.id}' does not permit modifying tickets or "
-            "adding comments. Tell the user the project is configured without "
-            "issues.modify permission."
+            "adding comments: permissions.issues.modify is false in "
+            f"{_CONFIG_FILENAME} (or {_CONFIG_FILENAME_ALT}). This cannot "
+            "be worked around from the tools — report it to the user."
         )
 
 
@@ -128,25 +131,30 @@ def _require_issues_modify(project: ProjectConfig) -> None:
 def _require_pulls_create(project: ProjectConfig) -> None:
     if not project.permissions.pulls.create:
         raise PermissionError(
-            f"project '{project.id}' does not permit creating pull requests. "
-            "Tell the user the project is configured without pulls.create permission."
+            f"project '{project.id}' does not permit creating pull requests: "
+            f"permissions.pulls.create is false in {_CONFIG_FILENAME} "
+            f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
+            "from the tools — report it to the user."
         )
 
 
 def _require_pulls_modify(project: ProjectConfig) -> None:
     if not project.permissions.pulls.modify:
         raise PermissionError(
-            f"project '{project.id}' does not permit modifying pull requests or "
-            "adding PR comments. Tell the user the project is configured without "
-            "pulls.modify permission."
+            f"project '{project.id}' does not permit modifying pull requests "
+            "or adding PR comments: permissions.pulls.modify is false in "
+            f"{_CONFIG_FILENAME} (or {_CONFIG_FILENAME_ALT}). This cannot "
+            "be worked around from the tools — report it to the user."
         )
 
 
 def _require_pulls_merge(project: ProjectConfig) -> None:
     if not project.permissions.pulls.merge:
         raise PermissionError(
-            f"project '{project.id}' does not permit merging pull requests. "
-            "Tell the user the project is configured without pulls.merge permission."
+            f"project '{project.id}' does not permit merging pull requests: "
+            f"permissions.pulls.merge is false in {_CONFIG_FILENAME} "
+            f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
+            "from the tools — report it to the user."
         )
 
 
@@ -156,8 +164,10 @@ def _require_pulls_merge(project: ProjectConfig) -> None:
 def _require_board_manage(project: ProjectConfig) -> None:
     if not project.permissions.board.manage:
         raise PermissionError(
-            f"project '{project.id}' does not permit managing board columns. "
-            "Tell the user the project is configured without board.manage permission."
+            f"project '{project.id}' does not permit managing board columns: "
+            f"permissions.board.manage is false in {_CONFIG_FILENAME} "
+            f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
+            "from the tools — report it to the user."
         )
 
 
@@ -167,8 +177,10 @@ def _require_board_manage(project: ProjectConfig) -> None:
 def _require_pipelines_trigger(project: ProjectConfig) -> None:
     if not project.permissions.pipelines.trigger:
         raise PermissionError(
-            f"project '{project.id}' does not permit triggering pipelines. "
-            "Tell the user the project is configured without pipelines.trigger permission."
+            f"project '{project.id}' does not permit triggering pipelines: "
+            f"permissions.pipelines.trigger is false in {_CONFIG_FILENAME} "
+            f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
+            "from the tools — report it to the user."
         )
 
 
@@ -581,6 +593,37 @@ def _rewrap_azure_unknown_field(exc, *, custom_fields: dict | None):
 # --------- error translation -------------------------------------------------
 
 
+_GITHUB_AUTH_HINT = (
+    "check that the GitHub token is present and not expired, and that it "
+    "has the 'repo' scope (add 'project' scope too if using the board "
+    "tools); call list_projects and check this project's token_env / "
+    "token_available / token_error fields"
+)
+_GITLAB_AUTH_HINT = (
+    "check that the GitLab token is present and not expired, and that it "
+    "has the 'api' scope; call list_projects and check this project's "
+    "token_env / token_available / token_error fields"
+)
+_AZUREDEVOPS_AUTH_HINT = (
+    "check that the Azure DevOps PAT is present and not expired, and that "
+    "it has the scopes this operation needs (Work Items for ticket/field "
+    "operations; Build for any pipeline operation, read or trigger); call "
+    "list_projects and check this project's token_env / token_available / "
+    "token_error fields"
+)
+
+
+def _with_auth_hint(exc, hint: str) -> str:
+    """Return `str(exc)` unchanged unless `exc.status == 401`, in which case
+    append `hint` after an em-dash separator, exactly once."""
+    message = str(exc)
+    if getattr(exc, "status", None) != 401:
+        return message
+    if hint in message:
+        return message
+    return f"{message} — {hint}"
+
+
 def _safe(call):
     """Execute `call()` and translate known errors to a dict with `error`.
 
@@ -596,11 +639,11 @@ def _safe(call):
     except TypeError as exc:
         return {"error": f"provider call rejected its arguments: {exc}"}
     except GitHubError as exc:
-        return {"error": str(exc)}
+        return {"error": _with_auth_hint(exc, _GITHUB_AUTH_HINT)}
     except GitLabError as exc:
-        return {"error": str(exc)}
+        return {"error": _with_auth_hint(exc, _GITLAB_AUTH_HINT)}
     except AzureDevOpsError as exc:
-        return {"error": str(exc)}
+        return {"error": _with_auth_hint(exc, _AZUREDEVOPS_AUTH_HINT)}
     except ProviderError as exc:
         # Catches provider-agnostic lib errors that aren't one of the three
         # concrete provider subclasses above — e.g. `apply_run_filters`'s

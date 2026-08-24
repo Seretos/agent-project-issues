@@ -296,7 +296,26 @@ def test_list_custom_fields_non_404_error_passes_through_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-404 AzureDevOpsError (e.g. 401/500) is not touched by the
-    work-item-type rewrap; it surfaces via the normal _safe translation."""
+    work-item-type rewrap; it surfaces via the normal _safe translation.
+
+    Ticket #266 requirement B (B-azure), as refined by attempt 2's
+    requirement C: a raw 401 additionally picks up `_safe`'s Azure
+    DevOps scope hint, appended after the original message — never
+    substituted for it. The hint is a single fixed module-level constant
+    applied to every Azure DevOps call, so for a non-pipeline endpoint
+    like `list_custom_fields` it must name the scope that is actually
+    relevant here (Work Items) — and, since attempt 2, the Build mention
+    is phrased as covering any pipeline operation (read or trigger)
+    rather than conditioned on "triggering pipelines" specifically,
+    because pipeline READ tools (`list_pipeline_runs`, `get_pipeline_run`,
+    `get_pipeline_step_log`) hit the same `/_apis/build/*` surface
+    without ever going through the trigger-only gate. The GUID assertion
+    below is the pre-existing #182 finding-1 pin and must keep passing
+    unmodified; the new assertions after it are #266's driving coverage
+    for the Azure 401 hint. RED today: `_AZUREDEVOPS_AUTH_HINT` still
+    reads "...also Build if triggering pipelines" — the new
+    operation-scoped Build phrase asserted below is absent, and the
+    stale trigger-conditional phrase is still present."""
     mock = _MockADOProvider404(status=401)
     tools, _ = _register_with_provider(monkeypatch, mock)
 
@@ -306,6 +325,29 @@ def test_list_custom_fields_non_404_error_passes_through_unchanged(
     # The raw (unwrapped) message, including the GUID, passes through since
     # the rewrap only fires on 404.
     assert _ADO_GUID in out["error"]
+
+    # #266 requirement B (B-azure), refined by attempt 2's requirement C:
+    # the Azure hint is appended after the original (GUID-bearing)
+    # message, not substituted for it, and names the scope actually
+    # relevant to this endpoint (Work Items). The Build mention is now
+    # phrased as covering any pipeline operation (read or trigger) since
+    # the hint is one fixed constant shared with the pipeline-read tools
+    # — it is no longer conditioned on "triggering pipelines" specifically.
+    message = out["error"]
+    assert "Work Items" in message, f"expected the Azure 'Work Items' scope hint; got: {message!r}"
+    assert "Build for any pipeline operation, read or trigger" in message, (
+        f"expected the operation-scoped Build hint; got: {message!r}"
+    )
+    assert "if triggering pipelines" not in message, (
+        "Build mention must not be conditioned on triggering pipelines "
+        f"any more; got: {message!r}"
+    )
+    guid_index = message.index(_ADO_GUID)
+    hint_index = message.index("Work Items")
+    assert hint_index > guid_index, (
+        f"expected the hint appended after the original message, not "
+        f"substituted for it; got: {message!r}"
+    )
 
 
 def _param_description(fn: Callable, param: str) -> str:

@@ -1,6 +1,7 @@
 name: tests
 
-# Runs pytest on every push to any branch and on every PR. Distinct from
+# Runs pytest on every pull request. Code only lands on main via PR, so a
+# separate push trigger would just duplicate each PR run. Distinct from
 # release.yml, which is tag-driven and produces the .exe / release zip.
 #
 # Matrix: windows-latest + ubuntu-22.04 (multi-OS T5 / ticket #16).
@@ -9,8 +10,6 @@ name: tests
 # glibc 2.39 (ubuntu-latest today) would produce binaries that fail
 # to start under WSL2-Ubuntu-22.04's glibc 2.35.
 on:
-  push:
-    branches: ["**"]
   pull_request:
 
 permissions:

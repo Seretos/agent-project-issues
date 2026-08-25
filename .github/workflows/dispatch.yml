@@ -14,6 +14,9 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   dispatch:
     runs-on: ubuntu-latest
@@ -55,30 +58,51 @@ jobs:
 
       - name: Dispatch to agent-marketplace
         env:
-          GH_PAT:  ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
-          NAME:    ${{ steps.meta.outputs.name }}
-          DESC:    ${{ steps.meta.outputs.description }}
-          VERSION: ${{ steps.tag.outputs.version }}
-          TAG:     ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PAT:   ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
+          NAME:     ${{ steps.meta.outputs.name }}
+          DESC:     ${{ steps.meta.outputs.description }}
+          VERSION:  ${{ steps.tag.outputs.version }}
+          TAG:      ${{ steps.tag.outputs.tag }}
         shell: bash
         run: |
+          RELEASE_JSON=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body,url ) || RELEASE_JSON=""
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "::warning::failed to read published release body; changelog will be omitted from marketplace dispatch payload"
+          fi
+          BODY=$(printf '%s' "$RELEASE_JSON" | jq -r '.body // ""' 2>/dev/null) || BODY=""
+          URL=$(printf '%s' "$RELEASE_JSON" | jq -r '.url // ""' 2>/dev/null) || URL=""
+          CHANGELOG=$(jq -rn --arg body "$BODY" --arg url "$URL" --argjson max 8000 '("\n\n…truncated — full notes: " + $url) as $suffix | if ($body|length) <= $max then $body else ($body[0:($max - ($suffix|length))] + $suffix) end') || CHANGELOG=""
+          if [ -z "$CHANGELOG" ]; then
+            echo "::warning::changelog is empty; omitting changelog from marketplace dispatch payload"
+          fi
+          PAYLOAD=$(jq -n \
+            --arg name "$NAME" \
+            --arg description "$DESC" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg version "$VERSION" \
+            --arg ref "$TAG" \
+            --arg icon "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$TAG/assets/icon.png" \
+            --arg description_url "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$TAG/description.md" \
+            '{
+              event_type: "plugin-release",
+              client_payload: {
+                name: $name,
+                description: $description,
+                repo: $repo,
+                category: "mcp",
+                tags: ["git", "github", "gitlab", "organisation", "ticket"],
+                version: $version,
+                ref: $ref,
+                icon: $icon,
+                description_url: $description_url
+              }
+            }')
+          if [ -n "$CHANGELOG" ]; then
+            PAYLOAD=$(echo "$PAYLOAD" | jq --arg changelog "$CHANGELOG" '.client_payload.changelog = $changelog')
+          fi
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_PAT" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/Seretos/agent-marketplace/dispatches \
-            -d @- <<EOF
-          {
-            "event_type": "plugin-release",
-            "client_payload": {
-              "name":        "${NAME}",
-              "description": "${DESC}",
-              "repo":        "${{ github.repository }}",
-              "category":    "mcp",
-              "tags":        ["git", "github", "gitlab", "organisation", "ticket"],
-              "version":     "${VERSION}",
-              "ref":         "${TAG}",
-              "icon":            "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
-              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md"
-            }
-          }
-          EOF
+            -d @- <<<"$PAYLOAD"

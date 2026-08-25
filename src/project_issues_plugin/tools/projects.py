@@ -520,7 +520,10 @@ def register(mcp: FastMCP) -> None:
         """Fuzzy-search the available projects by id / description / path.
 
         Use whenever the user names a project naturally ("the mobile
-        app"). Returns up to `limit` matches sorted by relevance.
+        app"). Returns up to `limit` matches sorted by relevance. `limit`
+        must be `>= 1`; `limit < 1` returns
+        `{"error": "limit must be a positive integer, got <limit>"}`
+        without loading or scoring any projects.
 
         **Query behavior:**
           - Empty or whitespace-only query returns **all** projects
@@ -561,7 +564,19 @@ def register(mcp: FastMCP) -> None:
         For a plain "does project X exist?" check, prefer an exact-id
         comparison (or enumerate via `list_projects`) instead of relying
         on `matches` being empty or non-empty — even `"weak"` matches are
-        included in `matches` (see the `score` footnote below).
+        included in `matches` (see the `score` footnote below). If you do
+        use `matches` for an existence check, filter out results where
+        `match_confidence == "weak"` first — they are not reliable
+        evidence the project exists.
+
+        Case sensitivity: the `id` matched/returned here is
+        **case-insensitive** (e.g. querying `"ACME"` matches a project
+        whose id is `"acme"`). This is the opposite of `project_id` on
+        every other tool (`list_releases`, `get_ticket`, and anything
+        else resolved via `_resolve`), which is exact and
+        **case-sensitive**. Always pass the `id` value from a
+        `search_projects` match on to other tools verbatim, exactly as
+        reported — do not re-case it.
 
         *Footnote — raw `score` thresholds (superseded by
         `match_confidence` above, kept for reference):* higher is more
@@ -612,6 +627,8 @@ def register(mcp: FastMCP) -> None:
             project cheaply without ranking.
           - `fields="full"` (default): full behaviour as described above.
         """
+        if limit < 1:
+            return {"error": f"limit must be a positive integer, got {limit}"}
         result = load_projects(
             config_filename="projects.yml",
             config_filename_alt="projects.yaml",
@@ -621,7 +638,6 @@ def register(mcp: FastMCP) -> None:
             "was capped by the lib. To raise the cap, a future lib-side "
             "limit parameter will be required."
         ) if result.discovery_truncated else None
-        cap = max(1, limit)
         q_trimmed = (query or "").strip()
         if fields == "light":
             if not q_trimmed:
@@ -629,7 +645,7 @@ def register(mcp: FastMCP) -> None:
                 total = len(sorted_projects)
                 results = [
                     {**_project_to_light(p), "score": 0, "match_confidence": None}
-                    for p in sorted_projects[:cap]
+                    for p in sorted_projects[:limit]
                 ]
             else:
                 scored_light: list[tuple[int, MatchConfidence | None, ProjectConfig]] = []
@@ -641,9 +657,9 @@ def register(mcp: FastMCP) -> None:
                 total = len(scored_light)
                 results = [
                     {**_project_to_light(p), "score": s, "match_confidence": conf}
-                    for s, conf, p in scored_light[:cap]
+                    for s, conf, p in scored_light[:limit]
                 ]
-            truncated = total > cap
+            truncated = total > limit
             hint = _discovery_truncated_hint or _STATE_HINTS.get(result.state)
             if not _discovery_truncated_hint:
                 if result.state == "ok" and not results and q_trimmed:
@@ -669,7 +685,7 @@ def register(mcp: FastMCP) -> None:
             total = len(sorted_projects)
             results = [
                 {**_project_to_dict(p), "score": 0, "match_confidence": None}
-                for p in sorted_projects[:cap]
+                for p in sorted_projects[:limit]
             ]
         else:
             scored: list[tuple[int, MatchConfidence | None, ProjectConfig]] = []
@@ -681,9 +697,9 @@ def register(mcp: FastMCP) -> None:
             total = len(scored)
             results = [
                 {**_project_to_dict(p), "score": s, "match_confidence": conf}
-                for s, conf, p in scored[:cap]
+                for s, conf, p in scored[:limit]
             ]
-        truncated = total > cap
+        truncated = total > limit
         # When the config loaded fine but nothing matched the query,
         # the global `_STATE_HINTS["ok"]` is None (no hint is right for
         # `list_projects` in the ok case). Override locally so the agent

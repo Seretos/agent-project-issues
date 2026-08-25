@@ -649,7 +649,11 @@ def register(mcp: FastMCP) -> None:
     def merge_pr(
         project_id: str,
         pr_id: str,
-        merge_method: Literal["merge", "squash", "rebase"] = "merge",
+        # Plain `str` (not Literal) so the tool-layer guard below can
+        # produce a friendly error instead of pydantic's generic
+        # literal_error wall-of-text — mirrors `update_pr.status` /
+        # `submit_pr_review.state` in this same file.
+        merge_method: Annotated[str, Field(description="One of: 'merge', 'squash', 'rebase'. Lowercase only. Kept as str (not Literal) so invalid values return a friendly error rather than a Pydantic literal_error.")] = "merge",
         commit_title: str | None = None,
         commit_message: str | None = None,
     ) -> dict:
@@ -663,6 +667,9 @@ def register(mcp: FastMCP) -> None:
             here because its rebase flow is a separate endpoint
             (PUT .../rebase) that does not itself merge — call rebase
             first, then merge with "merge".
+
+        An unrecognised `merge_method` returns `{"error": ...}` without
+        making any HTTP call.
 
         `commit_title` / `commit_message` are forwarded as the merge
         commit's title and body. GitLab has no separate title/body
@@ -685,6 +692,14 @@ def register(mcp: FastMCP) -> None:
         fields such as `merged`, `status`, and `merge_commit_sha`;
         reviewer/assignee collections are left untouched by the merge.
         """
+        if merge_method not in ("merge", "squash", "rebase"):
+            return {
+                "error": (
+                    f"merge_method must be one of: merge, squash, rebase; "
+                    f"got {merge_method!r}"
+                )
+            }
+
         def go() -> dict:
             project = _resolve(project_id)
             _require_pulls_merge(project)

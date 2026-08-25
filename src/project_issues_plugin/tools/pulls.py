@@ -500,6 +500,11 @@ def register(mcp: FastMCP) -> None:
         Body is marker-prefixed automatically. Requires the project's
         `pulls.modify` permission. To post a discussion-level comment
         (not anchored to a diff line), use `add_pr_comment` instead.
+
+        There is no separate review permission flag: reviewing is
+        treated as modifying the PR; no separate review flag exists,
+        so this uses the same `pulls.modify` gate as `update_pr` and
+        `add_pr_comment`.
         """
         new_thread = (path is not None) or (line is not None) or (
             commit_sha is not None
@@ -609,6 +614,12 @@ def register(mcp: FastMCP) -> None:
         The review body is marker-prefixed automatically — callers
         should NOT prepend `#ai-generated` themselves. Requires the
         project's `pulls.modify` permission.
+
+        On Azure DevOps, `pulls.modify` is what authorises casting the
+        reviewer vote described above: reviewing is treated as
+        modifying the PR; no separate review flag exists, so casting a
+        vote via this tool is gated the same way as `update_pr` and
+        `add_pr_comment`.
         """
         if state not in ("approve", "request_changes", "comment"):
             return {

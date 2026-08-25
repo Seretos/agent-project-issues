@@ -141,10 +141,11 @@ def _require_pulls_create(project: ProjectConfig) -> None:
 def _require_pulls_modify(project: ProjectConfig) -> None:
     if not project.permissions.pulls.modify:
         raise PermissionError(
-            f"project '{project.id}' does not permit modifying pull requests "
-            "or adding PR comments: permissions.pulls.modify is false in "
-            f"{_CONFIG_FILENAME} (or {_CONFIG_FILENAME_ALT}). This cannot "
-            "be worked around from the tools — report it to the user."
+            f"project '{project.id}' does not permit modifying pull requests, "
+            "adding PR comments, or submitting reviews/votes: "
+            f"permissions.pulls.modify is false in {_CONFIG_FILENAME} "
+            f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
+            "from the tools — report it to the user."
         )
 
 

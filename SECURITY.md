@@ -29,16 +29,22 @@ scope of the API tokens they configure.
 
 ## Permission gating
 
-Every write tool in `tools/tickets.py` enforces project permissions **before**
-making any HTTP call:
+Every ticket and pull-request write tool enforces project permissions
+**before** making any HTTP call:
 
-| Tool             | Gate                                |
-| ---------------- | ----------------------------------- |
+| Tool                     | Gate                                |
+| ------------------------ | ----------------------------------- |
 | `create_ticket`  | `permissions.create == true` AND token available |
 | `update_ticket`  | `permissions.modify == true` AND token available |
 | `add_comment`    | `permissions.modify == true` AND token available |
 | `list_tickets`   | read-only — no gate                 |
 | `get_ticket`     | read-only — no gate                 |
+| `create_pr`              | `permissions.pulls.create == true` AND token available |
+| `update_pr`              | `permissions.pulls.modify == true` AND token available |
+| `add_pr_comment`         | `permissions.pulls.modify == true` AND token available |
+| `add_pr_review_comment`  | `permissions.pulls.modify == true` AND token available |
+| `submit_pr_review`       | `permissions.pulls.modify == true` AND token available |
+| `merge_pr`               | `permissions.pulls.merge == true` AND token available |
 
 The permission flags on any project determine what the agent may do. How those
 flags are populated depends on the project's source:

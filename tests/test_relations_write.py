@@ -26,7 +26,7 @@ from lib_python_projects.providers import github as github_provider
 from lib_python_projects.providers import gitlab as gitlab_provider
 from lib_python_projects.providers.base import RelationKindUnsupported, RelationNotFound
 from lib_python_projects.providers.github import GitHubProvider
-from lib_python_projects.providers.gitlab import GitLabProvider
+from lib_python_projects.providers.gitlab import GitLabError, GitLabProvider
 
 
 # ---------- helpers ----------------------------------------------------------
@@ -687,9 +687,22 @@ def test_gitlab_add_relation_parent_not_found_raises(
 ) -> None:
     """When either side of the edge can't be resolved to a work item
     (e.g. the mock/real project has no matching iid), `add_relation`
-    raises `RelationNotFound` rather than silently no-op'ing."""
+    raises rather than silently no-op'ing.
+
+    A GraphQL response with no `project` key (as mocked here) means the
+    project itself didn't resolve. As of lib-python-projects v0.3.13,
+    `_gitlab_fetch_work_item(..., require_project=True)` distinguishes
+    that case from a missing-iid-within-an-existing-project case and
+    raises `GitLabError(404, "project '<id>' not found")` directly
+    instead of the provider-agnostic `RelationNotFound` — so the
+    tool-facing message can't be mistaken for the canonical `ticket
+    '...' not found` shape. This is a lib-owned exception type/message
+    change; the MCP `add_relation` tool's `_safe` wrapper
+    (`tools/_providers.py`) still catches `GitLabError` generically (same
+    as it caught `RelationNotFound`) and turns it into `{"error": ...}`,
+    so the production tool-call path is unaffected."""
     _install_gitlab_mock(monkeypatch, lambda r: _json({}, 200))
-    with pytest.raises(RelationNotFound):
+    with pytest.raises(GitLabError, match="project 'acme' not found"):
         GitLabProvider().add_relation(
             _gitlab_project(), "tok", "5", "parent", "#7",
         )

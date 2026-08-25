@@ -10,6 +10,7 @@ Provider color format notes:
     Defaults to ``"ededed"`` when omitted on create.
   - **GitLab**: `color` is `#RRGGBB` (e.g. ``"#ff0000"``); bare 6-hex
     like ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
+    Validated locally before the API call.
   - **Azure DevOps**: `color` is always empty — the provider uses implicit
     tag-style labels with no color or description support.  `create_label`,
     `update_label`, and `delete_label` on Azure DevOps will always return
@@ -41,6 +42,28 @@ from project_issues_plugin.tools._providers import (
 # GitHub label colors are a bare 6-digit hex string (no leading '#').
 _GITHUB_HEX_COLOR = re.compile(r"^[0-9a-fA-F]{6}$")
 
+# GitLab label colors are '#RRGGBB' (optional leading '#'), 6 hex digits
+# only. Hex-only by explicit design decision — GitLab's real API was
+# checked for CSS colour-name support and none was found in the installed
+# provider; do not add colour-name handling here.
+#
+# 3-digit shorthand (e.g. "#fff") is deliberately NOT accepted, even though
+# the ticket's original gatekeeper clarification asked for a "3-or-6 hex
+# digit" rule to "avoid a regression on '#fff'-style calls that work
+# today". Investigated post-review (round 2): the installed
+# lib-python-projects GitLab provider's `_normalize_gitlab_color` helper
+# (lib_python_projects/providers/gitlab.py) only prepends a missing '#' —
+# it does not expand 3-digit shorthand to 6-digit, and its own docstring
+# states the *required* wire form is `#RRGGBB` (6 digit). No test or code
+# in this repo predating #265 exercises a 3-digit GitLab color either, so
+# there is no evidence any "#fff"-style call "works today" against the
+# real API. Accepting 3-digit shorthand here would therefore let a caller
+# pass local validation and still hit a raw, unhinted GitLab API error —
+# exactly the failure mode this ticket exists to close (reviewer finding,
+# round 2). 6-digit-only satisfies the gatekeeper's underlying goal even
+# though it deviates from the literal "3-or-6" wording.
+_GITLAB_HEX_COLOR = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
 
 def _validate_label_name(name: str) -> None:
     """Reject an empty/whitespace label name before the provider does.
@@ -67,6 +90,23 @@ def _validate_github_color(color: str) -> None:
         raise ValueError(
             f"color must be a 6-digit hex string without '#' "
             f"(e.g. 'ededed') on GitHub; got {color!r}"
+        )
+
+
+def _validate_gitlab_color(color: str) -> None:
+    """Reject a malformed GitLab label color before the provider does.
+
+    GitLab wants ``#RRGGBB`` (optional leading ``#``, 6 hex digits).
+    A wrong value otherwise surfaces as a raw GitLab API error with no
+    format hint; this restates the documented rule the caller can act
+    on. Only applied to the GitLab provider — GitHub (bare 6-hex) and
+    Azure DevOps have their own handling. Hex-only; no implicit
+    trimming of whitespace.
+    """
+    if not _GITLAB_HEX_COLOR.match(color):
+        raise ValueError(
+            f"color must be a hex string like '#ff0000' on GitLab; "
+            f"got {color!r}"
         )
 
 
@@ -118,7 +158,7 @@ def register(mcp: FastMCP) -> None:
     def create_label(
         project_id: str,
         name: str,
-        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB'. Azure DevOps: ignored (tags have no color concept).")] = None,
+        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB' — validated locally before the API call. Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
     ) -> dict:
         """Create a new label in the project's repository.
@@ -129,9 +169,11 @@ def register(mcp: FastMCP) -> None:
 
         `color` format is provider-specific:
           - GitHub: 6-hex string *without* ``#`` (e.g. ``"ededed"``).
-            Omit to use the GitHub default (``"ededed"``).
+            Omit to use the GitHub default (``"ededed"``). Validated
+            locally before the API call.
           - GitLab: ``#RRGGBB`` (e.g. ``"#ff0000"``); bare 6-hex like
             ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
+            Validated locally before the API call.
           - Azure DevOps: label creation is not supported — returns
             ``{"error": "..."}`` containing "not supported".
 
@@ -165,6 +207,8 @@ def register(mcp: FastMCP) -> None:
             _validate_label_name(name)
             if color is not None and project.provider == "github":
                 _validate_github_color(color)
+            elif color is not None and project.provider == "gitlab":
+                _validate_gitlab_color(color)
             label = provider.create_label(
                 project, token, name, color=color, description=description,
             )
@@ -179,7 +223,7 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         name: Annotated[str, Field(description="Name of the label to look up (lookup key only — never mutated by this call). To rename the label, supply `new_name`.")],
         new_name: Annotated[str | None, Field(description="New name for the label (renames it). Leave unset to keep the current name.")] = None,
-        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB'. Azure DevOps: ignored (tags have no color concept).")] = None,
+        color: Annotated[str | None, Field(description="Label color. GitHub: bare 6-digit hex without '#' (e.g. 'ededed') — validated locally before the API call. GitLab: '#RRGGBB' (e.g. '#ff0000'); bare 6-hex like 'ff00ff' is also accepted and normalized to '#RRGGBB' — validated locally before the API call. Azure DevOps: ignored (tags have no color concept).")] = None,
         description: str | None = None,
     ) -> dict:
         """Rename or recolour an existing label.
@@ -225,6 +269,8 @@ def register(mcp: FastMCP) -> None:
                 _validate_label_name(new_name)
             if color is not None and project.provider == "github":
                 _validate_github_color(color)
+            elif color is not None and project.provider == "gitlab":
+                _validate_gitlab_color(color)
             try:
                 label = provider.update_label(
                     project, token, name,

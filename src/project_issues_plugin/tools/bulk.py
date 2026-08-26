@@ -2,8 +2,11 @@
 
 Read-only: like the other list/get tools, only requires a token per
 project when the underlying repo is private. Errors on one project never
-abort the call — each failure is surfaced both in the per-project entry
-of `results` and in a top-level `errors` list.
+abort the call — isolation covers every provider's errors (GitHub,
+GitLab, Azure DevOps, and bare lib-raised `ProviderError`s), not just
+GitHub's. Each failure is surfaced both in the per-project entry of
+`results` and in a top-level `errors` list; a 401 entry carries the same
+provider-specific scope hint a single-project tool returns via `_safe`.
 
 Shared scaffolding (`_PROVIDERS`, `_provider_for`, `_safe`) lives in
 `tools/_providers.py`. Bulk has its own `_resolve_local` because it
@@ -18,10 +21,41 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 from lib_python_projects import ProjectConfig, load_projects, resolve_token
-from lib_python_projects.providers.base import TicketFilters
+from lib_python_projects.providers.azuredevops import AzureDevOpsError
+from lib_python_projects.providers.base import ProviderError, TicketFilters
 from lib_python_projects.providers.github import GitHubError
-from project_issues_plugin.tools._providers import _provider_for
+from lib_python_projects.providers.gitlab import GitLabError
+from project_issues_plugin.tools._providers import (
+    _AZUREDEVOPS_AUTH_HINT,
+    _GITHUB_AUTH_HINT,
+    _GITLAB_AUTH_HINT,
+    _provider_for,
+    _with_auth_hint,
+)
 from project_issues_plugin.tools._slicing import apply_body_knobs
+
+# Dispatch table for R2: a bulk-loop 401 gets the same provider-specific
+# scope hint `_safe` already attaches for single-project tools. Ordered
+# by concrete subclass; a bare `ProviderError` (no subclass match) falls
+# through to `_error_message`'s `str(exc)` default, matching `_safe`'s
+# own bare-`ProviderError` branch (`_providers.py:648-654`), which also
+# adds no hint.
+_PROVIDER_AUTH_HINTS = (
+    (GitHubError, _GITHUB_AUTH_HINT),
+    (GitLabError, _GITLAB_AUTH_HINT),
+    (AzureDevOpsError, _AZUREDEVOPS_AUTH_HINT),
+)
+
+
+def _error_message(exc: Exception) -> str:
+    """Return the bulk-loop error message for `exc`, with the same
+    provider-specific 401 scope hint `_safe` attaches for single-project
+    tools. Non-provider errors and non-401 provider errors keep a
+    byte-identical `str(exc)` message."""
+    for exc_type, hint in _PROVIDER_AUTH_HINTS:
+        if isinstance(exc, exc_type):
+            return _with_auth_hint(exc, hint)
+    return str(exc)
 
 
 def _resolve_local(project_id: str, projects: list[ProjectConfig]) -> ProjectConfig:
@@ -103,6 +137,13 @@ def register(mcp: FastMCP) -> None:
         `project_count` is the number of projects attempted including
         failed ones.
 
+        That duplication (the same error string in both
+        `results[project_id]["error"]` and the top-level `errors` list)
+        is intentional, by design: `errors` is a flat index for scanning
+        every failure at once, while `results` keeps the error beside
+        that project's own rows. If you iterate both, deduplicate
+        client-side.
+
         Each per-project result carries `has_more: bool` from the
         provider's pagination header, indicating whether additional
         pages are available beyond `limit_per_project`.
@@ -161,8 +202,8 @@ def register(mcp: FastMCP) -> None:
                     "error": None,
                 }
                 total_tickets += len(ticket_dicts)
-            except (LookupError, PermissionError, NotImplementedError, ValueError, GitHubError) as exc:
-                msg = str(exc)
+            except (LookupError, PermissionError, NotImplementedError, ValueError, ProviderError) as exc:
+                msg = _error_message(exc)
                 results[pid] = {"tickets": [], "has_more": False, "error": msg}
                 errors.append({"project_id": pid, "error": msg})
 

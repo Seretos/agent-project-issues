@@ -286,6 +286,12 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Get a ticket's full details, including all comments and relations.
 
+        Relation kinds: `parent`, `child`, `closes`, `closed_by`,
+        `mentions`, `mentioned_by`, `duplicate_of`, `duplicated_by`
+        (GitHub + GitLab + Azure DevOps), `blocks`, `blocked_by`
+        (GitHub + Azure DevOps), plus `relates_to` (GitLab + Azure
+        DevOps) — see `relations` below for the full shape.
+
         The `ticket` object always carries `acceptance_criteria` (`str`,
         `""` when the provider has none — Azure DevOps'
         `Microsoft.VSTS.Common.AcceptanceCriteria`; always empty on
@@ -294,37 +300,28 @@ def register(mcp: FastMCP) -> None:
         acceptance criteria without a separate call.
 
         Set `include_custom_fields=True` to also populate
-        `ticket.custom_fields` (`dict | None`, omitted from the response
-        as `None` when not requested or not applicable). Semantics are
-        provider-specific:
+        `ticket.custom_fields` (`dict | None`, omitted as `None` when
+        not requested/applicable). Provider-specific:
           - **Azure DevOps**: the entire raw work-item `fields` dict
-            (every `System.*` field plus custom field references),
-            keyed by provider-native field reference names — no extra
-            HTTP request. This is not limited to custom/picklist
-            fields: it also carries **identity/PII fields** verbatim,
-            e.g. `System.CreatedBy` / `System.ChangedBy` (display
-            name, unique name/email, and avatar URL of the author and
-            last editor). Filter these out client-side if you don't
-            want to expose them.
-          - **GitHub**: values from the project's `github-projects-v2`
-            board binding (`project.board.binding` in `projects.yml`).
-            No board binding configured → `custom_fields` stays `None`
-            ("not applicable", not an error). Binding configured but the
-            issue has no board item → `custom_fields = {}`.
-          - **GitLab**: two fixed keys, `"labels"` (the issue's label
-            list) and `"milestone"` (the milestone title, or `None`).
-          Call `list_custom_fields(project_id)` first to discover the
-          field reference names / allowed values this feeds into
-          `create_ticket`'s and `update_ticket`'s `custom_fields`
-          parameter.
+            (every `System.*` plus custom refs), keyed by field
+            reference name — no extra HTTP request. Also carries
+            **identity/PII fields** verbatim, e.g. `System.CreatedBy` /
+            `System.ChangedBy` (author/editor display name, unique
+            name/email, avatar URL). Filter these client-side if you
+            don't want to expose them.
+          - **GitHub**: values from `project.board.binding` in
+            `projects.yml`. No binding → `custom_fields` stays `None`;
+            binding but no board item → `custom_fields = {}`.
+          - **GitLab**: two fixed keys, `"labels"` and `"milestone"`
+            (title, or `None`).
+          Call `list_custom_fields(project_id)` first to discover field
+          references/values for `create_ticket`'s and `update_ticket`'s
+          `custom_fields` parameter.
 
         When `include_relations` is True (default), the response also
         includes a `relations` list describing typed links to other
-        tickets / PRs. Relation kinds: `parent`, `child`, `closes`,
-        `closed_by`, `mentions`, `mentioned_by`, `duplicate_of`,
-        `duplicated_by` (GitHub + GitLab + Azure DevOps), `blocks`,
-        `blocked_by` (GitHub + Azure DevOps), plus `relates_to`
-        (GitLab + Azure DevOps). Each relation carries
+        tickets / PRs (see the relation kinds named above). Each
+        relation carries
         `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo)
         — the **other/linked** ticket's id, distinct from this tool's own
         `ticket_id` argument, which selects the ticket being queried —
@@ -334,64 +331,53 @@ def register(mcp: FastMCP) -> None:
         (`mentions`, `closes`, `duplicate_of`) we don't fetch the target,
         so `title` may be empty and `state` may be `""`.
 
-        Each relation carries `resolved` (`bool | null`), which records
-        HOW the relation's metadata was obtained — it is NOT a flag for
-        whether the linked ticket is closed:
-          - `true`  — the target was fetched live from the provider, so
-            `title` / `url` / `state` are populated and current.
-          - `false` — the relation was inferred from body / text, so
-            empty `title` / `url` / `state` are expected. Empty here
-            means "intentionally not fetched", NOT "fetch failed".
-          - `null`  — liveness is unknown (the provider didn't signal).
-        So a body-parsed `duplicate_of` reading `resolved: false,
-        state: ""` is the normal, complete answer — do not retry it as
-        if the lookup had failed.
-        The boolean `relations_truncated` is true when the underlying
-        timeline had more pages than we fetched. The comment-scan depth
-        for `mentions` / `closes` is controlled by the
-        `PROJECT_ISSUES_MENTIONS_SCAN_DEPTH` env var (`-1` = all comments,
-        `0` = body only, `N` = first N comments).
-        Set `include_relations=False` to save two API calls per request
-        when relation context is not needed.
+        Each relation carries `resolved` (`bool | null`), recording HOW
+        its metadata was obtained — NOT whether the linked ticket is
+        closed:
+          - `true` — fetched live from the provider; `title`/`url`/
+            `state` are populated and current.
+          - `false` — inferred from body/text; empty `title`/`url`/
+            `state` means "intentionally not fetched", NOT
+            "fetch failed".
+          - `null` — liveness unknown (provider didn't signal).
+        A body-parsed `duplicate_of` reading `resolved: false,
+        state: ""` is the normal, complete answer — don't retry it as
+        a failure.
+        `relations_truncated` (bool) is true when the timeline had more
+        pages than fetched. Comment-scan depth for `mentions`/`closes`
+        is set by `PROJECT_ISSUES_MENTIONS_SCAN_DEPTH` (`-1` = all,
+        `0` = body only, `N` = first N comments). Set
+        `include_relations=False` to skip two API calls when relations
+        aren't needed.
 
         Comment-slicing knobs:
-          - `include_comments=False`: canonical "header-only" flag —
-            omits the `comments` key from the response entirely and
-            emits `comments_fetched: false`. Use when you only need
-            the ticket header. `comments_limit=0` is an alias for
-            this flag (not the reverse).
-          - `comments_limit=N`: cap the returned comments to N. Combined
-            with `comments_order="desc"` gives the last N comments.
-            `comments_limit=0` is an alias for `include_comments=False`.
-          - `comments_order="asc"|"desc"`: reverse the comments list.
-            `desc` returns newest-first; pair with `comments_limit=N`
-            for the "give me the most recent N" recipe.
+          - `include_comments=False`: "header-only" flag — omits
+            `comments` entirely, emits `comments_fetched: false`.
+            `comments_limit=0` is an alias (not the reverse).
+          - `comments_limit=N`: cap returned comments to N; combine
+            with `comments_order="desc"` for the last N.
+            `comments_limit=0` aliases `include_comments=False`.
+          - `comments_order="asc"|"desc"`: reverse the list; `desc` is
+            newest-first, pair with `comments_limit=N` for "most
+            recent N".
           - `comments_body_max_chars=N`: truncate each comment body to
-            N chars and add `body_truncated: bool`. Highest-leverage
-            saving for dense threads. **Unbounded by default** — dense
-            threads can produce very large payloads; recommend e.g.
-            `comments_body_max_chars=500` for summary reads.
-            `comments_body_max_chars=N` measures N chars of content after
-            the `#ai-generated`/`#ai-modified` marker prefix (if present),
-            so the total stored body may be up to ~15 chars longer than N.
+            N chars, add `body_truncated: bool`. **Unbounded by
+            default** — recommend e.g. `=500` for summary reads.
+            Measured after the `#ai-generated`/`#ai-modified` marker
+            (if present), so body may run up to ~15 chars longer than N.
 
-        When comments are fetched, the response includes
-        `comments_fetched: true` alongside the `comments` list.
-        When skipped (via `include_comments=False` or
-        `comments_limit=0`), the `comments` key is absent and
-        `comments_fetched: false` is emitted instead. The
-        `comments_fetched: false` key is present even when the caller
-        explicitly opted out via `include_comments=False` — an
+        `comments_fetched: true` accompanies a fetched `comments` list;
+        when skipped (`include_comments=False` or `comments_limit=0`),
+        `comments` is absent and `comments_fetched: false` is emitted
+        instead — present even on an explicit opt-out, as an
         intentional confirmation signal, not an oversight.
 
-        When `include_relations=False` (or the provider skips the
-        relation fetch), the `relations` and `relations_truncated` keys
-        are absent and `relations_fetched: false` is emitted. When
-        `include_relations=True` (default), `relations_fetched: true`
-        is present alongside the `relations` list. The
-        `relations_fetched: false` key is present even when the caller
-        explicitly opted out via `include_relations=False` — an
-        intentional confirmation signal, not an oversight.
+        Likewise `relations_fetched: true` accompanies the `relations`
+        list when `include_relations=True` (default); when
+        `include_relations=False` (or the provider skips the fetch),
+        `relations`/`relations_truncated` are absent and
+        `relations_fetched: false` is emitted instead — the same
+        intentional-confirmation-signal guarantee applies.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -512,23 +498,26 @@ def register(mcp: FastMCP) -> None:
         always provide more detail if they want it; one-shot create
         actions stay one-shot.
 
+        `status` is optional; when supplied, pass a value exactly as
+        returned by `list_ticket_statuses` — the same vocabulary
+        `update_ticket.status` accepts. Do not normalise casing or
+        whitespace.
+
         The label `ai-generated` is added automatically by the server.
         Do not pass it yourself.
 
-        `body` is optional. When omitted, the ticket is created with an
-        empty body. Provide it when the user has supplied a description.
-        `body` must contain real newline characters (U+000A), not the
-        two-character literal sequence `\n`; the server performs no
-        escape-sequence normalisation.
+        `body` is optional (empty by default) — provide it when the
+        user has supplied a description. Use real newline characters
+        (U+000A), not the two-character literal `\n` escape; the server
+        performs no escape-sequence normalisation.
 
         The server also prepends `#ai-generated\n\n` to the body
         automatically. Do not prepend it yourself; if you do, the marker
         is deduplicated (no stacking).
 
-        `labels` sets the initial label set as a flat list on creation.
-        To add or remove labels on an existing ticket after creation,
-        use `update_ticket`'s `labels_add` / `labels_remove` parameters
-        instead.
+        `labels` sets the initial label set on creation; use
+        `update_ticket`'s `labels_add` / `labels_remove` parameters
+        instead to change labels afterward.
 
         Label catalog requirement: on GitHub every name in `labels`
         must already exist in the repository's label catalog —
@@ -543,17 +532,13 @@ def register(mcp: FastMCP) -> None:
         GitLab too — a different status than GitHub's 422, but an
         error either way.
 
-        `status` is optional. When omitted, the ticket lands in the
-        project's `hints.default_open` state (the normal case). When
-        supplied, it must be a value from the provider's state-space —
-        the same vocabulary `update_ticket.status` accepts. Pass the
-        value exactly as returned by `list_ticket_statuses` — do not
-        normalise casing or whitespace. Use this when importing
-        already-resolved tickets or filing documentation tickets that
-        should be born closed, instead of a two-step create-then-close
-        that emits a spurious `opened → closed` pair in the timeline.
-        Unknown values raise the same error type as `update_ticket`
-        with a hint to call `list_ticket_statuses`.
+        `status`, when omitted, lands the ticket in the project's
+        `hints.default_open` state (the normal case). Use it when
+        importing already-resolved tickets or filing documentation
+        tickets that should be born closed, instead of a two-step
+        create-then-close that emits a spurious `opened → closed` pair
+        in the timeline. Unknown values raise the same error type as
+        `update_ticket` with a hint to call `list_ticket_statuses`.
 
         `custom_fields` sets provider-specific fields (or board-column
         values) at creation time — see the parameter description for
@@ -928,40 +913,34 @@ def register(mcp: FastMCP) -> None:
     def list_custom_fields(project_id: str, work_item_type: str | None = None) -> dict:
         """Discover provider-native custom and work-item fields.
 
+        Each field row carries `reference_name` (provider-native id,
+        e.g. `System.State`), `display_name`, `type`, `allowed_values`
+        (`null` when free-form), `read_only`, `always_required`.
+
         Returns the structured field schema for the project's provider.
-        Azure DevOps is the primary use case — it exposes a rich schema
-        with typed fields, picklist constraints, and per-work-item-type
-        scoping. GitHub and GitLab have no structured field schema and
-        always return `"fields": []` (not an error — it is a stable fact
-        about those providers, not "unsupported" or "retry later").
-        Because GitHub exposes no field schema, the board write-key is
-        not discoverable here: to set a GitHub board column, call
-        `create_ticket`/`update_ticket` with
-        `custom_fields={"Status": <native>}`, where `<native>` comes
-        from `list_board_columns`.
+        Azure DevOps is the primary use case (rich schema: typed fields,
+        picklist constraints, per-work-item-type scoping). GitHub/GitLab
+        have no structured schema and always return `"fields": []` (a
+        stable fact, not "unsupported"/"retry later"). GitHub's board
+        write-key is not discoverable here — set it via
+        `create_ticket`/`update_ticket`'s `custom_fields={"Status":
+        <native>}`, with `<native>` from `list_board_columns`.
 
-        The `work_item_type` parameter optionally scopes the field set to
-        a specific Azure DevOps work-item type (e.g. `"Task"`, `"Issue"`).
-        When omitted the provider returns all fields across all types.
-        It is silently ignored by GitHub and GitLab. Valid work-item
-        type names vary by process template — not every template ships
-        the same types — so call with `work_item_type=None` first to
-        discover which types exist before scoping to one.
+        `work_item_type` optionally scopes the field set to a specific
+        Azure DevOps work-item type (e.g. `"Task"`, `"Issue"`); omitted
+        returns all types, silently ignored by GitHub/GitLab. Valid
+        type names vary by process template, so call with
+        `work_item_type=None` first to discover which types exist.
 
-        Azure DevOps caveat: when two configured projects map to the same
-        underlying Azure DevOps Team Project, this call returns identical
-        area-path and iteration-path `allowed_values` for both — prefixed
-        with only the *first* configured project's name — because
-        `project_id` granularity here is coarser than the area/iteration
-        path hierarchy. An `area_path` value copied from one project's
-        `allowed_values` and used to filter the other project can 404;
-        this is correct Azure DevOps behavior (shared Team Project), not
-        a bug in this tool.
+        Azure DevOps caveat: two projects mapping to the same shared Team
+        Project get identical area-path/iteration-path `allowed_values`,
+        prefixed with only the *first* project's name (`project_id` is
+        coarser than the path hierarchy). An `area_path` value copied
+        from one project's `allowed_values` can 404 on the other —
+        that's correct behavior, not a bug.
 
-        The `reference_name` and `allowed_values` values returned here
-        feed directly into `update_ticket`'s `custom_fields` parameter —
-        call this tool first to discover valid field references and their
-        allowed picklist values before setting them.
+        `reference_name`/`allowed_values` feed `update_ticket`'s
+        `custom_fields` — call this first to discover valid values.
 
         Returns:
 

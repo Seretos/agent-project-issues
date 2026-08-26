@@ -678,6 +678,7 @@ __all__ = [
     "_rewrap_azure_single_parent",
     "_rewrap_azure_unknown_field",
     "_safe",
+    "_with_auth_hint",
     "load_projects",
     "resolve_token",
 ]

@@ -64,47 +64,44 @@ def register(mcp: FastMCP) -> None:
         """List pull requests in a project. Default: open PRs, limit 30.
 
         `mergeable` / `mergeable_state` are `null` on the default fast
-        path — GitHub's `/repos/.../pulls` list endpoint does not
-        compute them. They ARE populated when `labels`, `assignee`, or
-        `search` route the call through GitHub's Search API back-fill
-        (see the routing caveat below), and on GitLab / Azure DevOps
-        list results. Treat `null` here as "not computed on this path",
-        not "not mergeable" — use `get_pr` for an authoritative answer.
+        path — GitHub's `/repos/.../pulls` doesn't compute them. They
+        ARE populated when `labels`, `assignee`, or `search` route the
+        call through GitHub's Search API back-fill (see the routing
+        caveat below), and on GitLab / Azure DevOps list results.
+        `null` here means "not computed on this path", not "not
+        mergeable" — use `get_pr` for an authoritative answer.
 
         Routing caveat: `labels`, `assignee`, or `search` switch the
         provider from the cheap `/repos/.../pulls` endpoint to GitHub's
-        Search API (`/search/issues`, `is:pr` qualifier), which has its
-        own rate-limit bucket (30 req/min). The default path stays on
-        the cheap endpoint.
+        Search API (`/search/issues`, `is:pr`), rate-limited separately
+        (30 req/min). The default path stays on the cheap endpoint.
 
         Filter args:
-          - `status`: "open" (default), "closed", or "any". `"closed"`
-            includes merged PRs (`merged: true`). There is no
-            `"merged"` filter value; for closed-but-not-merged only,
-            request `"closed"` and drop rows where `merged` is true.
-          - `labels`: only PRs carrying ALL of these labels.
-          - `assignee`: only PRs assigned to this user.
+          - `status`: "open" (default), "closed" (includes merged PRs,
+            `merged: true`), or "any" — no `"merged"` filter value;
+            for closed-only, request `"closed"` and drop `merged: true`
+            rows.
+          - `labels`: PRs carrying ALL of these labels.
+          - `assignee`: PRs assigned to this user.
           - `head`: filter by source branch (`branch` or `owner:branch`).
           - `base`: filter by target branch.
-          - `search`: free-text query (GitHub search syntax, scoped to PRs).
-          - `limit`: capped at the provider's max page size (100).
+          - `search`: free-text query (GitHub search syntax).
+          - `limit`: capped at 100 (provider max).
 
         Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row.
-          - `body_max_chars=N`: truncate each row's body to N chars and
-            add `body_truncated: bool`. Measures N chars after the
-            `#ai-generated`/`#ai-modified` marker prefix, so the stored
-            body may be up to ~15 chars longer than N.
-          - `omit_nulls=True`: drop top-level keys whose value is
-            ``None`` from every row (shallow strip — nested ``head`` /
-            ``base`` dicts stay intact). Combine with
-            ``omit_body=True`` for the minimum-payload recipe.
+          - `body_max_chars=N`: truncate each row's body to N chars,
+            add `body_truncated: bool`. Measured after the
+            `#ai-generated`/`#ai-modified` marker, so body may run
+            up to ~15 chars longer than N.
+          - `omit_nulls=True`: drop top-level `None` keys (shallow
+            strip — nested ``head``/``base`` dicts stay intact);
+            combine with ``omit_body=True`` for minimum payload.
 
-        GitLab note: `approvals_required` and `approvals_received` are
-        populated here too (`0` when none are required or received) —
-        both paths compute these fields the same way as `get_pr`.
-        GitHub and Azure DevOps return `null` for both fields on both
-        paths — unchanged.
+        GitLab note: `approvals_required` / `approvals_received` are
+        populated here too (`0` when none) — both paths compute these
+        fields the same way as `get_pr`. GitHub/Azure DevOps return
+        `null` for both, unchanged.
         """
         def go() -> dict:
             project = _resolve(project_id)

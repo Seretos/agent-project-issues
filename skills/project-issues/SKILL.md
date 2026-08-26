@@ -56,7 +56,8 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
 - **bulk** — `list_tickets_across_projects` list tickets spanning
   multiple projects at once.
 - **pulls** — `list_prs` list/filter pull or merge requests;
-  `get_pr` fetch one PR's full detail; `create_pr` open a new PR;
+  `get_pr` fetch one PR's full detail; `list_pr_files` enumerate a PR's
+  changed files and diff positions (read-only); `create_pr` open a new PR;
   `update_pr` edit a PR's fields; `add_pr_comment` post a PR-level
   comment; `add_pr_review_comment` post an inline code-review comment;
   `submit_pr_review` submit an approve/request-changes review;

@@ -64,8 +64,10 @@ def apply_body_knobs(
 
     - `omit_body=True`: drop the body key entirely. A `body_truncated`
       sibling is NOT set (callers detect omission via `body_attr not in row`).
-    - `body_max_chars=N`: truncate `body` to N characters and add
-      `body_truncated: bool` so callers can tell the body is a prefix.
+    - `body_max_chars=N`: truncate `body` to N characters and add a
+      `f"{body_attr}_truncated": bool` sibling (e.g. `body_truncated`
+      for the default `body_attr="body"`, `patch_truncated` for
+      `body_attr="patch"`) so callers can tell the body is a prefix.
       When the body starts with an `#ai-generated` or `#ai-modified`
       marker prefix (followed by ``\\n\\n``), the cap is applied to the
       content *after* the marker, so the marker itself is always
@@ -76,6 +78,7 @@ def apply_body_knobs(
     """
     if not omit_body and body_max_chars is None:
         return rows
+    truncated_key = f"{body_attr}_truncated"
     out: list[dict[str, Any]] = []
     for row in rows:
         new = dict(row)
@@ -96,9 +99,9 @@ def apply_body_knobs(
                     break
             if len(content) > body_max_chars:
                 new[body_attr] = marker + content[:body_max_chars]
-                new["body_truncated"] = True
+                new[truncated_key] = True
             else:
-                new["body_truncated"] = False
+                new[truncated_key] = False
         out.append(new)
     return out
 

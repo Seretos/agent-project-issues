@@ -23,7 +23,7 @@ from mcp.server.fastmcp import FastMCP
 
 from lib_python_projects import load_projects, resolve_token  # noqa: F401
 from lib_python_projects.providers.azuredevops import AzureDevOpsError
-from lib_python_projects.providers.base import PRFilters
+from lib_python_projects.providers.base import PRFileDiff, PRFilters
 from lib_python_projects.providers.github import GitHubError
 from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
@@ -288,6 +288,95 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
+    def list_pr_files(
+        project_id: str,
+        pr_id: str,
+        include_patch: bool = False,
+        patch_max_chars: int | None = None,
+    ) -> dict:
+        """Enumerate the files changed in a pull request, with per-file diff
+        positions for `add_pr_review_comment`.
+
+        Read-only — no permission gate; a token is only needed when the
+        repo requires one, mirroring `list_prs` / `get_pr`.
+
+        Each row in `files` carries `path`, `change_type`, `previous_path`
+        (set only when `change_type == "renamed"`, `None` in every other
+        case), `additions`, `deletions`, and `line_ranges` — a list of
+        `{"side": "LEFT"|"RIGHT", "start": int, "end": int}` entries (both
+        inclusive, 1-based) giving positions `add_pr_review_comment` will
+        accept for this file. `side="RIGHT"` is the post-change file's own
+        line numbering — the valid default target for `add_pr_review_comment`
+        (whose default is `side="RIGHT"`). `side="LEFT"` is the pre-change
+        (base-commit) file's own line numbering — only valid together with
+        `add_pr_review_comment(..., side="LEFT")`; the two numberings are
+        not interchangeable.
+
+        GitLab note: GitLab ignores `add_pr_review_comment`'s `side`
+        argument and always anchors to the new side — use this tool's
+        RIGHT-side ranges there regardless of which side you intend to
+        comment on.
+
+        `line_ranges` is tri-state, in parallel with `patch`:
+          - a binary/oversized/un-diffable file the provider still
+            enumerates: `line_ranges: []` (the provider supports positions
+            in general — see `supports_line_ranges` — but has none for this
+            particular file), together with `patch: null` even under
+            `include_patch=True`.
+          - `line_ranges: null` when the provider cannot supply positions
+            at all — Azure DevOps returns file-level rows only (no hunk
+            positions) and `supports_line_ranges` is `False` for it.
+
+        `supports_line_ranges` (top-level, alongside `files`) tells you,
+        without inspecting individual rows, whether this provider can ever
+        populate `line_ranges` / `patch` — `True` on GitHub and GitLab,
+        `False` on Azure DevOps.
+
+        Patch knobs, mirroring `list_prs`'s body knobs but applied to
+        `patch`:
+          - `include_patch=False` (default): the `patch` key is omitted
+            entirely from every row.
+          - `include_patch=True`: `patch` is included; `patch_max_chars=N`
+            additionally truncates it to N characters and adds
+            `patch_truncated: bool`. `patch_max_chars` on its own, without
+            `include_patch=True`, is a complete no-op.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            normalized_pr = _normalize_id(project, pr_id)
+            try:
+                files: list[PRFileDiff] = provider.list_pr_files(
+                    project, token, normalized_pr,
+                )
+            except (GitHubError, GitLabError, AzureDevOpsError) as exc:
+                raise _rewrap_404(
+                    exc, project_id=project.id, kind="pr",
+                    ident=normalized_pr,
+                )
+            rows = [asdict(f) for f in files]
+            if include_patch:
+                rows = apply_body_knobs(
+                    rows, omit_body=False, body_max_chars=patch_max_chars,
+                    body_attr="patch",
+                )
+            else:
+                rows = apply_body_knobs(
+                    rows, omit_body=True, body_max_chars=None,
+                    body_attr="patch",
+                )
+            supports_line_ranges = getattr(
+                provider, "SUPPORTS_DIFF_LINE_RANGES", False,
+            )
+            return {
+                "project_id": project.id,
+                "files": rows,
+                "supports_line_ranges": supports_line_ranges,
+            }
+        return _safe(go)
+
+    @mcp.tool()
     def create_pr(
         project_id: str,
         title: str,
@@ -302,7 +391,10 @@ def register(mcp: FastMCP) -> None:
         """Create a pull request.
 
         Just create what the user asked for — DO NOT pre-inspect the
-        repository or codebase to "gather context" first.
+        repository or codebase to "gather context" first. This
+        prohibition is scoped to create-time only. Once the PR exists,
+        call `list_pr_files` to inspect its actual diff before posting
+        review comments or otherwise acting on its contents.
 
         `head` is the source branch (`feature/x` or `owner:branch` for
         cross-fork PRs); `base` is the target branch. The label
@@ -334,7 +426,11 @@ def register(mcp: FastMCP) -> None:
         the merge request anyway with an empty diff. Both are native
         platform behavior. If you need uniform behavior across
         providers, confirm `head` is actually ahead of `base` before
-        calling.
+        calling. A GitLab MR created this way cannot be merged until
+        real diff content exists between `head` and `base` — GitLab
+        reports it as `detailed_merge_status: "commits_status"` (see
+        `get_pr`); do not call `merge_pr` on it until `head` carries
+        real commits ahead of `base`.
         """
         def go() -> dict:
             if head == base:
@@ -381,6 +477,28 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Update an existing pull request. Only specified fields change.
 
+        Not all-or-nothing on every provider — the failure behavior
+        depends on which one you're talking to. On GitHub, a bad
+        `labels_add` name is rejected up front, before the PATCH that
+        applies `title`/`body`/`base`/`status` is even sent, so a bad
+        label alone is safely rejected with nothing applied. Past that
+        point, though, GitHub commits title/body/base/status, labels,
+        assignees, reviewers, and `draft` as separate sequential calls
+        with **no rollback**: a later stage's failure (e.g. an unknown
+        assignee) does not undo an earlier stage that already landed.
+        GitLab bundles title/body/base/status/labels/assignees/reviewers
+        into a single request, so it is close to atomic — the one
+        caveat is that assignee/reviewer usernames are resolved to ids
+        via read-only lookups first, and an unknown username raises
+        before that write is sent. Azure DevOps has no equivalent
+        pre-write label check: title/body/base/draft/status land via
+        one PATCH first, then each label and reviewer change is applied
+        as its own later POST/DELETE, so a bad label or reviewer there
+        can leave the PATCH's fields already committed. Whatever the
+        provider, call `get_pr` again after any `update_pr` failure to
+        see what actually landed — do not assume a failure means
+        nothing changed.
+
         `status` accepts `"open"` (reopen) or `"closed"` (close without
         merging). To merge a PR call `merge_pr` — passing
         `status="merged"` is rejected.
@@ -390,6 +508,16 @@ def register(mcp: FastMCP) -> None:
         `None` (default) leaves the state untouched. GitHub uses
         GraphQL mutations behind the scenes; GitLab manipulates the
         title prefix (`Draft: `).
+
+        Passing `base` to re-target the PR onto a different branch
+        changes the PR's diff out from under any inline comments already
+        posted: a `path` / `line` anchored against the old `base` can
+        become stale (the line may no longer sit inside any changed
+        hunk against the new `base`, or may point at different content
+        entirely) once the `commit_sha` comparison shifts. After a
+        `base` re-target, call `list_pr_files` again before posting
+        further `add_pr_review_comment` calls, rather than reusing
+        positions computed against the old base.
 
         Label, assignee, and reviewer changes are add/remove operations
         relative to the current set. Reviewers are tracked separately
@@ -450,6 +578,16 @@ def register(mcp: FastMCP) -> None:
         `add_pr_review_comment` instead (the inline / code-review
         variant).
 
+        GitHub id-space note: on GitHub, this tool and `add_comment(
+        ticket_id, body)` (the ticket-comment tool) both write to the
+        exact same underlying REST route (`/issues/{n}/comments`) —
+        GitHub shares one id space between issues and PRs, so calling
+        `add_comment` with a PR's number posts into this very same
+        discussion thread, silently. This is a GitHub-specific quirk of
+        its API and is NOT portable: GitLab and Azure DevOps keep
+        merge/pull-request comments and issue comments on entirely
+        separate endpoints, so no such aliasing happens there.
+
         Requires the project's `pulls.modify` permission.
         """
         def go() -> dict:
@@ -467,8 +605,8 @@ def register(mcp: FastMCP) -> None:
         project_id: str,
         pr_id: str,
         body: str,
-        path: Annotated[str | None, Field(description="New-thread mode: file path in the diff (e.g. 'src/foo.py'). Set together with line and commit_sha. Leave unset in reply mode.")] = None,
-        line: Annotated[int | None, Field(description="New-thread mode: absolute file line number (1-based), NOT a diff-hunk position. Set together with path and commit_sha. Leave unset in reply mode.")] = None,
+        path: Annotated[str | None, Field(description="New-thread mode: file path in the diff (e.g. 'src/foo.py'); list_pr_files enumerates the valid paths. Set together with line and commit_sha. Leave unset in reply mode.")] = None,
+        line: Annotated[int | None, Field(description="New-thread mode: absolute file line number (1-based), NOT a diff-hunk position. The line must be a line that appears in the PR's diff — a line outside every changed hunk is rejected by the provider. Call list_pr_files first to discover valid targets: each line_ranges entry gives start..end inclusive on one side. Set together with path and commit_sha. Leave unset in reply mode.")] = None,
         side: Literal["LEFT", "RIGHT"] = "RIGHT",
         commit_sha: Annotated[str | None, Field(description="New-thread mode: the commit SHA the comment is anchored to. Set together with path and line. Leave unset in reply mode.")] = None,
         in_reply_to: Annotated[str | None, Field(description="Reply mode: opaque discussion id from get_pr review_comments — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric). Leave path/line/commit_sha unset.")] = None,

@@ -166,6 +166,44 @@ def test_apply_body_knobs_omit_wins_over_truncate():
     assert "body_truncated" not in out[0]
 
 
+# ---------- WP #291 R4: truncation-flag name derives from body_attr --------
+#
+# `apply_body_knobs` hardcodes the literal `"body_truncated"` key at
+# tools/_slicing.py lines 99/101 regardless of the `body_attr` argument.
+# `list_pr_files` (WP #291) needs a `patch_truncated` flag when slicing the
+# `patch` field, so the key name must derive from `body_attr` instead.
+
+
+def test_apply_body_knobs_truncation_flag_name_derives_from_body_attr():
+    """Driving test for R4. RED today: `KeyError: 'patch_truncated'` — the
+    flag is hardcoded to the literal `"body_truncated"` regardless of
+    `body_attr`."""
+    rows = [{"id": "1", "patch": "abcdefghij"}]
+    out = apply_body_knobs(rows, omit_body=False, body_max_chars=4, body_attr="patch")
+    assert out[0]["patch"] == "abcd"
+    assert out[0]["patch_truncated"] is True
+
+
+def test_apply_body_knobs_patch_not_truncated_when_under_cap():
+    """Additional coverage for R4: the not-truncated leg with `body_attr="patch"`.
+    Also RED today for the same hardcoded-literal reason as the driving test."""
+    rows = [{"id": "1", "patch": "abc"}]
+    out = apply_body_knobs(rows, omit_body=False, body_max_chars=10, body_attr="patch")
+    assert out[0]["patch"] == "abc"
+    assert out[0]["patch_truncated"] is False
+
+
+def test_apply_body_knobs_default_body_attr_still_produces_body_truncated():
+    """Non-regression for R4: every existing call site uses the default
+    `body_attr="body"` and must keep producing `body_truncated`. Already
+    passes today (this is what the hardcoded literal happens to match) and
+    must keep passing after the fix derives the key from `body_attr`."""
+    rows = [{"id": "1", "body": "abcdefghij"}]
+    out = apply_body_knobs(rows, omit_body=False, body_max_chars=4)
+    assert out[0]["body"] == "abcd"
+    assert out[0]["body_truncated"] is True
+
+
 # ---------- list_tickets ----------------------------------------------------
 
 

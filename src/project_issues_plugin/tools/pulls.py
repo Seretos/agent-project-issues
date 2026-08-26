@@ -63,11 +63,23 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """List pull requests in a project. Default: open PRs, limit 30.
 
+        `mergeable` / `mergeable_state` are `null` on the default fast
+        path — GitHub's `/repos/.../pulls` list endpoint does not
+        compute them. They ARE populated when `labels`, `assignee`, or
+        `search` route the call through GitHub's Search API back-fill
+        (see the routing caveat below), and on GitLab / Azure DevOps
+        list results. Treat `null` here as "not computed on this path",
+        not "not mergeable" — use `get_pr` for an authoritative answer.
+
+        Routing caveat: `labels`, `assignee`, or `search` switch the
+        provider from the cheap `/repos/.../pulls` endpoint to GitHub's
+        Search API (`/search/issues`, `is:pr` qualifier), which has its
+        own rate-limit bucket (30 req/min). The default path stays on
+        the cheap endpoint.
+
         Filter args:
           - `status`: "open" (default), "closed", or "any". `"closed"`
-            also returns merged PRs — GitHub treats a merged PR as a
-            closed one — so a row matched by `status="closed"` may carry
-            `status: "merged"` and `merged: true`. There is no
+            includes merged PRs (`merged: true`). There is no
             `"merged"` filter value; for closed-but-not-merged only,
             request `"closed"` and drop rows where `merged` is true.
           - `labels`: only PRs carrying ALL of these labels.
@@ -79,33 +91,20 @@ def register(mcp: FastMCP) -> None:
 
         Token-cheap knobs:
           - `omit_body=True`: drop the `body` field from every row.
-          - `body_max_chars=N`: truncate each row's body to N chars
-            and add `body_truncated: bool`.
-            `body_max_chars=N` measures N chars of content after the
-            `#ai-generated`/`#ai-modified` marker prefix (if present),
-            so the total stored body may be up to ~15 chars longer than N.
-          - `omit_nulls=True`: drop top-level keys whose value is ``None``
-            from every row (shallow strip — nested dicts such as ``head``
-            and ``base`` are preserved intact). Combine with
-            ``omit_body=True`` for the minimum-payload recipe when
-            scanning titles / labels only.
-
-        Note: `mergeable` and `mergeable_state` are always `null` in
-        list results — these fields are only computed on single-PR
-        fetches. Use `get_pr` for authoritative mergeability.
+          - `body_max_chars=N`: truncate each row's body to N chars and
+            add `body_truncated: bool`. Measures N chars after the
+            `#ai-generated`/`#ai-modified` marker prefix, so the stored
+            body may be up to ~15 chars longer than N.
+          - `omit_nulls=True`: drop top-level keys whose value is
+            ``None`` from every row (shallow strip — nested ``head`` /
+            ``base`` dicts stay intact). Combine with
+            ``omit_body=True`` for the minimum-payload recipe.
 
         GitLab note: `approvals_required` and `approvals_received` are
-        populated here too (`0` when none are required or received),
-        matching `get_pr`'s behavior for the same MR — both paths
-        compute these fields the same way. GitHub and Azure DevOps
-        return `null` for both fields (on both the list and
-        single-fetch paths) — that provider difference is unchanged.
-
-        Routing caveat: when `labels`, `assignee`, or `search` are set
-        the provider switches from the cheap `/repos/.../pulls` endpoint
-        to GitHub's Search API (`/search/issues`, `is:pr` qualifier),
-        which has its own rate-limit bucket (30 req/min). The
-        default-fast path stays on the cheap endpoint.
+        populated here too (`0` when none are required or received) —
+        both paths compute these fields the same way as `get_pr`.
+        GitHub and Azure DevOps return `null` for both fields on both
+        paths — unchanged.
         """
         def go() -> dict:
             project = _resolve(project_id)

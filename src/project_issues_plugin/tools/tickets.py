@@ -286,6 +286,12 @@ def register(mcp: FastMCP) -> None:
     ) -> dict:
         """Get a ticket's full details, including all comments and relations.
 
+        Relation kinds: `parent`, `child`, `closes`, `closed_by`,
+        `mentions`, `mentioned_by`, `duplicate_of`, `duplicated_by`
+        (GitHub + GitLab + Azure DevOps), `blocks`, `blocked_by`
+        (GitHub + Azure DevOps), plus `relates_to` (GitLab + Azure
+        DevOps) — see `relations` below for the full shape.
+
         The `ticket` object always carries `acceptance_criteria` (`str`,
         `""` when the provider has none — Azure DevOps'
         `Microsoft.VSTS.Common.AcceptanceCriteria`; always empty on
@@ -306,11 +312,10 @@ def register(mcp: FastMCP) -> None:
             name, unique name/email, and avatar URL of the author and
             last editor). Filter these out client-side if you don't
             want to expose them.
-          - **GitHub**: values from the project's `github-projects-v2`
-            board binding (`project.board.binding` in `projects.yml`).
-            No board binding configured → `custom_fields` stays `None`
-            ("not applicable", not an error). Binding configured but the
-            issue has no board item → `custom_fields = {}`.
+          - **GitHub**: values from the project's board binding
+            (`project.board.binding` in `projects.yml`). No binding →
+            `custom_fields` stays `None` (not an error). Binding but no
+            board item → `custom_fields = {}`.
           - **GitLab**: two fixed keys, `"labels"` (the issue's label
             list) and `"milestone"` (the milestone title, or `None`).
           Call `list_custom_fields(project_id)` first to discover the
@@ -320,11 +325,8 @@ def register(mcp: FastMCP) -> None:
 
         When `include_relations` is True (default), the response also
         includes a `relations` list describing typed links to other
-        tickets / PRs. Relation kinds: `parent`, `child`, `closes`,
-        `closed_by`, `mentions`, `mentioned_by`, `duplicate_of`,
-        `duplicated_by` (GitHub + GitLab + Azure DevOps), `blocks`,
-        `blocked_by` (GitHub + Azure DevOps), plus `relates_to`
-        (GitLab + Azure DevOps). Each relation carries
+        tickets / PRs (see the relation kinds named above). Each
+        relation carries
         `ticket_id` (`"#N"` for same-repo, `"owner/repo#N"` for cross-repo)
         — the **other/linked** ticket's id, distinct from this tool's own
         `ticket_id` argument, which selects the ticket being queried —
@@ -512,23 +514,26 @@ def register(mcp: FastMCP) -> None:
         always provide more detail if they want it; one-shot create
         actions stay one-shot.
 
+        `status` is optional; when supplied, pass a value exactly as
+        returned by `list_ticket_statuses` — the same vocabulary
+        `update_ticket.status` accepts. Do not normalise casing or
+        whitespace.
+
         The label `ai-generated` is added automatically by the server.
         Do not pass it yourself.
 
-        `body` is optional. When omitted, the ticket is created with an
-        empty body. Provide it when the user has supplied a description.
-        `body` must contain real newline characters (U+000A), not the
-        two-character literal sequence `\n`; the server performs no
-        escape-sequence normalisation.
+        `body` is optional (empty by default) — provide it when the
+        user has supplied a description. Use real newline characters
+        (U+000A), not the two-character literal `\n` escape; the server
+        performs no escape-sequence normalisation.
 
         The server also prepends `#ai-generated\n\n` to the body
         automatically. Do not prepend it yourself; if you do, the marker
         is deduplicated (no stacking).
 
-        `labels` sets the initial label set as a flat list on creation.
-        To add or remove labels on an existing ticket after creation,
-        use `update_ticket`'s `labels_add` / `labels_remove` parameters
-        instead.
+        `labels` sets the initial label set on creation; use
+        `update_ticket`'s `labels_add` / `labels_remove` parameters
+        instead to change labels afterward.
 
         Label catalog requirement: on GitHub every name in `labels`
         must already exist in the repository's label catalog —
@@ -543,17 +548,13 @@ def register(mcp: FastMCP) -> None:
         GitLab too — a different status than GitHub's 422, but an
         error either way.
 
-        `status` is optional. When omitted, the ticket lands in the
-        project's `hints.default_open` state (the normal case). When
-        supplied, it must be a value from the provider's state-space —
-        the same vocabulary `update_ticket.status` accepts. Pass the
-        value exactly as returned by `list_ticket_statuses` — do not
-        normalise casing or whitespace. Use this when importing
-        already-resolved tickets or filing documentation tickets that
-        should be born closed, instead of a two-step create-then-close
-        that emits a spurious `opened → closed` pair in the timeline.
-        Unknown values raise the same error type as `update_ticket`
-        with a hint to call `list_ticket_statuses`.
+        `status`, when omitted, lands the ticket in the project's
+        `hints.default_open` state (the normal case). Use it when
+        importing already-resolved tickets or filing documentation
+        tickets that should be born closed, instead of a two-step
+        create-then-close that emits a spurious `opened → closed` pair
+        in the timeline. Unknown values raise the same error type as
+        `update_ticket` with a hint to call `list_ticket_statuses`.
 
         `custom_fields` sets provider-specific fields (or board-column
         values) at creation time — see the parameter description for
@@ -928,17 +929,21 @@ def register(mcp: FastMCP) -> None:
     def list_custom_fields(project_id: str, work_item_type: str | None = None) -> dict:
         """Discover provider-native custom and work-item fields.
 
+        Each field row carries `reference_name` (provider-native id,
+        e.g. `System.State`), `display_name`, `type`, `allowed_values`
+        (`null` when free-form), `read_only`, `always_required`.
+
         Returns the structured field schema for the project's provider.
         Azure DevOps is the primary use case — it exposes a rich schema
         with typed fields, picklist constraints, and per-work-item-type
         scoping. GitHub and GitLab have no structured field schema and
         always return `"fields": []` (not an error — it is a stable fact
         about those providers, not "unsupported" or "retry later").
-        Because GitHub exposes no field schema, the board write-key is
-        not discoverable here: to set a GitHub board column, call
-        `create_ticket`/`update_ticket` with
-        `custom_fields={"Status": <native>}`, where `<native>` comes
-        from `list_board_columns`.
+        GitHub exposes no field schema, so the board write-key is not
+        discoverable here — set a board column via
+        `create_ticket`/`update_ticket`'s
+        `custom_fields={"Status": <native>}`, with `<native>` from
+        `list_board_columns`.
 
         The `work_item_type` parameter optionally scopes the field set to
         a specific Azure DevOps work-item type (e.g. `"Task"`, `"Issue"`).
@@ -948,20 +953,16 @@ def register(mcp: FastMCP) -> None:
         the same types — so call with `work_item_type=None` first to
         discover which types exist before scoping to one.
 
-        Azure DevOps caveat: when two configured projects map to the same
-        underlying Azure DevOps Team Project, this call returns identical
-        area-path and iteration-path `allowed_values` for both — prefixed
-        with only the *first* configured project's name — because
-        `project_id` granularity here is coarser than the area/iteration
-        path hierarchy. An `area_path` value copied from one project's
-        `allowed_values` and used to filter the other project can 404;
-        this is correct Azure DevOps behavior (shared Team Project), not
-        a bug in this tool.
+        Azure DevOps caveat: two projects mapping to the same shared Team
+        Project get identical area-path / iteration-path `allowed_values`,
+        prefixed with only the *first* project's name (`project_id`
+        granularity is coarser than the path hierarchy). An `area_path`
+        value copied from one project's `allowed_values` can 404 on the
+        other project — correct behavior, not a bug.
 
-        The `reference_name` and `allowed_values` values returned here
-        feed directly into `update_ticket`'s `custom_fields` parameter —
-        call this tool first to discover valid field references and their
-        allowed picklist values before setting them.
+        `reference_name` / `allowed_values` feed directly into
+        `update_ticket`'s `custom_fields` — call this tool first to
+        discover valid field references and values before setting them.
 
         Returns:
 

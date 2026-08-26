@@ -71,7 +71,11 @@ def register(mcp: FastMCP) -> None:
         `relation.ticket_id` is the **target/other** ticket's id (the
         "to" end resolved from `target`) — distinct from the
         `ticket_id` request parameter above, which identifies the
-        source ticket.
+        source ticket. It comes back in reference form with a leading
+        `#` (e.g. `"#187"`), a deliberate convention that differs from
+        the bare numeric form used by `get_ticket`'s `ticket.id`,
+        `list_hierarchy`'s top-level `ticket_id`, and
+        `remove_relation`'s `target` echo.
 
         The returned `relation` object is **fully hydrated** — when
         `resolved` is `true` it was fetched live from the provider, so
@@ -91,6 +95,17 @@ def register(mcp: FastMCP) -> None:
           - `false` — target was inferred from body or text scanning;
             title / state may be empty.
           - `null`  — liveness is unknown (provider did not indicate).
+
+        Side effect — `kind="duplicate_of"` is not a pure link: it also
+        appends a `Duplicate of #N` line to the source issue's body AND
+        closes the source, on GitHub and GitLab — the marker line
+        `#ai-generated` / `#ai-modified` is preserved correctly via the
+        shared marker helper. (Azure DevOps' `duplicate_of` side-effect
+        is implemented in the `lib-python-projects` lib and is not
+        independently verified from this repo.) Call
+        `remove_relation(..., kind="duplicate_of")` to reverse it — it
+        reopens the source and strips the `Duplicate of #N` line from
+        the body.
 
         Direction matters for the asymmetric kinds. `ticket_id` is
         always the "from" end and `target` the "to" end:
@@ -139,16 +154,6 @@ def register(mcp: FastMCP) -> None:
             `_gitlab_remove_hierarchy_relation`); both ends are resolved
             to GraphQL work-item ids first, raising `RelationNotFound`
             if either side can't be resolved.
-          - `duplicate_of` appends a `Duplicate of #N` line to the
-            source issue's body AND closes the source, on GitHub and GitLab
-            — the marker line `#ai-generated` / `#ai-modified` is
-            preserved correctly via the shared marker helper.
-            (Azure DevOps' `duplicate_of` side-effect is implemented
-            in the `lib-python-projects` lib and is not independently
-            verified from this repo.) Call `remove_relation(...,
-            kind="duplicate_of")` to reverse it — it reopens the
-            source and strips the `Duplicate of #N` line from the
-            body.
 
         Requires the project's `issues.modify` permission.
         """
@@ -199,6 +204,10 @@ def register(mcp: FastMCP) -> None:
         Returns `{"project_id": str, "kind": str, "target": str, "removed": true}`
         on success. (A relation that did not exist surfaces as
         `{"error": "..."}` rather than a silent `removed: true`.)
+        `target` is echoed in the normalised bare form (e.g. `"187"`)
+        even when `#187` was passed, deliberately unlike
+        `add_relation`'s `relation.ticket_id`, which is echoed in
+        reference form.
         """
         def go() -> dict:
             project = _resolve(project_id)
@@ -300,6 +309,13 @@ def register(mcp: FastMCP) -> None:
           "relations_truncated": bool
         }
         ```
+
+        The top-level `ticket_id` echo is bare (e.g. `"187"`), matching
+        `get_ticket`'s `ticket.id`. Each `parent`/`children` entry's
+        `ticket_id`, by contrast, uses the `#N` reference form (e.g.
+        `#187`) — the same convention documented for `add_relation`'s
+        `relation.ticket_id`, not the bare form used by the top-level
+        `ticket_id` above.
         """
         def go() -> dict:
             project = _resolve(project_id)

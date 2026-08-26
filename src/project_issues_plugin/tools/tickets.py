@@ -1159,6 +1159,16 @@ def register(mcp: FastMCP) -> None:
         as the composite `"<iid>/<note_id>"` form so the id is
         self-contained. GitHub comment ids are already repo-wide and
         need no `ticket_id`.
+
+        GitHub id-space note: on GitHub, this tool and `add_pr_comment(
+        project_id, pr_id, body)` (the PR-comment tool) both write to the
+        exact same underlying REST route (`/issues/{n}/comments`) —
+        GitHub shares one id space between issues and PRs, so calling
+        `add_pr_comment` with a ticket's number posts into this very
+        same discussion thread, silently. This is a GitHub-specific
+        quirk of its API and is NOT portable: GitLab and Azure DevOps
+        keep issue comments and merge/pull-request comments on entirely
+        separate endpoints, so no such aliasing happens there.
         """
         def go() -> dict:
             project = _resolve(project_id)

@@ -10,6 +10,10 @@ Provider color format notes:
     Defaults to ``"ededed"`` when omitted on create.
   - **GitLab**: `color` is `#RRGGBB` (e.g. ``"#ff0000"``); bare 6-hex
     like ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
+    Omit it and this tool's pinned lib-python-projects dependency
+    fills in ``#ededed`` (matching GitHub's default) before the
+    GitLab API call is made — this is this plugin's own default
+    behavior, not a default documented by GitLab's native API.
     Validated locally before the API call.
   - **Azure DevOps**: `color` is always empty — the provider uses implicit
     tag-style labels with no color or description support.  `create_label`,
@@ -173,6 +177,11 @@ def register(mcp: FastMCP) -> None:
             locally before the API call.
           - GitLab: ``#RRGGBB`` (e.g. ``"#ff0000"``); bare 6-hex like
             ``"ff00ff"`` is also accepted and normalized to ``#RRGGBB``.
+            Omit it and this tool's pinned lib-python-projects
+            dependency fills in ``#ededed`` (matching GitHub's
+            default) before the GitLab API call is made — this is
+            this plugin's own default behavior, not a default
+            documented by GitLab's native API.
             Validated locally before the API call.
           - Azure DevOps: label creation is not supported — returns
             ``{"error": "..."}`` containing "not supported".

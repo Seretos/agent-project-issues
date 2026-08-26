@@ -1,9 +1,13 @@
-"""Regression test for ticket #270: bump the `lib-python-projects` exact-tag
-pin in `pyproject.toml` from v0.3.12 to v0.3.13 (tag confirmed real via
-`git ls-remote --tags`).
+"""Regression test for ticket #289: bump the `lib-python-projects` exact-tag
+pin in `pyproject.toml` from v0.3.13 to v0.3.14.
 
-Modelled on tests/test_259_lib_projects_pin.py's tomllib + packaging.requirements
-helpers -- reuses the same helper functions verbatim.
+Modelled on tests/test_270_lib_projects_pin.py's tomllib + packaging.requirements
+helpers -- reuses the same helper functions verbatim. Unlike #270's comment
+assertion (which hardcoded the literal "v0.3.13" and would go RED on every
+future bump for the wrong reason), this test's comment check is floor-based:
+it asserts every tag mentioned in the comment block equals the currently
+declared tag AND is >= this ticket's floor, so it survives future bumps the
+same way test_246/test_254/test_259's variants do.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from pathlib import Path
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-_MIN_VERSION = Version("0.3.13")
+_MIN_VERSION = Version("0.3.14")
 _TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 _COMMENT_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 
@@ -39,31 +43,30 @@ def _lib_python_projects_entry() -> str:
 
 
 def _tag_from_url(entry: str) -> str:
-    # entry looks like: "lib-python-projects @ git+https://.../lib-python-projects@v0.3.12"
+    # entry looks like: "lib-python-projects @ git+https://.../lib-python-projects@v0.3.13"
     return entry.rsplit("@", 1)[-1].strip()
 
 
 def _declared_tag() -> str:
     """The exact vX.Y.Z tag currently declared for lib-python-projects in
-    pyproject.toml (e.g. "v0.3.13")."""
+    pyproject.toml (e.g. "v0.3.14")."""
     entry = _lib_python_projects_entry()
     return _tag_from_url(entry)
 
 
-def test_lib_python_projects_pin_meets_v0_3_13_floor() -> None:
-    """Driving test (R1): the declared pin must be >= v0.3.13. RED against
-    the unbumped pyproject.toml, which still declares v0.3.12."""
+def test_lib_python_projects_pin_meets_v0_3_14_floor() -> None:
+    """Driving test (R1): the declared pin must be >= v0.3.14. RED against
+    the unbumped pyproject.toml, which still declares v0.3.13."""
     tag = _declared_tag()
     assert Version(tag.lstrip("v")) >= _MIN_VERSION
 
 
-def test_pin_comment_names_the_new_tag() -> None:
+def test_pin_comment_matches_declared_tag_and_floor() -> None:
     """Driving test (R2): the explanatory comment above the dependency line
-    must name the current declared tag, and that tag must meet this test's
-    original v0.3.13 floor. Floor-based (not the hardcoded "v0.3.13" literal
-    this test used to check) so it survives future bumps (e.g. #289's
-    v0.3.14) instead of going RED for the wrong reason on every subsequent
-    chore ticket."""
+    must name the current declared tag, and that tag must meet this ticket's
+    floor. RED because line 22 currently still says "(v0.3.13)", which fails
+    the >= 0.3.14 floor. Floor-based (not a hardcoded literal) so it survives
+    future bumps the way #270's own hardcoded version did not."""
     declared = _declared_tag()
 
     pyproject = _repo_root() / "pyproject.toml"
@@ -83,17 +86,14 @@ def test_pin_comment_names_the_new_tag() -> None:
     comment_block = "\n".join(lines[comment_idx:dep_line_idx])
 
     found_tags = _COMMENT_TAG_RE.findall(comment_block)
-    assert found_tags, (
-        f"expected at least one vX.Y.Z tag mention in the lib-python-projects "
-        f"comment block, got comment block:\n{comment_block!r}"
-    )
+    assert found_tags, "expected at least one vX.Y.Z tag mention in the lib-python-projects comment block"
     assert all(tag == declared for tag in found_tags), (
         f"found tag mention(s) {found_tags!r} that don't match the declared "
         f"pin {declared!r} in the lib-python-projects comment block"
     )
     assert all(Version(tag.lstrip("v")) >= _MIN_VERSION for tag in found_tags), (
         f"found tag mention(s) {found_tags!r} in the comment block that don't "
-        f"meet the v0.3.13 floor"
+        f"meet the v0.3.14 floor"
     )
 
 

@@ -118,10 +118,11 @@ and only change `color`/`description`. At least one of `new_name`,
 `color`, or `description` must be supplied, or the call errors before
 making any HTTP request.
 
-Color formats are provider-specific: GitHub wants a bare 6-digit hex
-string with no leading hash, validated locally before the API call;
-GitLab wants a leading-hash `#RRGGBB` form (a bare 6-hex string is also
-accepted and normalized); Azure DevOps has no color concept at all.
+Color formats are provider-specific: GitHub wants a 6-digit hex string —
+a leading hash is accepted and stripped — validated locally before the
+API call; GitLab wants a leading-hash `#RRGGBB` form (a bare 6-hex string
+is also accepted and normalized); Azure DevOps has no color concept at
+all.
 
 `create_label`, `update_label`, and `delete_label` always return an
 error containing "not supported" on Azure DevOps — tags there are

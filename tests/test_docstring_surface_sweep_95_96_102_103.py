@@ -187,18 +187,30 @@ def test_create_label_bad_github_color_rejected_no_http(monkeypatch):
     assert "Label.color" not in result["error"]
 
 
-def test_create_label_hash_prefixed_color_rejected(monkeypatch):
-    """`#ededed` (GitLab form) is rejected on GitHub — it wants bare hex."""
+def test_create_label_hash_prefixed_color_accepted_and_forwarded_bare(monkeypatch):
+    """Retargeted for ticket #297 (was: rejected). `#ededed` (GitLab form)
+    is now accepted on GitHub too — the wrapper strips the leading '#'
+    before the provider call, so the wire payload carries the bare hex
+    form GitHub's API requires."""
     monkeypatch.setenv("GITHUB_TOKEN_ACME", "tok")
     tools = _register_with_project(monkeypatch, label_tools)
 
+    captured = {}
+
     def handler(req):
-        raise AssertionError(f"unexpected HTTP call: {req.url}")
+        assert req.method == "POST"
+        payload = json.loads(req.content)
+        captured["color"] = payload.get("color")
+        return _json_resp({
+            "name": "bug", "color": payload.get("color"), "description": "",
+        })
 
     _install_github_mock(monkeypatch, handler)
     result = tools["create_label"](project_id="acme", name="bug", color="#ededed")
-    assert "error" in result
-    assert "without '#'" in result["error"]
+    assert "error" not in result, result
+    assert captured["color"] == "ededed", (
+        f"expected the leading '#' stripped on the wire; got: {captured['color']!r}"
+    )
 
 
 def test_create_label_empty_name_rejected(monkeypatch):

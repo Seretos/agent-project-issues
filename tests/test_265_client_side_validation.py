@@ -544,23 +544,26 @@ def test_create_label_github_bare_hex_accepted_no_regression(
     assert provider.calls[0]["color"] == "ededed"
 
 
-def test_create_label_github_hashed_hex_rejected_with_github_message_no_regression(
+def test_create_label_github_hashed_hex_accepted_and_forwarded_bare(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cross-provider non-regression — already passes today; GitHub still
-    rejects a leading '#' with its own message (distinct from the GitLab
-    hint)."""
+    """Retargeted for ticket #297 (was: rejected with GitHub message).
+    GitHub now accepts a leading '#' and strips it before the provider
+    call, mirroring GitLab's optional-hash handling. Expected RED against
+    unmodified `labels.py`: `_GITHUB_HEX_COLOR` still requires a bare
+    6-hex string with no leading '#', so `color="#ededed"` is rejected
+    pre-flight and the fake provider is never called."""
     provider = _FakeLabelProvider()
     project = _labels_project(provider="github")
     tools = _register_label_tools(monkeypatch, provider, project)
 
     out = tools["create_label"](project_id="acme", name="bug", color="#ededed")
 
-    assert "error" in out, f"expected rejection; got: {out}"
-    assert "without '#'" in out["error"], (
-        f"expected the GitHub-specific message; got: {out['error']!r}"
+    assert "error" not in out, f"unexpected error: {out}"
+    assert provider.calls[0]["color"] == "ededed", (
+        f"expected the leading '#' stripped before the provider call; "
+        f"got: {provider.calls[0]!r}"
     )
-    assert provider.calls == [], f"expected no provider call; got: {provider.calls}"
 
 
 def test_create_label_azuredevops_color_not_validated_by_either_branch_no_regression(

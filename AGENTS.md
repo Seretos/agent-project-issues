@@ -62,6 +62,37 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
   `pip install -e <lib>` checkout still shadows the pinned release, so `sync-libs.ps1` (and
   `test.ps1`) force-reinstall it from the declared tag ref, overriding any local editable shadow.
 
+## Contracts
+
+- **Every release tag has a `src/<TAG>` sibling on `main`.** `release.yml`
+  publishes each release as `<plugin>--vX.Y.Z` on the ancestor-less orphan
+  `release` branch — that tag shares no history with any previous release,
+  so `gh release create --generate-notes` against it always produced empty
+  notes (ticket #298). To fix this, the `release` job also tags `main` at
+  the run's frozen `github.sha` (the commit the release was actually built
+  from, not `main`'s tip at publish time) as `src/<plugin>--vX.Y.Z`, and
+  generates real notes by diffing `src/<PREV_TAG>...src/<TAG>` — real
+  history that only exists on `main`.
+- **These marker tags are immutable.** Never re-tag or force-push
+  `src/<TAG>`; `stamp`'s pre-flight step fails the run if `src/<TAG>`
+  already exists.
+- **`release.yml` must be dispatched from the default branch.** The
+  pre-flight step in `stamp` rejects any other `ref_name`, since `src/<TAG>`
+  is only meaningful as a marker on `main`.
+- **Bootstrapping a release that predates this ticket.** If `stamp`'s
+  pre-flight reports that `src/<PREV_TAG>` is missing, read `head_sha` from
+  the Actions run that produced `<PREV_TAG>`, then:
+  ```
+  git tag src/<PREV_TAG> <sha>
+  git push origin refs/tags/src/<PREV_TAG>
+  ```
+- **Retry procedure.** If the marker push in the `release` job is rejected
+  (e.g. `main` advanced with a workflow-file change since dispatch, tripping
+  `GITHUB_TOKEN`'s workflow-scope restriction), nothing has been
+  published yet — no tag, release, or marketplace dispatch — so simply
+  re-run `release.yml` with the **same version**; the re-run re-dispatches
+  at `main`'s new tip. Do **not** introduce a PAT to work around this.
+
 ## More
 
 Build (PyInstaller), the release pipeline, server-side env vars, and the marketplace contract

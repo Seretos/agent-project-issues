@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,10 @@ def _prev_release_tag_script() -> Path:
 
 def _marketplace_payload_script() -> Path:
     return _scripts_dir() / "marketplace-payload.sh"
+
+
+def _release_workflow_path() -> Path:
+    return _repo_root() / ".github" / "workflows" / "release.yml"
 
 
 # ---------- R1: prev-release-tag.sh ----------------------------------------
@@ -241,6 +246,61 @@ def test_prev_release_tag_exact_anchor_not_confused_by_prefix_tag() -> None:
     assert result.stdout.strip() == "myplugin--v0.3.0"
 
 
+# ---------- R3: semver grammar drift guard ----------------------------------
+
+
+def _release_yml_semver_grammar() -> str:
+    """Extract the strict-semver regex literal from release.yml's "Validate
+    version is semver" step (the `[[ ! "$V" =~ ^...$  ]]` line), stripped of
+    its `^`/`$` anchors so it compares as the bare grammar -- the same shape
+    prev-release-tag.sh's SEMVER_RE is defined in before it gets embedded in
+    a larger anchored pattern."""
+    text = _release_workflow_path().read_text(encoding="utf-8")
+    match = re.search(r'\[\[ ! "\$V" =~ (.+?) \]\]', text)
+    assert match, (
+        "release.yml: could not locate the \"Validate version is semver\" "
+        "step's regex -- update this extraction if that step was rewritten"
+    )
+    literal = match.group(1)
+    assert literal.startswith("^") and literal.endswith("$"), (
+        f"release.yml: expected the regex to be fully anchored, got {literal!r}"
+    )
+    return literal[1:-1]
+
+
+def _prev_release_tag_semver_re() -> str:
+    """Extract the SEMVER_RE literal from prev-release-tag.sh."""
+    text = _prev_release_tag_script().read_text(encoding="utf-8")
+    match = re.search(r"^SEMVER_RE='(.+)'$", text, re.M)
+    assert match, "prev-release-tag.sh: could not locate the SEMVER_RE assignment"
+    return match.group(1)
+
+
+def test_semver_grammar_identical_between_release_yml_and_prev_release_tag_sh() -> None:
+    """Drift guard (R3, review finding #2). #298's plan calls for one semver
+    grammar duplicated as a literal, with a test pinning the copies
+    identical. dispatch.yml carries no independent copy of the grammar --
+    its `steps.tag.outputs.version` is raw human input from the
+    `workflow_dispatch` `tag` field, but it is only ever used downstream
+    after "Verify plugin.json version matches tag" confirms it matches
+    plugin.json's version on the `release` branch, which release.yml's
+    `stamp` job never stamps with a non-semver value (see the comments on
+    dispatch.yml's "Resolve tag" and "Checkout scripts from main" steps) --
+    so there are only two literal copies left to keep in sync: release.yml's
+    "Validate version is semver" step and prev-release-tag.sh's SEMVER_RE.
+    This is a two-way drift guard, not the evidence that the grammar itself
+    is correct -- that is test_prev_release_tag_rejects_non_strict_semver
+    and friends above, which exercise prev-release-tag.sh's copy directly."""
+    release_grammar = _release_yml_semver_grammar()
+    script_grammar = _prev_release_tag_semver_re()
+    assert release_grammar == script_grammar, (
+        "semver grammar drifted between release.yml's \"Validate version is "
+        "semver\" step and prev-release-tag.sh's SEMVER_RE:\n"
+        f"release.yml:          {release_grammar!r}\n"
+        f"prev-release-tag.sh:  {script_grammar!r}"
+    )
+
+
 # ---------- R2: marketplace-payload.sh --------------------------------------
 
 
@@ -264,6 +324,21 @@ _EXPECTED_DESCRIPTION_URL = (
     "/description.md"
 )
 _TAGS_LITERAL = ["git", "github", "gitlab", "organisation", "ticket"]
+
+# Test-critic F1: every other R2 case below shares BASE_ENV's exact
+# NAME/DESC/REPO/VERSION/TAG literals -- only CHANGELOG_RAW/RELEASE_URL ever
+# vary. A hardcoded implementation that ignored the env entirely and always
+# emitted BASE_ENV's literal values would pass every "exact value" assertion
+# in this file. ALT_ENV differs from BASE_ENV in all five required keys so
+# test_marketplace_payload_reflects_distinct_env_values below can rule that
+# out.
+ALT_ENV = {
+    "NAME": "other-plugin",
+    "DESC": "A completely different plugin, on purpose",
+    "REPO": "SomeOtherOrg/other-repo",
+    "VERSION": "9.9.9",
+    "TAG": "other-plugin--v9.9.9",
+}
 
 
 def _run_marketplace_payload(
@@ -331,6 +406,42 @@ def test_marketplace_payload_matches_pre_extraction_shape() -> None:
 
 
 @needs_jq
+def test_marketplace_payload_reflects_distinct_env_values_not_hardcoded_constants() -> None:
+    """Driving test (R2, test-critic F1). Uses ALT_ENV, whose
+    NAME/DESC/REPO/VERSION/TAG are all different from BASE_ENV's, and
+    asserts the output payload reflects ALT_ENV's specific values -- ruling
+    out an implementation that ignores the env and hardcodes BASE_ENV's
+    literal values (which would otherwise pass every other test in this
+    file, since they all share BASE_ENV)."""
+    result = _run_marketplace_payload(dict(ALT_ENV))
+    assert result.returncode == 0, result.stderr
+
+    payload = json.loads(result.stdout)
+    cp = payload["client_payload"]
+    assert cp["name"] == ALT_ENV["NAME"]
+    assert cp["description"] == ALT_ENV["DESC"]
+    assert cp["repo"] == ALT_ENV["REPO"]
+    assert cp["version"] == ALT_ENV["VERSION"]
+    assert cp["ref"] == ALT_ENV["TAG"]
+    assert cp["icon"] == (
+        f"https://raw.githubusercontent.com/{ALT_ENV['REPO']}/{ALT_ENV['TAG']}"
+        "/assets/icon.png"
+    )
+    assert cp["description_url"] == (
+        f"https://raw.githubusercontent.com/{ALT_ENV['REPO']}/{ALT_ENV['TAG']}"
+        "/description.md"
+    )
+    # Sanity check on the test itself: if any of these accidentally matched
+    # BASE_ENV, the case above would no longer rule out a hardcoded
+    # implementation.
+    assert cp["name"] != BASE_ENV["NAME"]
+    assert cp["description"] != BASE_ENV["DESC"]
+    assert cp["repo"] != BASE_ENV["REPO"]
+    assert cp["version"] != BASE_ENV["VERSION"]
+    assert cp["ref"] != BASE_ENV["TAG"]
+
+
+@needs_jq
 def test_marketplace_payload_includes_changelog_when_present() -> None:
     """Driving test (R2). A non-empty CHANGELOG_RAW under the truncation
     threshold survives unchanged as `client_payload.changelog`."""
@@ -373,21 +484,13 @@ def test_marketplace_payload_omits_changelog_when_explicitly_empty() -> None:
 
 
 @needs_jq
-def test_marketplace_payload_optional_env_vars_may_be_entirely_unset() -> None:
-    """Additional edge-case coverage (R2): CHANGELOG_RAW/RELEASE_URL are
-    optional per the plan -- omitting them entirely (not just setting them
-    empty) must not trip `set -u`."""
-    result = _run_marketplace_payload(dict(BASE_ENV))
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    assert "changelog" not in payload["client_payload"]
-
-
-@needs_jq
 def test_marketplace_payload_truncates_long_changelog_body() -> None:
     """Driving test (R2/R3 reuse). A 20000-codepoint body is truncated to
     <=8000 codepoints, ending with the release URL, via the same reserved-
-    room truncation filter as release.yml:382."""
+    room truncation filter as release.yml:382. Test-critic F2: also asserts
+    the literal truncation marker text itself appears in the output -- a
+    filter that truncated and appended the bare URL with no marker text
+    would otherwise pass the length/suffix checks alone."""
     url = "https://github.com/Seretos/agent-project-issues/releases/tag/v1.2.3"
     env = dict(BASE_ENV, CHANGELOG_RAW="x" * 20000, RELEASE_URL=url)
     result = _run_marketplace_payload(env)
@@ -396,6 +499,7 @@ def test_marketplace_payload_truncates_long_changelog_body() -> None:
     changelog = json.loads(result.stdout)["client_payload"]["changelog"]
     assert len(changelog) <= 8000
     assert changelog.endswith(url)
+    assert "…truncated — full notes:" in changelog, changelog
 
 
 @needs_jq
@@ -442,18 +546,19 @@ def test_marketplace_payload_keeps_trailing_newline_in_changelog() -> None:
 @pytest.mark.parametrize("missing_key", REQUIRED_ENV_KEYS)
 def test_marketplace_payload_missing_required_env_var_fails(missing_key: str) -> None:
     """Additional edge-case coverage (R2, per plan). Each of the 5 required
-    env vars is mandatory -- omitting any one must fail the script
-    (non-zero exit) rather than silently emit a malformed/partial payload.
-    Not jq-guarded: this must fail before or independently of jq being
-    available, since the missing var itself is the failure. NOTE: this
-    assertion (`returncode != 0`) is also trivially satisfied today by the
-    script's outright absence (bash exit 127), so unlike the other tests in
-    this file it does not itself demonstrate valid RED for a missing-arg
-    check specifically -- it only becomes meaningful once the script exists
-    and must then still reject a missing required var. Kept per the plan's
-    explicit listing of this case under R2 edge coverage, not as a
-    standalone driving test."""
+    env vars is mandatory -- omitting any one must fail the script with the
+    specific `"<VAR> is required"` message its own `: "${VAR:?...}"` guard
+    produces on stderr (matching the script's actual `NAME is required` /
+    `DESC is required` / etc. text), not merely a non-zero exit. Not
+    jq-guarded: this must fail before or independently of jq being
+    available, since the missing var itself is the failure.
+
+    Test-critic F4: `returncode != 0` alone is satisfied by any failure mode
+    -- an unrelated crash, a jq error, the script's outright absence (bash
+    exit 127) -- and proves nothing about *why* it failed. Asserting the
+    exact message ties the failure to the missing-var guard specifically."""
     env = dict(BASE_ENV)
     env.pop(missing_key)
     result = _run_marketplace_payload(env)
     assert result.returncode != 0
+    assert f"{missing_key} is required" in result.stderr, result.stderr

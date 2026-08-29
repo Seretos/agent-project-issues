@@ -27,6 +27,13 @@ jobs:
         run: |
           TAG="${{ inputs.tag }}"
           # New tag format: <plugin-name>--v<version>
+          # VERSION here is raw, unvalidated human input -- #298 deliberately
+          # does not duplicate the strict-semver grammar in this step. It is
+          # only trusted once "Verify plugin.json version matches tag" below
+          # confirms it matches plugin.json's version on the `release`
+          # branch, which release.yml's `stamp` job never stamps with a
+          # non-semver value (see the "Checkout scripts from main" comment
+          # below for the full reasoning).
           VERSION="${TAG##*--v}"
           echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"

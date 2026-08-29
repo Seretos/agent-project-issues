@@ -36,6 +36,23 @@ jobs:
         with:
           ref: release
 
+      # #298: marketplace-payload.sh lives on `main`, not on the ancestor-
+      # less `release` branch (which carries no `.github/` at all) -- so a
+      # second, sparse checkout pulls just that one script from `main`
+      # alongside the `release` checkout above. dispatch.yml's own VERSION
+      # (below) is already proven valid semver by construction -- it's only
+      # ever accepted once it matches plugin.json's version on the `release`
+      # branch, and release.yml's `stamp` job never stamps a non-semver
+      # value into that manifest -- so this workflow does not duplicate the
+      # semver grammar the way release.yml and prev-release-tag.sh do.
+      - name: Checkout scripts from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .ci-main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
       - name: Verify plugin.json version matches tag
         shell: bash
         run: |
@@ -70,37 +87,12 @@ jobs:
           if [ -z "$RELEASE_JSON" ]; then
             echo "::warning::failed to read published release body; changelog will be omitted from marketplace dispatch payload"
           fi
-          BODY=$(printf '%s' "$RELEASE_JSON" | jq -r '.body // ""' 2>/dev/null) || BODY=""
-          URL=$(printf '%s' "$RELEASE_JSON" | jq -r '.url // ""' 2>/dev/null) || URL=""
-          CHANGELOG=$(jq -rn --arg body "$BODY" --arg url "$URL" --argjson max 8000 '("\n\n…truncated — full notes: " + $url) as $suffix | if ($body|length) <= $max then $body else ($body[0:($max - ($suffix|length))] + $suffix) end') || CHANGELOG=""
-          if [ -z "$CHANGELOG" ]; then
-            echo "::warning::changelog is empty; omitting changelog from marketplace dispatch payload"
-          fi
-          PAYLOAD=$(jq -n \
-            --arg name "$NAME" \
-            --arg description "$DESC" \
-            --arg repo "$GITHUB_REPOSITORY" \
-            --arg version "$VERSION" \
-            --arg ref "$TAG" \
-            --arg icon "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$TAG/assets/icon.png" \
-            --arg description_url "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$TAG/description.md" \
-            '{
-              event_type: "plugin-release",
-              client_payload: {
-                name: $name,
-                description: $description,
-                repo: $repo,
-                category: "mcp",
-                tags: ["git", "github", "gitlab", "organisation", "ticket"],
-                version: $version,
-                ref: $ref,
-                icon: $icon,
-                description_url: $description_url
-              }
-            }')
-          if [ -n "$CHANGELOG" ]; then
-            PAYLOAD=$(echo "$PAYLOAD" | jq --arg changelog "$CHANGELOG" '.client_payload.changelog = $changelog')
-          fi
+          BODY=$(jq -r '.body' <<<"$RELEASE_JSON" && printf x); BODY="${BODY%x}"
+          BODY="${BODY%$'\n'}"
+          URL=$(jq -r '.url // ""' <<<"$RELEASE_JSON")
+
+          PAYLOAD=$(NAME="$NAME" DESC="$DESC" REPO="$GITHUB_REPOSITORY" VERSION="$VERSION" TAG="$TAG" CHANGELOG_RAW="$BODY" RELEASE_URL="$URL" bash ".ci-main/.github/scripts/marketplace-payload.sh")
+
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_PAT" \
             -H "Accept: application/vnd.github+json" \

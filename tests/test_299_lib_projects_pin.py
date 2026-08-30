@@ -2,12 +2,14 @@
 pin in `pyproject.toml` from v0.3.14 to v0.3.15.
 
 Modelled on tests/test_289_lib_projects_pin.py's tomllib + packaging.requirements
-helpers -- reuses the same helper functions verbatim. Unlike #289's floor-based
-pin assertion, this ticket names one exact tag (per plan-critic round 1
-feedback), so the driving assertion for R1 pins equality to v0.3.15 rather
-than only asserting a floor -- a floor alone would also pass for e.g. v0.4.0,
-which isn't what's being shipped here. A floor-style constant is still kept
-for consistency with the precedent files' comment/tag-matching helpers.
+helpers -- reuses the same helper functions verbatim.
+
+The exact-equality assertion that originally lived here (per plan-critic
+round 1 feedback on #299) was a documented one-off, never meant as a
+permanent invariant: it went red for the wrong reason (a false regression,
+not a real one) the moment #304 bumped the pin past v0.3.15. Relaxed here
+(#304) to the same floor pattern every sibling file (#246/#254/#259/#270/#289)
+already uses, precisely so it survives future bumps.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from pathlib import Path
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-_EXACT_TAG = "v0.3.15"
 _MIN_VERSION = Version("0.3.15")
 _COMMENT_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 
@@ -54,13 +55,14 @@ def _declared_tag() -> str:
     return _tag_from_url(entry)
 
 
-def test_lib_python_projects_pin_is_exactly_v0_3_15() -> None:
-    """Driving test (R1): the declared pin must equal v0.3.15 exactly -- not
-    merely meet a floor, since this ticket names one exact tag (a floor alone
-    would also pass for e.g. a later v0.4.0). RED against the unbumped
-    pyproject.toml, which still declares v0.3.14."""
+def test_lib_python_projects_pin_meets_v0_3_15_floor() -> None:
+    """Floor assertion (relaxed by #304 from the original exact-equality
+    check): the declared pin must be >= v0.3.15. This is no longer a driving
+    test for #299 (already satisfied since #299 shipped) -- it now exists
+    only so #299's regression coverage keeps passing across future bumps,
+    matching every sibling file's convention (#246/#254/#259/#270/#289)."""
     tag = _declared_tag()
-    assert tag == _EXACT_TAG, f"expected declared pin {_EXACT_TAG!r}, got {tag!r}"
+    assert Version(tag.lstrip("v")) >= _MIN_VERSION
 
 
 def test_pin_comment_matches_declared_tag_and_floor() -> None:

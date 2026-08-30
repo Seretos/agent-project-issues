@@ -200,7 +200,9 @@ def test_token_probe_project_board_manage_false_issues_pulls_unaffected(
     assert p["permissions"]["board"]["manage"] is False
     # Existing probe behavior for issues/pulls/permissions_source unchanged.
     assert p["permissions_source"] == "token-probe"
-    assert p["permissions_probe_error"] is None
+    assert "permissions_probe_error" not in p
+    assert p["permissions"]["verified"] is True
+    assert p["permissions"]["reason"] is None
     assert p["permissions"]["issues"]["create"] is True
     assert p["permissions"]["pulls"]["merge"] is False
 

@@ -54,9 +54,35 @@ Two extra per-project fields document the source:
                            API probe.
   - `"default"`         — no probe was possible (no token, or probe
                            failed) and the all-False default applies.
-- `permissions_probe_error`: stable `TokenCapabilities.reason` string
-  when a probe failed (`"bad_credentials"`, `"repo_invisible_to_token"`,
-  `"network_error"`, `"permissions_field_missing"`, ...), else `None`.
+
+**Verification (ticket #303)**
+
+Every project's `permissions` block also carries `verified` (bool) and
+`reason` (`str | None`) — the lib's own `Permissions.verified` /
+`Permissions.reason` computed fields, passed through (for `"config"`
+and `"token-discovery"` sources) or derived from this module's own
+git-remote probe (for `"token-probe"`/`"default"`):
+
+- `verified: true` **iff** the emitted `issues`/`pulls` flags came from
+  a clean live probe of the token — either the lib's own token-
+  discovery probe, or this module's git-remote probe with a clean
+  (`reason is None`) result. `reason` is then `None` too.
+- `verified: false` with `reason: "not_probed"` — the default, never-
+  probed state (e.g. a `"config"` project, or a `"git-remote"` project
+  with no usable token).
+- `verified: false` with `reason: "<probe failure code>"` (e.g.
+  `"bad_credentials"`, `"repo_invisible_to_token"`, `"network_error"`,
+  `"work_items_unavailable"`) — a probe was attempted and did not come
+  back fully clean; the `issues`/`pulls` flags are left at the all-False
+  default, never partially widened.
+
+`token_env` names the configured/derived environment variable; it says
+nothing about whether that variable is set. `token_available` /
+`token_error` only report whether a token **string** is present in the
+environment — they say nothing about whether the provider actually
+accepted it. `permissions.verified` / `permissions.reason` are the
+fields that answer that question; treat `token_available: true` as "a
+token was found to try", not as proof of write access.
 
 Note: `state="ok"` can occur without a config file being present when
 token-discovery returns projects from a provider token.  When
@@ -190,11 +216,19 @@ def _project_to_dict(p: ProjectConfig) -> dict:
     pulls_modify = p.permissions.pulls.modify
     pulls_merge = p.permissions.pulls.merge
     permissions_source: str
-    permissions_probe_error: str | None = None
+    # `perm_verified`/`perm_reason` surface the lib's `Permissions.verified`/
+    # `.reason` computed fields (ticket #303). Invariant: `perm_verified is
+    # True` iff the emitted issues/pulls flags above came from a clean live
+    # probe (either the lib's own token-discovery probe, or this module's
+    # git-remote probe below with `caps.reason is None`).
+    perm_verified: bool
+    perm_reason: str | None
 
     if p.source == "config":
         # YAML-defined projects are authoritative — never override.
         permissions_source = "config"
+        perm_verified = p.permissions.verified
+        perm_reason = p.permissions.reason
     elif p.source == "token-discovery":
         # Token-discovery projects have pre-populated permissions from the
         # lib; use them verbatim — no additional probe call is needed or
@@ -205,6 +239,8 @@ def _project_to_dict(p: ProjectConfig) -> dict:
         pulls_modify = p.permissions.pulls.modify
         pulls_merge = p.permissions.pulls.merge
         permissions_source = "token-discovery"
+        perm_verified = p.permissions.verified
+        perm_reason = p.permissions.reason
     else:
         # Auto-discovered (git-remote) project. If a token is available,
         # ask the provider what the token can actually do; otherwise
@@ -219,11 +255,16 @@ def _project_to_dict(p: ProjectConfig) -> dict:
                 pulls_modify = caps.pulls_modify
                 pulls_merge = caps.pulls_merge
                 permissions_source = "token-probe"
+                perm_verified = True
+                perm_reason = None
             else:
                 permissions_source = "default"
-                permissions_probe_error = caps.reason
+                perm_verified = False
+                perm_reason = caps.reason
         else:
             permissions_source = "default"
+            perm_verified = False
+            perm_reason = p.permissions.reason
 
     return {
         "id": p.id,
@@ -248,9 +289,10 @@ def _project_to_dict(p: ProjectConfig) -> dict:
             "board": {
                 "manage": p.permissions.board.manage,
             },
+            "verified": perm_verified,
+            "reason": perm_reason,
         },
         "permissions_source": permissions_source,
-        "permissions_probe_error": permissions_probe_error,
         "token_env": p.token_env,
         "token_available": resolve_token(p) is not None,
         "token_error": _token_error(p),
@@ -414,11 +456,25 @@ def register(mcp: FastMCP) -> None:
         (token-gated):
 
             "permissions": {
-              "read":   true,
-              "issues": {"create": ..., "modify": ...},
-              "pulls":  {"create": ..., "modify": ..., "merge": ...},
-              "board":  {"manage": ...}
+              "read":     true,
+              "issues":   {"create": ..., "modify": ...},
+              "pulls":    {"create": ..., "modify": ..., "merge": ...},
+              "board":    {"manage": ...},
+              "verified": true | false,
+              "reason":   "<code>" | null
             }
+
+        `permissions.verified` / `permissions.reason` are the trustworthy
+        signal for whether the flags above reflect a real, live check of
+        the token — `verified: true` (`reason: null`) only when a clean
+        probe confirmed them; `verified: false` otherwise, with `reason`
+        naming why: `"not_probed"` (the default — never probed, e.g. a
+        config-sourced project or a git-remote project with no usable
+        token) or a probe-failure code (e.g. `"bad_credentials"`,
+        `"repo_invisible_to_token"`). Do NOT use `token_available` /
+        `token_error` for this — those only report whether a token
+        string is present in the environment, unverified: they say
+        nothing about whether the provider actually accepted it.
 
         `permissions.board.manage` gates `ensure_board_column` — check it
         before calling that tool to avoid learning the restriction via a
@@ -445,8 +501,8 @@ def register(mcp: FastMCP) -> None:
 
         For auto-discovered projects (`source == "git-remote"`) with a
         usable token, the permissions reflect what GitHub says the
-        token may actually do (see `permissions_source` /
-        `permissions_probe_error`).
+        token may actually do (see `permissions_source` and
+        `permissions.verified` / `permissions.reason`).
 
         Diagnostic fields:
 
@@ -464,10 +520,12 @@ def register(mcp: FastMCP) -> None:
               additional probe is issued), `"token-probe"` (derived
               from a live API probe of the token), or `"default"` (no
               probe was possible — the all-False default applies).
-          - Per project, `permissions_probe_error`: stable failure
+          - Per project, `permissions.verified` / `permissions.reason`:
+              `verified: true` (`reason: null`) only after a clean live
+              probe; otherwise `verified: false` with `reason` set to
+              `"not_probed"` (never probed) or a stable failure
               identifier (e.g. `"bad_credentials"`,
-              `"repo_invisible_to_token"`, `"network_error"`) when a
-              probe was attempted and failed, else `null`.
+              `"repo_invisible_to_token"`, `"network_error"`).
 
         When the token-discovery result list was capped, the top-level
         `hint` field explains the truncation and notes that tuning the
@@ -612,7 +670,8 @@ def register(mcp: FastMCP) -> None:
         Same diagnostic fields as `list_projects` (`runtime.os`,
         debug-gated `runtime.config_files_searched` /
         `config_file_loaded`, per-match `token_error`,
-        per-match `permissions_source` including `"token-discovery"`),
+        per-match `permissions_source` including `"token-discovery"`,
+        and per-match `permissions.verified` / `permissions.reason`),
         including the `permissions.board.manage` field described there.
 
         When the token-discovery result list was capped, the top-level

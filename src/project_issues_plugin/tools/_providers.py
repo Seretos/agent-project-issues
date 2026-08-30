@@ -594,23 +594,34 @@ def _rewrap_azure_unknown_field(exc, *, custom_fields: dict | None):
 # --------- error translation -------------------------------------------------
 
 
+# Shared tail (ticket #303): the old wording sent agents to check
+# `token_env`/`token_available`/`token_error` after a 401, but those
+# fields only prove a token *string* is present in the environment, never
+# that the provider accepted it. Point at `permissions.verified` /
+# `permissions.reason` instead, which are only true after a real, live
+# probe. No spaced em-dash (" — ") in this tail: `_with_auth_hint` already
+# adds exactly one to join it to the exception message, and a second one
+# here would break callers that assert the hint appears exactly once.
+_AUTH_HINT_DIAGNOSTIC_TAIL = (
+    "call list_projects and read this project's permissions.verified and "
+    "permissions.reason; token_available/token_error only report whether "
+    "a token string is present in the environment, never that the "
+    "provider accepted it"
+)
 _GITHUB_AUTH_HINT = (
     "check that the GitHub token is present and not expired, and that it "
     "has the 'repo' scope (add 'project' scope too if using the board "
-    "tools); call list_projects and check this project's token_env / "
-    "token_available / token_error fields"
+    f"tools); {_AUTH_HINT_DIAGNOSTIC_TAIL}"
 )
 _GITLAB_AUTH_HINT = (
     "check that the GitLab token is present and not expired, and that it "
-    "has the 'api' scope; call list_projects and check this project's "
-    "token_env / token_available / token_error fields"
+    f"has the 'api' scope; {_AUTH_HINT_DIAGNOSTIC_TAIL}"
 )
 _AZUREDEVOPS_AUTH_HINT = (
     "check that the Azure DevOps PAT is present and not expired, and that "
     "it has the scopes this operation needs (Work Items for ticket/field "
-    "operations; Build for any pipeline operation, read or trigger); call "
-    "list_projects and check this project's token_env / token_available / "
-    "token_error fields"
+    "operations; Build for any pipeline operation, read or trigger); "
+    f"{_AUTH_HINT_DIAGNOSTIC_TAIL}"
 )
 
 

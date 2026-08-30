@@ -21,7 +21,10 @@ scope of the API tokens they configure.
   the process environment but never echoes its contents.
 - Tokens are **never** included in tool responses. `list_projects` exposes
   `token_env` (the *name* of the variable) and `token_available: true/false`
-  (a boolean), nothing more.
+  (a boolean), nothing more. `token_available` (and `token_error`) report
+  only whether a token string is present in the environment, unverified.
+  Whether the provider actually accepted it is reported separately, on
+  `permissions.verified` / `permissions.reason`.
 - Tokens are not logged. The startup log records the env-var name only when
   auto-discovery is invoked, never the value.
 - `Authorization: Bearer <token>` headers are set per-request by the httpx

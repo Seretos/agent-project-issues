@@ -317,13 +317,17 @@ def test_search_projects_empty_query_in_no_config(
 
 def test_config_project_carries_permissions_source_config(configured: dict) -> None:
     """YAML-defined projects must always report `permissions_source="config"`
-    and `permissions_probe_error=None` — they are authoritative and
-    must never trigger a network probe."""
+    — they are authoritative and must never trigger a network probe. The
+    top-level `permissions_probe_error` key is gone (ticket #303); its
+    information now lives on `permissions.reason`, which for a never-
+    probed config project is the lib default `"not_probed"`."""
     out = configured["list_projects"]()
     by_id = {p["id"]: p for p in out["projects"]}
     for project_id in ("t-set", "t-unset", "t-empty", "t-no-env"):
         assert by_id[project_id]["permissions_source"] == "config", project_id
-        assert by_id[project_id]["permissions_probe_error"] is None, project_id
+        assert "permissions_probe_error" not in by_id[project_id], project_id
+        assert by_id[project_id]["permissions"]["verified"] is False, project_id
+        assert by_id[project_id]["permissions"]["reason"] == "not_probed", project_id
 
 
 def _autodiscovered_project(path: str = "acme/backend") -> ProjectConfig:
@@ -406,7 +410,9 @@ def test_autodiscovered_project_uses_probed_permissions(
     p = out["projects"][0]
     assert p["source"] == "git-remote"
     assert p["permissions_source"] == "token-probe"
-    assert p["permissions_probe_error"] is None
+    assert "permissions_probe_error" not in p
+    assert p["permissions"]["verified"] is True
+    assert p["permissions"]["reason"] is None
     assert p["permissions"]["issues"]["create"] is True
     assert p["permissions"]["issues"]["modify"] is True
     assert p["permissions"]["pulls"]["create"] is True
@@ -459,7 +465,9 @@ def test_no_token_keeps_default_false(
 
     p = out["projects"][0]
     assert p["permissions_source"] == "default"
-    assert p["permissions_probe_error"] is None
+    assert "permissions_probe_error" not in p
+    assert p["permissions"]["verified"] is False
+    assert p["permissions"]["reason"] == "not_probed"
     assert p["permissions"]["issues"]["create"] is False
     assert p["permissions"]["pulls"]["merge"] is False
 
@@ -577,7 +585,9 @@ def test_autodiscovered_gitlab_project_probes_via_gitlab_provider(
     assert p["provider"] == "gitlab"
     assert p["source"] == "git-remote"
     assert p["permissions_source"] == "token-probe"
-    assert p["permissions_probe_error"] is None
+    assert "permissions_probe_error" not in p
+    assert p["permissions"]["verified"] is True
+    assert p["permissions"]["reason"] is None
     # Full write surface granted by the api scope.
     assert p["permissions"]["issues"]["create"] is True
     assert p["permissions"]["pulls"]["merge"] is True
@@ -587,7 +597,7 @@ def test_probe_failure_records_error_and_keeps_defaults(
     monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
 ) -> None:
     """A failed probe (e.g. 404) must NOT grant permissions; the failure
-    reason flows through to `permissions_probe_error`."""
+    reason flows through to `permissions.reason`."""
     from lib_python_projects import loader as cfg_mod_local
     from lib_python_projects.providers.base import TokenCapabilities
 
@@ -625,7 +635,9 @@ def test_probe_failure_records_error_and_keeps_defaults(
     out = captured["list_projects"]()
     p = out["projects"][0]
     assert p["permissions_source"] == "default"
-    assert p["permissions_probe_error"] == "repo_invisible_to_token"
+    assert "permissions_probe_error" not in p
+    assert p["permissions"]["verified"] is False
+    assert p["permissions"]["reason"] == "repo_invisible_to_token"
     assert p["permissions"]["issues"]["create"] is False
     assert p["permissions"]["pulls"]["merge"] is False
 
@@ -880,8 +892,11 @@ def test_token_discovery_project_never_calls_probe(
 def test_token_discovery_permissions_source_exact_value(
     monkeypatch: pytest.MonkeyPatch, _clean_probe_cache,
 ) -> None:
-    """permissions_source must be exactly "token-discovery" and
-    permissions_probe_error must be None."""
+    """permissions_source must be exactly "token-discovery" and the
+    top-level `permissions_probe_error` key must be absent — this
+    fixture builds its `Permissions` via the plain constructor (not
+    `from_probe`), so `permissions.reason` is the lib's never-probed
+    default `"not_probed"`, passed through verbatim."""
     td = _token_discovery_project()
     fake_result = ProjectsLoadResult(
         projects=[td],
@@ -894,7 +909,9 @@ def test_token_discovery_permissions_source_exact_value(
     out = captured["list_projects"]()
     p = out["projects"][0]
     assert p["permissions_source"] == "token-discovery"
-    assert p["permissions_probe_error"] is None
+    assert "permissions_probe_error" not in p
+    assert p["permissions"]["verified"] is False
+    assert p["permissions"]["reason"] == "not_probed"
 
 
 def test_token_discovery_permissions_values_from_project(

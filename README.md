@@ -329,6 +329,16 @@ Downstream tooling should treat the body prefix as authoritative for AI-attribut
 - Comment tools mirror the ticket surface: `add_comment` (write, gated by `modify`), `list_comments` and `get_comment` (read-only), and `update_comment` (write, gated by `modify`). `update_comment` re-applies the `#ai-generated` prefix to the new body so any AI edit stays labelled.
 - `list_tickets_across_projects` fans the standard list filters (`status`, `labels`, `not_labels`, `assignee`, `author`, `search`, `limit_per_project`) across multiple projects in one call. Pass `project_ids=None` (the default) to query every configured project, or a subset. The call is partial-failure tolerant: an error on one project (missing token, permission denied, API failure, unknown id) is recorded in `results[project_id].error` and in the top-level `errors` list without aborting the rest.
 
+## Ticket templates
+
+`list_ticket_templates(project_id)` — read-only, token-optional, no permission flag required — discovers the project's issue templates: GitHub issue forms (`.github/ISSUE_TEMPLATE/*.yml`) and plain markdown templates, GitLab project-level markdown issue templates, and Azure DevOps work-item templates. Each entry carries `name`, `kind` (`form` / `markdown` / `workitem`), `labels` and `title_prefix` (auto-applied on a conforming `create_ticket`), `required_sections` (the `### <heading>` sections a submitted body must fill in), and `skeleton` (a ready-to-fill starting body). A project whose provider has no template concept, or that simply has none configured, returns `"templates": []` — a stable fact, not an error.
+
+Validation against these templates is **automatic and mechanical, always on**: whenever a project has templates, `create_ticket` and `update_ticket` (the latter only when a `body` is supplied) check the submitted body against them *before* any write reaches the provider. A non-conforming call never creates or updates anything — it returns a self-correcting payload (`"written": false`, `state`, `templates`, `template`, `violations`, `skeleton`, `received_sections`, `hint`) instead of a bare error, so the agent can fill in the exact missing sections and retry in one more call via `hint`, an executable re-call with `template=<name>` and the corrected body. `state` is one of `template_required` (no template named/inferred), `template_unknown` (the named `template` doesn't exist), or `template_violation` (a template was resolved but the body doesn't satisfy it).
+
+There is no config key and no per-project toggle for any of this — nothing in `projects.yml` turns this check off, loosens it, or makes it merely a suggestion.
+
+**Epic note:** an `epic.yml` issue-form template with a single required field is treated as an ordinary template like any other — **no special case**. Do not add a **label-based exemption** (e.g. skipping the check when the `epic` label is present) for epic-shaped tickets: if a project wants epics to have looser requirements, that belongs in the template's own field definitions (e.g. fewer/optional fields), not in a carve-out in this server.
+
 ## PR tools
 
 Pull-request surface mirrors the ticket surface and is gated by the `permissions.pulls.*` namespace:

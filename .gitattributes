@@ -1,3 +1,28 @@
+# Claude Code SILENTLY ignores a file under .claude/agents/, .claude/skills/ or
+# .claude/commands/ whose line endings are CRLF — no error, no warning, the
+# subagent or skill simply does not exist. `* text=auto` alone does NOT prevent
+# that: without an explicit eol=lf, checkout on a machine with
+# core.autocrlf=true (the Git-for-Windows default) writes CRLF into the working
+# tree, which is precisely what Claude Code reads. Git then shows nothing,
+# because the committed blob is already LF.
+* text=auto eol=lf
+
+# Bash refuses to run a script with CRLF; PowerShell and Python are fine on LF.
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.py   text eol=lf
+*.ps1  text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+
+# Batch files are the one place CRLF is genuinely required.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.ico binary
+
 # The release artifact ships the per-OS PyInstaller binaries directly
 # at bin/<name>, mirroring the agent-worktree layout. The shell + batch
 # wrappers that ticket #37 traced CRLF-mangling to were removed in
@@ -7,7 +32,3 @@
 # for build-side tooling that ever stages these paths in a source tree.
 bin/project-issues binary
 bin/project-issues.exe binary
-
-# Skill markdown must stay LF on disk regardless of core.autocrlf, since
-# Claude Code / tests compare it byte-for-byte (see ticket #242).
-skills/**/SKILL.md text eol=lf

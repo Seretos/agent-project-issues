@@ -40,6 +40,18 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
 - **Config file is `projects.yml`.** The plugin passes this name (and `projects.yaml`)
   explicitly to `load_projects`, because the lib still defaults to the legacy
   `project-issues.yml`. Don't "simplify" that back to the lib default.
+- **Issue-template enforcement lives here, not in the lib.** `lib-python-projects` owns
+  discovery and parsing only — `list_issue_templates`, `validate_ticket_body`,
+  `render_skeleton` — and never decides whether a write should be blocked; deciding that,
+  building the refusal payload, and gating `create_ticket`/`update_ticket` on it all live in
+  `tools/tickets.py`. Keep that split: **the library reports, the plugin decides** — if a
+  future change needs the gate to behave differently (a new refusal state, a different
+  label/title-prefix policy), it belongs in this repo's tool layer, not as a new knob on the
+  lib's parsing functions. Relatedly, `create_ticket`/`update_ticket` call
+  `templates.validate_ticket_body` on the caller's raw body BEFORE the provider prepends the
+  `#ai-generated`/`#ai-modified` marker — **validation runs before the #ai-generated marker**
+  is added, so the marker's own text can never accidentally satisfy (or fail) a template
+  field's content check.
 
 ## Gotchas
 

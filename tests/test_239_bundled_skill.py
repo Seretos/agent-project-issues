@@ -255,6 +255,11 @@ _NON_TOOL_WHITELIST = {
     "workflow",
     # Added by ticket #262 (get_pipeline_step_log character-based hard cap):
     "max_chars", "tail",
+    # Added by ticket #307 (issue-template enforcement gate — refusal-payload
+    # fields and state values, none of which are tool names themselves):
+    "body", "received_sections", "skeleton", "state", "template",
+    "template_required", "template_unknown", "template_violation",
+    "template_warning", "templates", "violations",
 }
 
 

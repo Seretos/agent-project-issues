@@ -91,6 +91,47 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
   alone don't convey: the pipeline drill-down chain, label rename semantics,
   relation direction, and board write keys.
 
+## Ticket templates
+
+When a user says "leg ein Ticket an" / "erstelle ein Issue" (or the
+English equivalent) against a project that has issue templates
+configured, `create_ticket` — and `update_ticket` whenever a `body` is
+supplied — automatically validates the submitted body against those
+templates before writing anything. This is mechanical enforcement, not
+a suggestion: there is no way to opt out or disable it per-call, and
+you do not need to (and should not) inspect the repository yourself to
+figure out what a template requires — call `list_ticket_templates`
+first, or simply attempt the write and read the refusal.
+
+A non-conforming write is refused pre-flight, before any provider HTTP
+call, with a self-correcting payload instead of an `{"error": ...}`:
+`"written": false`, plus `state`, `templates`, `template`, `violations`,
+`skeleton`, `received_sections`, and `hint`. `state` is one of three:
+
+- `template_required` — the project has templates but none was named
+  (`create_ticket`) or none could be inferred from the ticket's current
+  labels (`update_ticket`). Pick one from `templates` (or call
+  `list_ticket_templates` yourself) and retry with `template=<name>`.
+- `template_unknown` — the `template=` name you passed doesn't match
+  any of `templates`. Re-check the exact `name` field and retry.
+- `template_violation` — a template was resolved, but the submitted
+  body doesn't satisfy it. `violations` names each unmet field;
+  `skeleton` is a ready-to-fill `### <heading>` starting point.
+
+Every refusal's `hint` is a real, executable re-call, not just a
+mention of the tool's name — copy it (filling in the skeleton) to
+retry in one further call. This is the whole correction loop: one
+refusal, one fix, one retry — never more than a single extra round
+trip.
+
+`list_ticket_templates(project_id)` is read-only and side-effect-free —
+call it up front on an unfamiliar project to see what's required before
+writing anything, instead of discovering it via a refusal. A project
+whose provider has no template concept, or that simply has none
+configured, returns `"templates": []` and both `create_ticket` and
+`update_ticket` pass through unaffected (with a `template_warning` note
+on the response, not an error).
+
 ## Labels: create the catalog entry first (GitHub only)
 
 On GitHub, every label name passed to `create_ticket`'s `labels` or

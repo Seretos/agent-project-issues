@@ -8,15 +8,16 @@ them and MUST NOT add them manually.
 from __future__ import annotations
 
 import inspect
+import re
 import time
 from dataclasses import asdict
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 
-from lib_python_projects import resolve_token
+from lib_python_projects import resolve_token, templates
 from lib_python_projects.providers.base import TicketFilters
 from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.github import GitHubError
@@ -42,17 +43,45 @@ from project_issues_plugin.tools._slicing import (
     apply_order,
 )
 
-# TTL cache for `list_ticket_statuses`. Status workflows are static for
-# GitHub/GitLab and only change on ADO when a project admin edits the
-# process template — refreshing every hour is the documented trade-off
-# (plan-comment for ticket #7, D3 = Option B).
+# TTL cache shared by every read-only discovery call (`list_ticket_statuses`,
+# `list_ticket_templates`). Status workflows are static for GitHub/GitLab and
+# only change on ADO when a project admin edits the process template; issue
+# templates change about as rarely — refreshing every hour is the documented
+# trade-off (plan-comment for ticket #7, D3 = Option B; extended to templates
+# by ticket #307).
 _STATUS_CACHE_TTL_SECONDS = 60 * 60
-_status_cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
+_discovery_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
 
 
 def _status_cache_clear() -> None:
-    """Test-only hook — clears the module-level status cache."""
-    _status_cache.clear()
+    """Test-only hook — clears the module-level discovery cache.
+
+    Name kept for backward compatibility (`tests/test_statuses.py`
+    references it directly); the cache it clears now backs both
+    `list_ticket_statuses` and `list_ticket_templates` (ticket #307).
+    """
+    _discovery_cache.clear()
+
+
+def _cached(kind: str, key: tuple, produce):
+    """Shared TTL-cache helper for read-only discovery calls.
+
+    Keyed `(kind, *key)` so `list_ticket_statuses` and
+    `list_ticket_templates` — which would otherwise share the same
+    `(project.id, token)` identity — never collide in the same cache.
+    `produce` is invoked only on a cache miss/expiry, and its result is
+    cached ONLY when `produce()` succeeds: an exception propagates
+    uncached, so a listing failure is never remembered and an immediate
+    retry re-attempts it (ticket #307 R5).
+    """
+    cache_key = (kind, *key)
+    now = time.time()
+    cached = _discovery_cache.get(cache_key)
+    if cached is not None and (now - cached[0]) < _STATUS_CACHE_TTL_SECONDS:
+        return cached[1]
+    result = produce()
+    _discovery_cache[cache_key] = (now, result)
+    return result
 
 
 def _default_board_custom_fields(
@@ -109,6 +138,181 @@ def _default_board_custom_fields(
     merged = dict(custom_fields or {})
     merged[status_field] = native
     return merged, None
+
+
+# --------- issue-template enforcement (ticket #307) --------------------------
+
+# GitHub's own issue-form rendering convention: each field becomes a
+# `### <label>` section (see `lib_python_projects.templates`). Used here to
+# parse the *submitted* body's real sections for a refusal payload's
+# `received_sections` — actual parsing, not a stub.
+_SECTION_HEADING_RE = re.compile(r"^### (.+)$", re.MULTILINE)
+
+
+def _received_sections(body: str) -> list[str]:
+    """The real `###`-level section headings present in a submitted ticket
+    body, in submission order."""
+    return [m.group(1).strip() for m in _SECTION_HEADING_RE.finditer(body or "")]
+
+
+def _required_field_expected(f) -> str:
+    """A short, meaningful (non-placeholder) description of what a required
+    template field expects, used to build `required_sections` in
+    `_template_view`.
+
+    Deliberately reimplemented here rather than reaching into the lib's
+    `templates._expected_sentence` — that helper is private to the lib's
+    own violation-message generation, not a surface this plugin should
+    depend on.
+    """
+    if f.type == "dropdown":
+        options = f.options or []
+        if options:
+            return f"one of: {', '.join(options)}"
+        return f"a value for {f.label}"
+    if f.type == "checkboxes":
+        return f"at least one checked box under {f.label}"
+    return f"content under the `### {f.label}` section"
+
+
+def _template_view(template) -> dict[str, Any]:
+    """Project a lib `IssueTemplate` down to this tool's own fixed contract
+    (`name`/`kind`/`labels`/`title_prefix`/`required_sections`/`skeleton`).
+
+    Shared by `list_ticket_templates` and the refusal payloads built by
+    `create_ticket`/`update_ticket` so the two surfaces can never drift
+    apart (ticket #307 step 9). `required_sections` lists only *required*,
+    non-`markdown` fields — optional fields and informational `markdown`
+    blocks are never something a caller must fill in.
+    """
+    required_sections = [
+        {"heading": f.label, "expected": _required_field_expected(f)}
+        for f in template.fields
+        if f.required and f.type != "markdown"
+    ]
+    return {
+        "name": template.name,
+        "kind": template.kind,
+        "labels": list(template.labels),
+        "title_prefix": template.title_prefix,
+        "required_sections": required_sections,
+        "skeleton": templates.render_skeleton(template),
+    }
+
+
+def _refusal_hint(
+    tool_name: str, *, project_id: str, ticket_id: str | None, template_name: str | None,
+) -> str:
+    """Build an actual, executable re-call for a refusal payload's `hint` —
+    never just a mention of the tool's name.
+
+    When no template was resolved (`template_required`/`template_unknown`),
+    a template name is never fabricated — the call carries a `<name>`
+    placeholder and the message points the caller at the `templates` list
+    instead.
+    """
+    call_parts = [f'project_id="{project_id}"']
+    if ticket_id is not None:
+        call_parts.append(f'ticket_id="{ticket_id}"')
+    call_parts.append(f'template="{template_name or "<name>"}"')
+    call_parts.append("body=<skeleton>")
+    call = f"{tool_name}({', '.join(call_parts)})"
+    if template_name is not None:
+        return (
+            f'the submitted body does not satisfy the "{template_name}" template; '
+            "fix the sections named under violations (skeleton is a ready-to-fill "
+            f"starting point), then retry: {call}"
+        )
+    return (
+        "no template was resolved; pick one from the templates list below "
+        f"(or call list_ticket_templates), then retry: {call}"
+    )
+
+
+def _refusal_payload(
+    *, tool_name: str, project_id: str, ticket_id: str | None, state: str,
+    body: str, all_templates: list, template=None, violations=None,
+) -> dict[str, Any]:
+    """Build the fixed refusal contract: `state`/`hint`/`templates`/
+    `template`/`violations`/`skeleton`/`received_sections`/`written`. No
+    `error` key — this is a self-correcting payload, not a failure."""
+    return {
+        "written": False,
+        "state": state,
+        "templates": [_template_view(t) for t in all_templates],
+        "template": _template_view(template) if template is not None else None,
+        "violations": [asdict(v) for v in violations] if violations else [],
+        "skeleton": templates.render_skeleton(template) if template is not None else None,
+        "received_sections": _received_sections(body),
+        "hint": _refusal_hint(
+            tool_name, project_id=project_id, ticket_id=ticket_id,
+            template_name=template.name if template is not None else None,
+        ),
+    }
+
+
+def _template_gate(
+    *, tool_name: str, project, token, provider, body: str,
+    template: str | None, ticket_id: str | None,
+    infer: Callable[[list[Any]], Any | None] | None = None,
+) -> tuple[Any | None, str | None, dict[str, Any] | None]:
+    """Shared capability-check -> cache-lookup -> template-resolution ->
+    violation-check gate, used by both `create_ticket` and `update_ticket`
+    (ticket #307 review round 1 nit: folds what the first pass left
+    duplicated inline into one helper, mirroring how the two TTL caches
+    were folded into one `_cached`).
+
+    Returns `(chosen, template_warning, refusal)`:
+      - no template capability, or zero templates configured:
+        `(None, "project has no templates", None)` — the caller proceeds
+        with the write unguarded.
+      - a resolution or violation refusal: `(None, None, <refusal
+        payload>)` — the caller must `return` this dict immediately,
+        verbatim, without writing anything.
+      - success: `(<resolved template>, None, None)`.
+
+    Resolution when `template` (the explicit param) is `None` is the one
+    call-site-specific piece: `create_ticket` never infers — an absent
+    `template` always refuses `template_required`. `update_ticket` infers
+    from the ticket's current labels instead, via the `infer` callback
+    (called with the full template list; a `None` return means no
+    unique match, refusing `template_required` the same way). `infer` is
+    only ever invoked when `template` is `None` and templates exist,
+    so update_ticket's pre-update ticket fetch inside it never runs on a
+    templated-project write that already names an explicit `template=`.
+    """
+    if not hasattr(provider, "list_issue_templates"):
+        return None, "project has no templates", None
+    all_templates = _cached(
+        "templates", (project.id, token),
+        lambda: provider.list_issue_templates(project, token),
+    )
+    if not all_templates:
+        return None, "project has no templates", None
+
+    if template is not None:
+        chosen = next((t for t in all_templates if t.name == template), None)
+        if chosen is None:
+            return None, None, _refusal_payload(
+                tool_name=tool_name, project_id=project.id, ticket_id=ticket_id,
+                state="template_unknown", body=body, all_templates=all_templates,
+            )
+    else:
+        chosen = infer(all_templates) if infer is not None else None
+        if chosen is None:
+            return None, None, _refusal_payload(
+                tool_name=tool_name, project_id=project.id, ticket_id=ticket_id,
+                state="template_required", body=body, all_templates=all_templates,
+            )
+
+    violations = templates.validate_ticket_body(body, chosen)
+    if violations:
+        return None, None, _refusal_payload(
+            tool_name=tool_name, project_id=project.id, ticket_id=ticket_id,
+            state="template_violation", body=body, all_templates=all_templates,
+            template=chosen, violations=violations,
+        )
+    return chosen, None, None
 
 
 def register(mcp: FastMCP) -> None:
@@ -490,13 +694,23 @@ def register(mcp: FastMCP) -> None:
                 "custom_fields already sets the board's status_field key."
             )),
         ] = False,
+        template: Annotated[
+            str | None,
+            Field(description=(
+                "Name of an issue template (from list_ticket_templates) to "
+                "validate this body against, e.g. 'Bug Report'. Required "
+                "whenever the project has templates; a project with none "
+                "configured ignores this. An unrecognised name, a missing "
+                "template on a templated project, or a body that doesn't "
+                "satisfy the named template all refuse the write pre-flight "
+                "with a self-correcting payload instead of creating the "
+                "ticket — see the tool's docstring."
+            )),
+        ] = None,
     ) -> dict:
         """Create a new ticket.
 
-        Just create what the user asked for — DO NOT pre-inspect the
-        repository or codebase to "gather context" first. The user can
-        always provide more detail if they want it; one-shot create
-        actions stay one-shot.
+        On a project with templates, call `list_ticket_templates` first (or read the templates from the refusal) and fill the skeleton; do not inspect the codebase for context.
 
         `status` is optional; when supplied, pass a value exactly as
         returned by `list_ticket_statuses` — the same vocabulary
@@ -580,13 +794,35 @@ def register(mcp: FastMCP) -> None:
             _require_issues_create(project)
             token = _require_token(project)
             provider = _provider_for(project)
+
+            effective_title = title
+            effective_labels = list(labels or [])
+            chosen, template_warning, refusal = _template_gate(
+                tool_name="create_ticket", project=project, token=token,
+                provider=provider, body=body, template=template, ticket_id=None,
+            )
+            if refusal is not None:
+                return refusal
+            if chosen is not None:
+                # Conforming: union the template's labels onto the
+                # caller's (deduped, order-preserving) and apply the
+                # title_prefix only when not already present.
+                effective_labels = list(
+                    dict.fromkeys([*effective_labels, *chosen.labels])
+                )
+                if chosen.title_prefix and not effective_title.startswith(
+                    chosen.title_prefix
+                ):
+                    effective_title = f"{chosen.title_prefix}{effective_title}"
+
             effective_custom_fields, board_warning = _default_board_custom_fields(
                 project, provider, token, custom_fields, off_board,
             )
             try:
                 ticket = provider.create_ticket(
-                    project, token, title, body, labels or [], assignees or [],
-                    status=status, custom_fields=effective_custom_fields,
+                    project, token, effective_title, body, effective_labels,
+                    assignees or [], status=status,
+                    custom_fields=effective_custom_fields,
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
                 raise _rewrap_azure_unknown_field(
@@ -595,6 +831,8 @@ def register(mcp: FastMCP) -> None:
             result = {"project_id": project.id, "ticket": asdict(ticket)}
             if board_warning:
                 result["board_warning"] = board_warning
+            if template_warning:
+                result["template_warning"] = template_warning
             return result
         return _safe(go)
 
@@ -645,6 +883,24 @@ def register(mcp: FastMCP) -> None:
                 "Call list_custom_fields(project_id) to discover available field "
                 "reference names and their allowed values before setting them."
             ))
+        ] = None,
+        template: Annotated[
+            str | None,
+            Field(description=(
+                "Name of an issue template (from list_ticket_templates) to "
+                "validate the new body against. Only consulted when body is "
+                "supplied; a body-less update never triggers the template "
+                "gate at all. When omitted (and body is supplied on a "
+                "templated project), the template is inferred from the "
+                "ticket's current labels — exactly one template whose "
+                "labels are a subset of the ticket's current labels; zero "
+                "or more than one match refuses the write, listing every "
+                "template, rather than guessing. An unrecognised name, no "
+                "unique match, or a body that doesn't satisfy the resolved "
+                "template all refuse the write pre-flight with a "
+                "self-correcting payload instead of updating the ticket — "
+                "see the tool's docstring."
+            )),
         ] = None,
     ) -> dict:
         """Update an existing ticket. Only specified fields change.
@@ -789,6 +1045,37 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_id = _normalize_id(project, ticket_id)
+
+            template_warning: str | None = None
+            if body is not None:
+                def _infer_from_labels(all_templates: list[Any]) -> Any | None:
+                    # update-specific: the pre-update fetch only runs when
+                    # no explicit `template=` was given (this callback is
+                    # only invoked in that case) — matched purely on
+                    # subset semantics, per the docstring's contract: an
+                    # empty `labels=[]` template is mathematically a
+                    # subset of every ticket's label set and must remain
+                    # eligible (ticket #307 review round 1 blocking
+                    # finding — a prior `t.labels and ...` truthiness
+                    # guard wrongly excluded it).
+                    current_ticket, _, _, _ = provider.get_ticket(
+                        project, token, normalized_id, include_relations=False,
+                    )
+                    current_labels = set(current_ticket.labels)
+                    matches = [
+                        t for t in all_templates
+                        if set(t.labels) <= current_labels
+                    ]
+                    return matches[0] if len(matches) == 1 else None
+
+                chosen, template_warning, refusal = _template_gate(
+                    tool_name="update_ticket", project=project, token=token,
+                    provider=provider, body=body, template=template,
+                    ticket_id=normalized_id, infer=_infer_from_labels,
+                )
+                if refusal is not None:
+                    return refusal
+
             cf_supported = "custom_fields" in inspect.signature(
                 provider.update_ticket
             ).parameters
@@ -840,10 +1127,13 @@ def register(mcp: FastMCP) -> None:
                 exc = _rewrap_label_404(exc, labels_add=labels_add)
                 exc = _rewrap_422_assignee(exc, assignees_add=assignees_add)
                 raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
-            return {
+            result = {
                 "project_id": project.id,
                 "ticket": asdict(ticket),
             }
+            if template_warning:
+                result["template_warning"] = template_warning
+            return result
         return _safe(go)
 
     @mcp.tool()
@@ -892,21 +1182,72 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
-            cache_key = (project.id, token)
-            now = time.time()
-            cached = _status_cache.get(cache_key)
-            if cached is not None and (now - cached[0]) < _STATUS_CACHE_TTL_SECONDS:
-                return cached[1]
-            spec = provider.list_statuses(project, token)
-            payload = {
+
+            def produce() -> dict:
+                spec = provider.list_statuses(project, token)
+                return {
+                    "project_id": project.id,
+                    "provider": project.provider,
+                    "values": list(spec.values),
+                    "transitions": {k: list(v) for k, v in spec.transitions.items()},
+                    "hints": dict(spec.hints),
+                }
+            return _cached("statuses", (project.id, token), produce)
+        return _safe(go)
+
+    @mcp.tool()
+    def list_ticket_templates(project_id: str) -> dict:
+        """Discover the project's issue templates (GitHub issue forms/plain
+        markdown templates, GitLab markdown issue templates, Azure DevOps
+        work-item templates).
+
+        `create_ticket` and `update_ticket` (whenever a `body` is supplied)
+        automatically validate the submitted body against these templates
+        before writing anything — call this tool first (or read the
+        `templates` list off a refusal payload) to discover what's
+        expected, then fill in the returned `skeleton` and pass it back
+        with `template="<name>"`.
+
+        Returns:
+
+        ```
+        {
+          "project_id": str,
+          "templates": [
+            {
+              "name":              str,
+              "kind":              "form" | "markdown" | "workitem",
+              "labels":            [str, ...],  # auto-applied on a conforming create_ticket
+              "title_prefix":      str,         # auto-applied on a conforming create_ticket
+              "required_sections": [{"heading": str, "expected": str}, ...],
+              "skeleton":          str,         # ready-to-fill ### <heading> body
+            },
+            ...
+          ]
+        }
+        ```
+
+        A project whose provider has no template concept, or that simply
+        has none configured, returns `"templates": []` — a stable fact,
+        not an error. Results are cached server-side for ~1h per
+        `(project_id, token)` pair, sharing `list_ticket_statuses`'
+        discovery cache (templates change rarely). Read-only: no
+        permission flag required.
+        """
+        def go() -> dict:
+            project = _resolve(project_id)
+            provider = _provider_for(project)
+            token = resolve_token(project)
+            if not hasattr(provider, "list_issue_templates"):
+                return {"project_id": project.id, "templates": []}
+            all_templates = _cached(
+                "templates", (project.id, token),
+                lambda: provider.list_issue_templates(project, token),
+            )
+            return {
                 "project_id": project.id,
-                "provider": project.provider,
-                "values": list(spec.values),
-                "transitions": {k: list(v) for k, v in spec.transitions.items()},
-                "hints": dict(spec.hints),
+                "templates": [_template_view(t) for t in all_templates],
             }
-            _status_cache[cache_key] = (now, payload)
-            return payload
         return _safe(go)
 
     @mcp.tool()

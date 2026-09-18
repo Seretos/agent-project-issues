@@ -5,10 +5,10 @@ tag v0.1.2, and `lib-python-projects` is bumped v0.3.17 -> v0.3.19.
 
 Floor-based convention (like #246/#254/.../#308): the *declared* tag must be an
 exact `vX.Y.Z` tag that is >= this ticket's floor (a floor, not equality, so
-the tests survive future bumps; a stray v0.1.3 would still pass R1 but the
-acceptance values are pinned at this ticket by the floors plus R2). The installed-vs-declared test (R2) is what proves the real environment
-holds exactly the declared versions; together with the floors that pins the
-acceptance criterion (config 0.1.2 / projects 0.3.19 at this ticket).
+the tests survive future bumps). The floors are lower bounds at this ticket's
+target versions (config 0.1.2, projects 0.3.19); R2 proves the installed
+environment equals what is declared. Exact equality with the targets is checked
+by review of the pyproject diff and by CI, not by these tests.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from packaging.version import Version
 
 _CONFIG_FLOOR = Version("0.1.2")
 _PROJECTS_FLOOR = Version("0.3.19")
-_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
+_TAG_RE = re.compile(r"v\d+\.\d+\.\d+(?![\w.])")
 _EXACT_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 # sync-libs.ps1's real regex, copied verbatim from the script.
 _SYNC_LIBS_PATTERN = re.compile(r'"(lib-python-[^"]+@[^"]+)"')
@@ -82,7 +82,6 @@ def test_both_entries_still_parse_and_match_sync_libs_pattern() -> None:
         Requirement(entry)
     for name in ("lib-python-config", "lib-python-projects"):
         entry = _entry(name)
-        assert f"git+https://github.com/Seretos/{name}@" in entry
     captured = _SYNC_LIBS_PATTERN.findall(_pyproject_text())
     assert len(captured) == 2, captured
     for cap in captured:

@@ -24,6 +24,12 @@ _CONFIG_FLOOR = Version("0.1.2")
 _PROJECTS_FLOOR = Version("0.3.19")
 _TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _EXACT_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+# Wording that *describes* a lib as floating on a branch. Deliberately does not
+# match the legitimate "not silently through a moving branch" rationale.
+_FLOATING_RE = re.compile(
+    r"\bfloat(?:s|ing|ed)?\b|release/[0-9Nx]|HEAD of release|branch HEAD",
+    re.IGNORECASE,
+)
 _SYNC_LIBS_PATTERN = re.compile(r'(lib-python-[^"]+@[^"]+)')
 
 
@@ -81,6 +87,14 @@ def test_both_entries_still_parse_and_match_sync_libs_pattern() -> None:
         entry = _entry(name)
         assert f"git+https://github.com/Seretos/{name}@" in entry
         assert _SYNC_LIBS_PATTERN.search(f'"{entry}"'), entry
+    captured = _SYNC_LIBS_PATTERN.findall(
+        " ".join(f'"{e}"' for e in _dependencies() if "lib-python-" in e)
+    )
+    assert len(captured) == 2, captured
+    for cap in captured:
+        assert _EXACT_TAG_RE.match(cap.rsplit("@", 1)[-1]), (
+            f"sync-libs regex would capture a non-tag ref: {cap!r}"
+        )
 
 
 def test_installed_libs_match_declared_pins() -> None:
@@ -102,9 +116,34 @@ def test_installed_libs_match_declared_pins() -> None:
         )
 
 
+def _norm(text: str) -> str:
+    return " ".join(text.replace("#", " ").split()).lower()
+
+
+def test_floating_regex_bites_on_floating_prose_only() -> None:
+    """Guard the guard: the regex flags floating descriptions but not the
+    legitimate rationale sentence."""
+    legit = (
+        "# Pinned to an exact immutable tag (v0.1.2). New lib versions arrive "
+        "via an explicit chore ticket -- not silently through a moving branch."
+    )
+    assert not _FLOATING_RE.search(legit)
+    for bad in (
+        "Floats on the libs' branch",
+        "floating libs",
+        "pinned to release/0.x",
+        "the HEAD of release/0.x",
+        "re-fetch the branch HEAD",
+        "bump to release/Nx",
+    ):
+        assert _FLOATING_RE.search(bad), bad
+
+
 def test_config_comment_names_declared_tag_and_gives_chore_rationale() -> None:
     """Driving test (R3): the comment block above the config dependency line
-    names the declared tag (and only it) and gives the chore-ticket rationale."""
+    names the declared tag (and only it), states the same rationale as the
+    projects comment (explicit chore ticket AND not via a moving branch), and
+    no longer describes config as floating."""
     declared = _declared_tag("lib-python-config")
     lines = _pyproject_text().splitlines()
     dep_idx = next(
@@ -113,21 +152,37 @@ def test_config_comment_names_declared_tag_and_gives_chore_rationale() -> None:
     start = dep_idx
     while start > 0 and lines[start - 1].strip().startswith("#"):
         start -= 1
-    block = "\n".join(lines[start:dep_idx])
+    block = " ".join(lines[start:dep_idx])
 
     found = _TAG_RE.findall(block)
     assert found, "comment above lib-python-config names no vX.Y.Z tag"
     assert all(t == declared for t in found), (
         f"comment tag mentions {found!r} do not match declared pin {declared!r}"
     )
-    assert "chore ticket" in " ".join(block.replace("#", " ").split()).lower()
+    text = _norm(block)
+    assert "chore ticket" in text, "comment lacks the explicit-chore-ticket rationale"
+    assert "moving branch" in text and "not" in text.split("moving branch")[0], (
+        "comment lacks the 'not silently through a moving branch' rationale"
+    )
+    assert "immutable" in text or "exact" in text, "comment does not say the pin is exact"
+    contradiction = _FLOATING_RE.search(block)
+    assert not contradiction, (
+        f"config comment still describes floating: {contradiction.group(0)!r}"
+    )
 
 
 def test_no_floating_branch_prose_remains() -> None:
-    """Driving test (R3): no `release/0.x` left in pyproject/sync-libs/test."""
-    offenders = [
-        rel
-        for rel in ("pyproject.toml", "scripts/sync-libs.ps1", "scripts/test.ps1")
-        if "release/0.x" in (_repo_root() / rel).read_text(encoding="utf-8")
-    ]
-    assert not offenders, f"floating-branch prose still present in: {offenders}"
+    """Driving test (R3): no floating-branch wording for the libs left in
+    pyproject, sync-libs, test.ps1 or the test workflow."""
+    offenders = {}
+    for rel in (
+        "pyproject.toml",
+        "scripts/sync-libs.ps1",
+        "scripts/test.ps1",
+        ".github/workflows/test.yml",
+    ):
+        text = (_repo_root() / rel).read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in _FLOATING_RE.finditer(text)})
+        if hits:
+            offenders[rel] = hits
+    assert not offenders, f"floating-branch prose still present: {offenders}"

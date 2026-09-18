@@ -137,18 +137,26 @@ def test_staging_fails_when_required_member_missing(tmp_path: Path) -> None:
     assert result.returncode != 127, "script must exist and fail loudly, not be missing"
 
 
+def _release_steps() -> list[dict]:
+    from ruamel.yaml import YAML  # transitive dep via lib-python-projects
+
+    doc = YAML(typ="safe").load(ROOT.joinpath(".github", "workflows", "release.yml").read_text(encoding="utf-8"))
+    return [step for job in doc["jobs"].values() for step in job.get("steps", [])]
+
+
 def test_release_workflow_uses_shared_staging_script_in_both_steps() -> None:
-    text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    steps = _release_steps()
+    zip_steps = [s for s in steps if "zip" in str(s.get("name", "")).lower()]
+    branch_steps = [s for s in steps if "release branch" in str(s.get("name", "")).lower()]
+    assert len(zip_steps) == 1, f"expected one ZIP-staging step, found {len(zip_steps)}"
+    assert len(branch_steps) == 1, f"expected one release-branch step, found {len(branch_steps)}"
 
-    # The old duplicated inline staging blocks are gone.
-    assert "cp -a skills" not in text
-    assert "cp -a hooks" not in text
-
-    # The script is *invoked* (not merely mentioned) in >= 2 distinct steps.
-    call = re.compile(r"^\s*bash\s+\S*stage-plugin-payload\.sh", re.MULTILINE)
-    steps = re.split(r"^\s*-\s+name:", text, flags=re.MULTILINE)
-    invoking = [step for step in steps if call.search(step)]
-    assert len(invoking) >= 2, f"stage-plugin-payload.sh invoked in {len(invoking)} step(s)"
+    call = re.compile(r"^\s*bash\s+\.github/scripts/stage-plugin-payload\.sh[ \t]+(\S+)[ \t]+(\S+)[ \t]*$", re.MULTILINE)
+    residual = re.compile(r"\bcp\s+-a\b[^\n]*(skills|hooks|\.claude-plugin|bin)\b")
+    for step in (zip_steps[0], branch_steps[0]):
+        run = step.get("run", "")
+        assert call.search(run), f"step {step['name']!r} does not call the shared staging script with <src> <dest>"
+        assert not residual.search(run), f"step {step['name']!r} still copies package members inline"
 
 
 def test_root_and_claude_manifests_agree() -> None:

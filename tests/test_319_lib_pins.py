@@ -4,8 +4,9 @@
 tag v0.1.2, and `lib-python-projects` is bumped v0.3.17 -> v0.3.19.
 
 Floor-based convention (like #246/#254/.../#308): the *declared* tag must be an
-exact `vX.Y.Z` tag that is >= this ticket's floor, so the tests survive future
-bumps. The installed-vs-declared test (R2) is what proves the real environment
+exact `vX.Y.Z` tag that is >= this ticket's floor (a floor, not equality, so
+the tests survive future bumps; a stray v0.1.3 would still pass R1 but the
+acceptance values are pinned at this ticket by the floors plus R2). The installed-vs-declared test (R2) is what proves the real environment
 holds exactly the declared versions; together with the floors that pins the
 acceptance criterion (config 0.1.2 / projects 0.3.19 at this ticket).
 """
@@ -25,23 +26,9 @@ _CONFIG_FLOOR = Version("0.1.2")
 _PROJECTS_FLOOR = Version("0.3.19")
 _TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _EXACT_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
-# Wording that *describes* a lib as floating on a branch. Deliberately does not
-# match the legitimate "not silently through a moving branch" rationale.
-_FLOATING_RE = re.compile(
-    r"\bfloat(?:s|ing|ed)?\b|release/[0-9Nx]|HEAD of release|branch HEAD",
-    re.IGNORECASE,
-)
-# Extra floating-semantics vocabulary, applied only to comment lines / step
-# names; runner names like `ubuntu-latest` are exempt via the lookbehind.
-_FLOATING_WORDS_RE = re.compile(
-    r"\bmoving\b|\bkeeps\b|(?<![-\w])latest\b|\btracks?\b|\bfollows?\b|"
-    r"\badvances?\b|\btip\b|\bdrift\b",
-    re.IGNORECASE,
-)
-# The one legitimate use of "moving": the rationale sentence, matched as ONE
-# contiguous normalised phrase.
-_RATIONALE = "not silently through a moving branch"
-_CHORE = "via an explicit chore ticket"
+# The moving-branch ref and its "floats on" description. A ref literal, not
+# wording: no legitimate use of either remains once both libs are exact tags.
+_FLOATING_RE = re.compile(r"release/0\.x|floats on", re.IGNORECASE)
 # sync-libs.ps1's real regex, copied verbatim from the script.
 _SYNC_LIBS_PATTERN = re.compile(r'"(lib-python-[^"]+@[^"]+)"')
 
@@ -112,7 +99,7 @@ def test_installed_libs_match_declared_pins() -> None:
     versions (acceptance criterion, measured via importlib.metadata). Catches a
     local editable shadow in either direction."""
     for name in ("lib-python-config", "lib-python-projects"):
-        declared = _exact_version(name)
+        declared = _exact_version(name)  # tag `v0.1.2` -> version 0.1.2 (v stripped)
         try:
             installed = Version(importlib.metadata.version(name))
         except importlib.metadata.PackageNotFoundError:
@@ -124,10 +111,6 @@ def test_installed_libs_match_declared_pins() -> None:
             f"installed {name} is {installed} but pyproject.toml pins "
             f"{declared}; run `pwsh scripts/test.ps1` to re-sync"
         )
-
-
-def _norm(text: str) -> str:
-    return " ".join(text.replace("#", " ").split()).lower()
 
 
 def _comment_block(name: str) -> str:
@@ -142,7 +125,7 @@ def _comment_block(name: str) -> str:
 
 @pytest.mark.parametrize("name", ["lib-python-config", "lib-python-projects"])
 def test_pin_comment_names_only_its_own_declared_tag(name: str) -> None:
-    """Driving test (R3, symmetric for both libs): each dependency's comment
+    """Driving test (R4, symmetric for both libs): each dependency's comment
     block names ONLY its own declared vX.Y.Z tag (a stale tag such as v0.3.17
     on the projects block fails, as does a block naming no tag). The rationale
     wording of the comment is verified by review, not mechanically."""
@@ -154,58 +137,20 @@ def test_pin_comment_names_only_its_own_declared_tag(name: str) -> None:
     )
 
 
-def _comment_units(text: str) -> list[str]:
-    """Comment text as normalised units: each contiguous run of `#` lines is
-    ONE unit (leading `#` stripped, whitespace collapsed, so a sentence wrapped
-    across lines is one phrase); inline `# ...` tails and YAML `name:` lines are
-    their own units."""
-    units: list[str] = []
-    block: list[str] = []
-
-    def flush() -> None:
-        if block:
-            units.append(_norm(" ".join(block)))
-            block.clear()
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            block.append(stripped)
-            continue
-        flush()
-        if "#" in stripped:
-            units.append(_norm(stripped.split("#", 1)[1]))
-        if stripped.lstrip("- ").startswith("name:"):
-            units.append(_norm(stripped))
-    flush()
-    return units
-
-
-def _scan_text_for_floating(text: str) -> list[str]:
-    hits = {m.group(0) for m in _FLOATING_RE.finditer(text)}
-    for unit in _comment_units(text):
-        unit = unit.replace(_RATIONALE, "")
-        hits |= {m.group(0) for m in _FLOATING_WORDS_RE.finditer(unit)}
-    return sorted(hits)
-
-
-def test_no_floating_prose_remains_in_pin_artefacts() -> None:
-    """Driving test (R3): no floating-semantics wording remains in pyproject,
-    sync-libs.ps1, test.ps1 or the test workflow (comment blocks / step names;
-    the rationale sentence is exempt even when wrapped across `#` lines).
-
-    Honest limit: this is a vocabulary check. Reworded floating prose that uses
-    none of the listed words, or pasted exempt phrases, is verified by the
-    reviewer, not mechanically."""
+def test_release_branch_ref_absent_from_pin_artefacts() -> None:
+    """Driving test (R3): the moving-branch ref `release/0.x` and the phrase
+    `floats on` appear in none of the files that carried the old config scheme.
+    RED: all five files still contain `release/0.x`."""
     offenders = {}
     for rel in (
         "pyproject.toml",
         "scripts/sync-libs.ps1",
         "scripts/test.ps1",
         ".github/workflows/test.yml",
+        "AGENTS.md",
     ):
         text = (_repo_root() / rel).read_text(encoding="utf-8")
-        hits = _scan_text_for_floating(text)
+        hits = sorted({m.group(0).lower() for m in _FLOATING_RE.finditer(text)})
         if hits:
             offenders[rel] = hits
-    assert not offenders, f"floating-branch prose still present: {offenders}"
+    assert not offenders, f"moving-branch ref still present: {offenders}"

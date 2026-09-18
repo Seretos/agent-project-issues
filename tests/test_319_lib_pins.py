@@ -17,6 +17,7 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
 from packaging.requirements import Requirement
 from packaging.version import Version
 
@@ -30,6 +31,17 @@ _FLOATING_RE = re.compile(
     r"\bfloat(?:s|ing|ed)?\b|release/[0-9Nx]|HEAD of release|branch HEAD",
     re.IGNORECASE,
 )
+# Extra floating-semantics vocabulary, applied only to comment lines / step
+# names; runner names like `ubuntu-latest` are exempt via the lookbehind.
+_FLOATING_WORDS_RE = re.compile(
+    r"\bmoving\b|\bkeeps\b|(?<![-\w])latest\b|\btracks?\b|\bfollows?\b|"
+    r"\badvances?\b|\btip\b|\bdrift\b",
+    re.IGNORECASE,
+)
+# The one legitimate use of "moving": the rationale sentence, matched as ONE
+# contiguous normalised phrase.
+_RATIONALE = "not silently through a moving branch"
+_CHORE = "via an explicit chore ticket"
 _SYNC_LIBS_PATTERN = re.compile(r'(lib-python-[^"]+@[^"]+)')
 
 
@@ -86,7 +98,6 @@ def test_both_entries_still_parse_and_match_sync_libs_pattern() -> None:
     for name in ("lib-python-config", "lib-python-projects"):
         entry = _entry(name)
         assert f"git+https://github.com/Seretos/{name}@" in entry
-        assert _SYNC_LIBS_PATTERN.search(f'"{entry}"'), entry
     captured = _SYNC_LIBS_PATTERN.findall(
         " ".join(f'"{e}"' for e in _dependencies() if "lib-python-" in e)
     )
@@ -120,60 +131,76 @@ def _norm(text: str) -> str:
     return " ".join(text.replace("#", " ").split()).lower()
 
 
-def test_floating_regex_bites_on_floating_prose_only() -> None:
-    """Guard the guard: the regex flags floating descriptions but not the
-    legitimate rationale sentence."""
-    legit = (
-        "# Pinned to an exact immutable tag (v0.1.2). New lib versions arrive "
-        "via an explicit chore ticket -- not silently through a moving branch."
-    )
-    assert not _FLOATING_RE.search(legit)
-    for bad in (
-        "Floats on the libs' branch",
-        "floating libs",
-        "pinned to release/0.x",
-        "the HEAD of release/0.x",
-        "re-fetch the branch HEAD",
-        "bump to release/Nx",
-    ):
-        assert _FLOATING_RE.search(bad), bad
-
-
-def test_config_comment_names_declared_tag_and_gives_chore_rationale() -> None:
-    """Driving test (R3): the comment block above the config dependency line
-    names the declared tag (and only it), states the same rationale as the
-    projects comment (explicit chore ticket AND not via a moving branch), and
-    no longer describes config as floating."""
-    declared = _declared_tag("lib-python-config")
+def _comment_block(name: str) -> str:
+    """The contiguous `#` comment lines directly above `name`'s dependency."""
     lines = _pyproject_text().splitlines()
-    dep_idx = next(
-        i for i, line in enumerate(lines) if "lib-python-config @ git+" in line
-    )
+    dep_idx = next(i for i, line in enumerate(lines) if f"{name} @ git+" in line)
     start = dep_idx
     while start > 0 and lines[start - 1].strip().startswith("#"):
         start -= 1
-    block = " ".join(lines[start:dep_idx])
+    return " ".join(lines[start:dep_idx])
 
+
+@pytest.mark.parametrize("name", ["lib-python-config", "lib-python-projects"])
+def test_pin_comment_states_same_rationale_and_own_tag(name: str) -> None:
+    """Driving test (R3, symmetric for both libs): each dependency's comment
+    block names ONLY its own declared tag (a stale tag such as v0.3.17 on the
+    projects block fails), and carries the same rationale as contiguous
+    normalised phrases: `via an explicit chore ticket` and
+    `not silently through a moving branch`, and calls the pin an exact
+    immutable tag. The same required-phrase set applies to both blocks."""
+    declared = _declared_tag(name)
+    block = _comment_block(name)
     found = _TAG_RE.findall(block)
-    assert found, "comment above lib-python-config names no vX.Y.Z tag"
-    assert all(t == declared for t in found), (
-        f"comment tag mentions {found!r} do not match declared pin {declared!r}"
+    assert found, f"comment above {name} names no vX.Y.Z tag"
+    assert set(found) == {declared}, (
+        f"comment above {name} mentions tags {found!r}, declared pin is {declared!r}"
     )
     text = _norm(block)
-    assert "chore ticket" in text, "comment lacks the explicit-chore-ticket rationale"
-    assert "moving branch" in text and "not" in text.split("moving branch")[0], (
-        "comment lacks the 'not silently through a moving branch' rationale"
-    )
-    assert "immutable" in text or "exact" in text, "comment does not say the pin is exact"
-    contradiction = _FLOATING_RE.search(block)
-    assert not contradiction, (
-        f"config comment still describes floating: {contradiction.group(0)!r}"
+    for phrase in ("exact immutable tag", _CHORE, _RATIONALE):
+        assert phrase in text, f"comment above {name} lacks phrase {phrase!r}"
+    assert _FLOATING_RE.search(block) is None, (
+        f"comment above {name} still describes floating"
     )
 
 
-def test_no_floating_branch_prose_remains() -> None:
-    """Driving test (R3): no floating-branch wording for the libs left in
-    pyproject, sync-libs, test.ps1 or the test workflow."""
+def _scan_text_for_floating(text: str, *, comments_only: bool) -> list[str]:
+    hits = {m.group(0) for m in _FLOATING_RE.finditer(text)}
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        is_comment = stripped.startswith("#") or "#" in stripped
+        is_name = stripped.lstrip("- ").startswith("name:")
+        if comments_only and not (is_comment or is_name):
+            continue
+        lines.append(_norm(line).replace(_RATIONALE, ""))
+    hits |= {m.group(0) for m in _FLOATING_WORDS_RE.finditer(" | ".join(lines))}
+    return sorted(hits)
+
+
+_SELF_CHECKS = [
+    ("# Pinned to an exact immutable tag (v0.1.2). New versions arrive via an "
+     "explicit chore ticket -- not silently through a moving branch.", False),
+    ("Floats on the libs' branch", True),
+    ("pinned to release/0.x", True),
+    ("re-fetch the branch HEAD", True),
+    ("# the upstream 0.x line keeps moving and the cache lags it", True),
+    ("# re-fetch in case the tip advanced", True),
+    ("- name: Sync libs to latest", True),
+    ("      # follows the newest release", True),
+]
+
+
+def test_no_floating_prose_remains_in_pin_artefacts() -> None:
+    """Driving test (R3): no floating-semantics wording remains in pyproject,
+    sync-libs.ps1, test.ps1 or the test workflow (comment lines / step names;
+    the contiguous rationale sentence is exempt). The detector is first
+    self-checked on known-good/known-bad samples, then run over the real
+    files. Residual semantic rewordings that no vocabulary catches are
+    verified by code review, not mechanically."""
+    for sample, should_hit in _SELF_CHECKS:
+        assert bool(_scan_text_for_floating(sample, comments_only=True)) is should_hit, sample
+
     offenders = {}
     for rel in (
         "pyproject.toml",
@@ -182,7 +209,9 @@ def test_no_floating_branch_prose_remains() -> None:
         ".github/workflows/test.yml",
     ):
         text = (_repo_root() / rel).read_text(encoding="utf-8")
-        hits = sorted({m.group(0) for m in _FLOATING_RE.finditer(text)})
+        hits = _scan_text_for_floating(text, comments_only=False)
+        comment_hits = _scan_text_for_floating(text, comments_only=True)
+        hits = sorted(set(hits) | set(comment_hits))
         if hits:
             offenders[rel] = hits
     assert not offenders, f"floating-branch prose still present: {offenders}"

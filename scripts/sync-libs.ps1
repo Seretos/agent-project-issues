@@ -1,20 +1,13 @@
 # Sync the lib-python-* dependencies to the refs declared in pyproject.toml.
 #
-# How the two libs are pinned:
-#   lib-python-config  -- floats on `@release/0.x` (a moving branch). pip
-#                         will NOT re-pull a branch dep whose version string
-#                         is unchanged, so a local dev env can silently lag
-#                         behind CI (which always starts with a clean env).
-#   lib-python-projects -- pinned to an exact immutable tag (see pyproject.toml). The
-#                         tag never moves, so drift is impossible; however a
-#                         local `pip install -e <lib>` checkout can still
-#                         shadow the released package entirely, making pytest
-#                         run green locally while CI runs against the real pin.
+# Both libs are pinned to exact immutable tags (see pyproject.toml). A tag
+# never moves, so version drift is impossible; the remaining hazard is a local
+# `pip install -e <lib>` checkout, which can shadow the released package
+# entirely and make pytest run green locally while CI runs against the real pin.
 #
-#   This script force-reinstalls EXACTLY the specs declared in pyproject.toml
-#   for both libs (no local checkout, no editable), so a local test run uses
-#   the same packages as CI. For lib-python-config this also surfaces any
-#   release/0.x drift immediately -- locally, not only in the pipeline.
+# This script force-reinstalls EXACTLY the specs declared in pyproject.toml
+# for both libs (no local checkout, no editable), so a local test run uses
+# the same packages as CI.
 #
 # Usage (from anywhere; paths resolve off the repo root):
 #   pwsh -File scripts/sync-libs.ps1
@@ -54,7 +47,7 @@ if ($py) {
 }
 
 # Single source of truth: pull the lib specs straight from pyproject.toml
-# so this script never drifts from the declared dependency (branch, URL).
+# so this script never drifts from the declared dependency (tag, URL).
 $pyproject = Join-Path $root "pyproject.toml"
 if (-not (Test-Path $pyproject)) { Fail "pyproject.toml not found at $pyproject." }
 
@@ -68,10 +61,10 @@ if (-not $specs -or $specs.Count -eq 0) {
 Write-Step "Force-reinstalling lib-python-* from pyproject.toml specs"
 $specs | ForEach-Object { Write-Host "    $_" }
 
-# --force-reinstall + --no-cache-dir: re-fetch the branch HEAD even though
-# the version string is unchanged. --no-deps: only bump the two libs; the
+# --force-reinstall + --no-cache-dir: re-fetch the pinned tag even though
+# a same-version package may already be installed (e.g. an editable shadow). --no-deps: only bump the two libs; the
 # full dependency tree is resolved by the normal `pip install -e ".[test]"`.
 & $py -m pip install --force-reinstall --no-cache-dir --no-deps @specs
 if ($LASTEXITCODE -ne 0) { Fail "pip install (lib refresh) failed." }
 
-Write-Step "Libs synced: lib-python-config to release/0.x HEAD; lib-python-projects to its pinned tag."
+Write-Step "Libs synced to the exact tags pinned in pyproject.toml."

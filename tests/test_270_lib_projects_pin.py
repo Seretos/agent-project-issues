@@ -154,15 +154,13 @@ def test_pin_url_shape_is_sync_libs_parseable() -> None:
     )
 
 
-def test_lib_python_config_pin_unchanged() -> None:
-    """Edge-case coverage: this ticket only bumps lib-python-projects;
-    lib-python-config must stay on its floating `release/0.x` branch. May
-    already pass -- unaffected by which exact tag is declared."""
+def test_lib_python_config_pin_is_exact_tag() -> None:
+    """lib-python-config is pinned to an exact vX.Y.Z tag (not a branch)."""
     for entry in _dependencies():
         requirement = Requirement(entry)
         if requirement.name == "lib-python-config":
-            assert entry.endswith("@release/0.x"), (
-                f"expected lib-python-config to still float on release/0.x, got {entry!r}"
+            assert re.search(r"@v\d+\.\d+\.\d+$", entry), (
+                f"expected lib-python-config pinned to an exact vX.Y.Z tag, got {entry!r}"
             )
             return
     raise AssertionError("no 'lib-python-config' entry found in project.dependencies")

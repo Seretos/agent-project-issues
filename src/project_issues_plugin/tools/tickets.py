@@ -38,9 +38,14 @@ from project_issues_plugin.tools._providers import (
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
+    COMMENT_LIGHT_KEYS,
+    COMMENT_RESPONSE_DESC,
+    TICKET_LIGHT_KEYS,
+    TICKET_RESPONSE_DESC,
     apply_body_knobs,
     apply_omit_nulls,
     apply_order,
+    pick_light,
 )
 
 # TTL cache shared by every read-only discovery call (`list_ticket_statuses`,
@@ -707,6 +712,9 @@ def register(mcp: FastMCP) -> None:
                 "ticket — see the tool's docstring."
             )),
         ] = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=TICKET_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Create a new ticket.
 
@@ -777,15 +785,7 @@ def register(mcp: FastMCP) -> None:
         board binding) surface as `{"error": ...}`, not a traceback; the
         ticket is not created in that case.
 
-        On GitHub, writing a board column at creation time can cascade into a
-        ticket status change via a Projects-v2 workflow automation — e.g.
-        writing the "Done" column can auto-close the underlying issue. This
-        is provider-side automation and is not controlled by this server.
-        During this cascade window, this call's own returned `status` and
-        `updated_at` may still reflect pre-cascade, stale values — they are
-        not guaranteed to include the cascade's effect. Re-call
-        `get_ticket(..., include_custom_fields=True)` afterward for
-        guaranteed-fresh status.
+        Default `response="light"`; pass `response="full"` for body/comments/review data.
 
         Requires the project's `issues.create` permission.
         """
@@ -828,7 +828,10 @@ def register(mcp: FastMCP) -> None:
                 raise _rewrap_azure_unknown_field(
                     exc, custom_fields=effective_custom_fields,
                 )
-            result = {"project_id": project.id, "ticket": asdict(ticket)}
+            row = asdict(ticket)
+            if response == "light":
+                row = pick_light(row, TICKET_LIGHT_KEYS)
+            result = {"project_id": project.id, "ticket": row}
             if board_warning:
                 result["board_warning"] = board_warning
             if template_warning:
@@ -902,8 +905,13 @@ def register(mcp: FastMCP) -> None:
                 "see the tool's docstring."
             )),
         ] = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=TICKET_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Update an existing ticket. Only specified fields change.
+
+        Default `response="light"`; pass `response="full"` for body/comments/review data.
 
         `status` is the **provider-native** status string. For GitHub
         the accepted values are `open`, `closed:completed`,
@@ -1127,9 +1135,12 @@ def register(mcp: FastMCP) -> None:
                 exc = _rewrap_label_404(exc, labels_add=labels_add)
                 exc = _rewrap_422_assignee(exc, assignees_add=assignees_add)
                 raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
+            row = asdict(ticket)
+            if response == "light":
+                row = pick_light(row, TICKET_LIGHT_KEYS)
             result = {
                 "project_id": project.id,
-                "ticket": asdict(ticket),
+                "ticket": row,
             }
             if template_warning:
                 result["template_warning"] = template_warning
@@ -1478,8 +1489,10 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
-    def add_comment(project_id: str, ticket_id: str, body: Annotated[str, Field(description="Comment content. Do not include '#ai-generated' — the server prepends it automatically.")]) -> dict:
+    def add_comment(project_id: str, ticket_id: str, body: Annotated[str, Field(description="Comment content. Do not include '#ai-generated' — the server prepends it automatically.")], response: Annotated[Literal["light", "full"], Field(description=COMMENT_RESPONSE_DESC)] = "light") -> dict:
         """Add a comment to a ticket.
+
+        Default `response="light"`; pass `response="full"` for the full comment.
 
         CAUTION: do NOT include `#ai-generated` in `body` — the server
         prepends it automatically. If you are doing a read-modify-write
@@ -1526,5 +1539,8 @@ def register(mcp: FastMCP) -> None:
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
                 )
-            return {"project_id": project.id, "comment": asdict(comment)}
+            row = asdict(comment)
+            if response == "light":
+                row = pick_light(row, COMMENT_LIGHT_KEYS)
+            return {"project_id": project.id, "comment": row}
         return _safe(go)

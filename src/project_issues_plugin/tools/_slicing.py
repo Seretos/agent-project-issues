@@ -117,7 +117,75 @@ def apply_omit_nulls(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: v for k, v in row.items() if v is not None} for row in rows]
 
 
+# --- light write responses (ticket #314) -------------------------------------
+# Write tools return only these keys by default; `response="full"` keeps the
+# complete object. Each set is a strict subset of the full vocabulary.
+TICKET_LIGHT_KEYS = ("id", "url", "status", "labels", "custom_fields", "updated_at")
+COMMENT_LIGHT_KEYS = ("id", "url", "created_at")
+PR_LIGHT_KEYS = ("id", "url", "status", "merged", "mergeable_state", "head")
+RELATION_LIGHT_KEYS = ("kind", "ticket_id")
+
+TICKET_RESPONSE_DESC = (
+    "Response shape. Default `light`: the ticket carries only `id`, `url`, "
+    "`status`, `labels`, `custom_fields`, `updated_at` (plus project_id and any "
+    "warning). Values come from the write response with no reload, so `status` "
+    "and `custom_fields` may be pre-cascade; read the settled values with "
+    "`get_ticket(..., include_custom_fields=True)`. Labels such as ai-modified "
+    "and column labels are still applied - light only shrinks the response. "
+    "`custom_fields` is None when the provider returns none on a write. "
+    'Pass `response="full"` for the full ticket (body, comments and review '
+    "data)."
+)
+
+COMMENT_RESPONSE_DESC = (
+    "Response shape. Default `light`: the comment carries only `id`, `url`, "
+    "`created_at` (plus project_id). Values come from the write response with "
+    "no reload. The marker prefix and any labels are still applied - light only "
+    "shrinks the response. A field the provider does not return is None. "
+    'Pass `response="full"` for the full comment (body, author).'
+)
+
+PR_RESPONSE_DESC = (
+    "Response shape. Default `light`: the pull request carries only `id`, "
+    "`url`, `status`, `merged`, `mergeable_state`, `head` (a dict with the sha). "
+    "Aliases: `number` = `id`, `state` = `status`, `head_sha` = `head.sha`. "
+    "Values come from the write response with no reload. Labels and the "
+    "ai-generated/ai-modified markers are still applied - light only shrinks "
+    "the response. `mergeable_state` is provider-specific and None where the "
+    "provider does not report it (e.g. GitHub right after a merge, GitLab, "
+    "Azure DevOps). "
+    'Pass `response="full"` for the full pull request (body, reviews, '
+    "comments data)."
+)
+
+RELATION_RESPONSE_DESC = (
+    "Response shape. Default `light`: the relation carries only `kind`, "
+    "`ticket_id` (plus project_id). Alias: `target` = `relation.ticket_id`, the "
+    "far end of the relation. Values come from the write response with no "
+    "reload. The relation and any labels are still applied - light only shrinks "
+    "the response. A field the provider does not return is None. "
+    'Pass `response="full"` for the full relation (title, url, state).'
+)
+
+
+def pick_light(row: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    """Return ``{k: row[k]}`` for the keys present, in the declared order.
+
+    ``None`` values are kept so per-provider null fields stay visible.
+    """
+    return {k: row[k] for k in keys if k in row}
+
+
 __all__ = [
+    "COMMENT_LIGHT_KEYS",
+    "COMMENT_RESPONSE_DESC",
+    "PR_LIGHT_KEYS",
+    "PR_RESPONSE_DESC",
+    "RELATION_LIGHT_KEYS",
+    "RELATION_RESPONSE_DESC",
+    "TICKET_LIGHT_KEYS",
+    "TICKET_RESPONSE_DESC",
+    "pick_light",
     "apply_body_knobs",
     "apply_omit_nulls",
     "apply_order",

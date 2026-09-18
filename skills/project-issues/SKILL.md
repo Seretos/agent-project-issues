@@ -90,6 +90,10 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
   carries the non-obvious operational facts and cross-tool sequencing schemas
   alone don't convey: the pipeline drill-down chain, label rename semantics,
   relation direction, and board write keys.
+- **Write ops return a light response by default.** `create_ticket`,
+  `update_ticket`, `add_comment`, `update_comment`, `create_pr`, `update_pr`,
+  `merge_pr` and `add_relation` echo only a few identifying fields. Pass
+  `response="full"` when you need the body, comments or review data back.
 
 ## Ticket templates
 

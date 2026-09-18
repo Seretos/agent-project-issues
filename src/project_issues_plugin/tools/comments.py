@@ -38,7 +38,13 @@ from project_issues_plugin.tools._providers import (
     _rewrap_404,
     _safe,
 )
-from project_issues_plugin.tools._slicing import apply_body_knobs, apply_order
+from project_issues_plugin.tools._slicing import (
+    COMMENT_LIGHT_KEYS,
+    COMMENT_RESPONSE_DESC,
+    apply_body_knobs,
+    apply_order,
+    pick_light,
+)
 
 # Shared across get_comment/update_comment/delete_comment (ticket #184): one
 # rule callers can follow without special-casing per provider. Required for
@@ -175,8 +181,13 @@ def register(mcp: FastMCP) -> None:
         comment_id: str,
         body: Annotated[str, Field(description="New comment body. Do NOT include '#ai-generated' — added automatically. Use real U+000A newlines, not the \\n escape.")],
         ticket_id: Annotated[str | None, Field(description=_TICKET_ID_DESCRIPTION)] = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=COMMENT_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Update an existing comment's body.
+
+        Default `response="light"`; pass `response="full"` for the full comment.
 
         CAUTION: do NOT include `#ai-generated` in `body` — the server
         prepends the correct marker automatically. If implementing a
@@ -232,7 +243,10 @@ def register(mcp: FastMCP) -> None:
                     exc, project_id=project.id, kind="comment",
                     ident=normalized_comment,
                 )
-            return {"project_id": project.id, "comment": asdict(comment)}
+            row = asdict(comment)
+            if response == "light":
+                row = pick_light(row, COMMENT_LIGHT_KEYS)
+            return {"project_id": project.id, "comment": row}
         return _safe(go)
 
     @mcp.tool()

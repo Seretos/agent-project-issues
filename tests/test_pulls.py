@@ -256,6 +256,7 @@ def test_create_pr_denied_when_pulls_create_false(
     _install_mock(monkeypatch, handler)
     result = tools["create_pr"](
         project_id="acme", title="t", body="b", head="feat/x", base="main",
+        response="full",
     )
     assert "error" in result
     assert "pulls.create" in result["error"]
@@ -291,6 +292,7 @@ def test_create_pr_succeeds_when_pulls_create_true(
         body="b",
         head="feat/x",
         base="main",
+        response="full",
     )
     assert "error" not in result, result
     assert result["pull_request"]["id"] == "42"
@@ -808,6 +810,7 @@ def test_create_pr_requests_reviewers(monkeypatch: pytest.MonkeyPatch) -> None:
         project_id="acme",
         title="t", body="b", head="feat/x", base="main",
         requested_reviewers=["bob", "carol"],
+        response="full",
     )
     assert "error" not in result, result
     assert captured["reviewers"] == ["bob", "carol"]

@@ -297,6 +297,7 @@ def test_update_comment_tool_requires_modify(monkeypatch: pytest.MonkeyPatch) ->
         ticket_id="42",
         comment_id="777",
         body="hello",
+        response="full",
     )
     assert "error" in result
     assert "modify" in result["error"]
@@ -335,6 +336,7 @@ def test_update_comment_tool_succeeds_with_modify(
         ticket_id="42",
         comment_id="777",
         body="updated text",
+        response="full",
     )
     assert "error" not in result, result
     assert result["project_id"] == "acme"
@@ -438,7 +440,8 @@ def test_update_comment_tool_github_omits_ticket_id(
 
     # ticket_id omitted (defaults to None).
     result = tools["update_comment"](
-        project_id="acme", comment_id="777", body="updated content"
+        project_id="acme", comment_id="777", body="updated content",
+        response="full",
     )
     assert "error" not in result, result
     assert result["comment"]["body"].startswith("#ai-modified\n\n")

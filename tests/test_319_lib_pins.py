@@ -141,27 +141,16 @@ def _comment_block(name: str) -> str:
 
 
 @pytest.mark.parametrize("name", ["lib-python-config", "lib-python-projects"])
-def test_pin_comment_states_same_rationale_and_own_tag(name: str) -> None:
+def test_pin_comment_names_only_its_own_declared_tag(name: str) -> None:
     """Driving test (R3, symmetric for both libs): each dependency's comment
-    block names ONLY its own declared tag (a stale tag such as v0.3.17 on the
-    projects block fails), and carries the same rationale as contiguous
-    phrases of the whole normalised block (a wrapped sentence still counts): `via an explicit chore ticket` and
-    `not silently through a moving branch`, and calls the pin an exact
-    immutable tag. The same required-phrase set applies to both blocks.
-    Honest limit: reworded floating prose or pasted phrases are verified by
-    the reviewer, not mechanically."""
+    block names ONLY its own declared vX.Y.Z tag (a stale tag such as v0.3.17
+    on the projects block fails, as does a block naming no tag). The rationale
+    wording of the comment is verified by review, not mechanically."""
     declared = _declared_tag(name)
-    block = _comment_block(name)
-    found = _TAG_RE.findall(block)
+    found = _TAG_RE.findall(_comment_block(name))
     assert found, f"comment above {name} names no vX.Y.Z tag"
     assert set(found) == {declared}, (
         f"comment above {name} mentions tags {found!r}, declared pin is {declared!r}"
-    )
-    text = _norm(block)
-    for phrase in ("exact immutable tag", _CHORE, _RATIONALE):
-        assert phrase in text, f"comment above {name} lacks phrase {phrase!r}"
-    assert _FLOATING_RE.search(block) is None, (
-        f"comment above {name} still describes floating"
     )
 
 

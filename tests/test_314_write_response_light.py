@@ -391,7 +391,10 @@ def test_docs_list_exactly_the_light_keys(tools, tool_name):
         assert key in ticks, f"{tool_name}: light key `{key}` not backticked"
     # no key that light DROPS may be documented as returned
     full_keys = set(tools[tool_name](**kwargs, response="full")[obj_key])
-    for key in (full_keys - light) - _POINTER_ALLOWED:
+    # `number` is also a dropped full-PR key, but the PR docs must backtick it
+    # as the AC alias of light key `id` (see test_pr_docs_map_ac_aliases_...),
+    # so it cannot also be forbidden here.
+    for key in (full_keys - light) - _POINTER_ALLOWED - {"number"}:
         assert key not in ticks, (
             f"{tool_name}: `{key}` is not in the light set but is backticked"
         )

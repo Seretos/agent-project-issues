@@ -104,6 +104,7 @@ def test_update_ticket_response_includes_title_and_body(
     tools, _ = _register_tools_with_mock_provider(monkeypatch, _full_ticket())
     out = tools["update_ticket"](
         project_id="acme", ticket_id="5", status="closed:completed",
+        response="full",
     )
     assert "ticket" in out
     ticket = out["ticket"]
@@ -119,6 +120,7 @@ def test_update_ticket_response_matches_full_ticket_shape(
     tools, _ = _register_tools_with_mock_provider(monkeypatch, source_ticket)
     out = tools["update_ticket"](
         project_id="acme", ticket_id="5", status="closed:completed",
+        response="full",
     )
     ticket = out["ticket"]
     expected_fields = set(asdict(source_ticket).keys())
@@ -134,6 +136,7 @@ def test_update_ticket_response_keeps_useful_fields(
     tools, _ = _register_tools_with_mock_provider(monkeypatch, _full_ticket())
     out = tools["update_ticket"](
         project_id="acme", ticket_id="5", status="closed:completed",
+        response="full",
     )
     ticket = out["ticket"]
     assert ticket["id"] == "5"

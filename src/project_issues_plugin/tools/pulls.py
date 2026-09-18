@@ -40,9 +40,12 @@ from project_issues_plugin.tools._providers import (
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
+    PR_LIGHT_KEYS,
+    PR_RESPONSE_DESC,
     apply_body_knobs,
     apply_omit_nulls,
     apply_order,
+    pick_light,
 )
 
 
@@ -387,8 +390,13 @@ def register(mcp: FastMCP) -> None:
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
         requested_reviewers: list[str] | None = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=PR_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Create a pull request.
+
+        Default `response="light"`; pass `response="full"` for the full pull request.
 
         Just create what the user asked for — DO NOT pre-inspect the
         repository or codebase to "gather context" first. This
@@ -453,7 +461,10 @@ def register(mcp: FastMCP) -> None:
                 raise _rewrap_github_bad_base(
                     _rewrap_azure_bad_base(exc, base=base), base=base,
                 )
-            return {"project_id": project.id, "pull_request": asdict(pr)}
+            row = asdict(pr)
+            if response == "light":
+                row = pick_light(row, PR_LIGHT_KEYS)
+            return {"project_id": project.id, "pull_request": row}
         return _safe(go)
 
     @mcp.tool()
@@ -474,8 +485,13 @@ def register(mcp: FastMCP) -> None:
         reviewers_add: list[str] | None = None,
         reviewers_remove: list[str] | None = None,
         draft: bool | None = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=PR_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Update an existing pull request. Only specified fields change.
+
+        Default `response="light"`; pass `response="full"` for the full pull request.
 
         Not all-or-nothing on every provider — the failure behavior
         depends on which one you're talking to. On GitHub, a bad
@@ -563,7 +579,10 @@ def register(mcp: FastMCP) -> None:
                 reviewers_add=reviewers_add, reviewers_remove=reviewers_remove,
                 draft=draft,
             )
-            return {"project_id": project.id, "pull_request": asdict(pr)}
+            row = asdict(pr)
+            if response == "light":
+                row = pick_light(row, PR_LIGHT_KEYS)
+            return {"project_id": project.id, "pull_request": row}
         return _safe(go)
 
     @mcp.tool()
@@ -790,6 +809,9 @@ def register(mcp: FastMCP) -> None:
         merge_method: Annotated[str, Field(description="One of: 'merge', 'squash', 'rebase'. Lowercase only. Kept as str (not Literal) so invalid values return a friendly error rather than a Pydantic literal_error.")] = "merge",
         commit_title: str | None = None,
         commit_message: str | None = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=PR_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Merge a pull request.
 
@@ -815,10 +837,11 @@ def register(mcp: FastMCP) -> None:
         no flat-form equivalent and defaults to False on existing
         configs — the user must explicitly opt in.
 
-        Returns `{"project_id": str, "pull_request": {...}}` where
-        `pull_request` is the full post-merge PR snapshot — the same
-        shape `get_pr` returns — so `merged: true` and
-        `merge_commit_sha` are available without a follow-up `get_pr`.
+        Returns `{"project_id": str, "pull_request": {...}}`. Default
+        `response="light"` returns `id`, `url`, `status`, `merged`,
+        `mergeable_state` and `head`; pass `response="full"` for the
+        full post-merge PR snapshot — the same shape `get_pr` returns —
+        including `merge_commit_sha`, without a follow-up `get_pr`.
 
         Azure DevOps note: despite an earlier report, merging a PR does
         NOT add the merging user to `requested_reviewers` — that side
@@ -846,5 +869,8 @@ def register(mcp: FastMCP) -> None:
                 commit_title=commit_title,
                 commit_message=commit_message,
             )
-            return {"project_id": project.id, "pull_request": asdict(pr)}
+            row = asdict(pr)
+            if response == "light":
+                row = pick_light(row, PR_LIGHT_KEYS)
+            return {"project_id": project.id, "pull_request": row}
         return _safe(go)

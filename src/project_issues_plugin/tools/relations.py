@@ -13,7 +13,7 @@ cannot model natively surface as `RelationKindUnsupported`
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -26,6 +26,11 @@ from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.base import READ_ONLY_RELATION_KINDS, WRITABLE_RELATION_KINDS
 from lib_python_projects.providers.github import GitHubError, GitHubProvider
 from lib_python_projects.providers.gitlab import GitLabError, GitLabProvider
+from project_issues_plugin.tools._slicing import (
+    RELATION_LIGHT_KEYS,
+    RELATION_RESPONSE_DESC,
+    pick_light,
+)
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _normalize_target,
@@ -47,9 +52,11 @@ def register(mcp: FastMCP) -> None:
         ticket_id: str,
         kind: Annotated[str, Field(description="Relation kind. One of: parent, child, blocks, blocked_by, duplicate_of, relates_to. Call list_relation_kinds for provider-specific support matrix. Direction: ticket_id is always the 'from' end — kind='parent' means ticket_id is the parent of target; kind='child' means ticket_id is a child of target (target is the parent).")],
         target: Annotated[str, Field(description="Target issue reference. Preferred form: '#N' (e.g. '#7'). Also accepts a bare integer ('7') or a full issue URL. Cross-repo 'owner/repo#N' references are rejected by the provider.")],
+        response: Annotated[Literal["light", "full"], Field(description=RELATION_RESPONSE_DESC)] = "light",
     ) -> dict:
         """Create a typed relation from `ticket_id` (the source) to
         `target` (the destination).
+        Default `response="light"`; pass `response="full"` for the full relation.
 
         Returns:
 
@@ -173,9 +180,12 @@ def register(mcp: FastMCP) -> None:
                     exc, ticket_id=normalized_ticket, target=normalized_target,
                     kind=kind,
                 )
+            row = asdict(relation)
+            if response == "light":
+                row = pick_light(row, RELATION_LIGHT_KEYS)
             return {
                 "project_id": project.id,
-                "relation": asdict(relation),
+                "relation": row,
             }
         return _safe(go)
 

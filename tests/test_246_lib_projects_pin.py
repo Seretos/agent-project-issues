@@ -60,8 +60,7 @@ def test_lib_python_projects_pin_meets_v0_3_10_floor() -> None:
 
 def test_pin_is_an_exact_tag_not_a_branch() -> None:
     """Regression guard: the pin must stay an exact vX.Y.Z tag, never a
-    floating branch like `release/0.x` (that's lib-python-config's scheme,
-    not lib-python-projects')."""
+    floating branch like `release/0.x` (both libs pin exact tags)."""
     entry = _lib_python_projects_entry()
     tag = _tag_from_url(entry)
     assert _TAG_RE.match(tag), f"expected an exact 'vX.Y.Z' tag, got {tag!r}"

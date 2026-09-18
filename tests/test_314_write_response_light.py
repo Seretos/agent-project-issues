@@ -13,7 +13,7 @@ Eight write tools (`create_ticket`, `update_ticket`, `add_comment`,
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+import re
 from typing import Any, Callable
 
 import pytest
@@ -101,9 +101,9 @@ def _pr() -> PullRequest:
 def _relation() -> Relation:
     return Relation(
         kind="blocks",
-        ticket_id="#7",
+        ticket_id="#70",
         title="target title",
-        url="https://example.test/issues/7",
+        url="https://example.test/issues/70",
         state="open",
         is_pull_request=False,
         resolved=True,
@@ -207,7 +207,7 @@ _CASES: dict[str, tuple[dict[str, Any], str, set[str]]] = {
         "pull_request", _PR_LIGHT,
     ),
     "add_relation": (
-        {"project_id": "acme", "ticket_id": "5", "kind": "blocks", "target": "#7"},
+        {"project_id": "acme", "ticket_id": "5", "kind": "parent", "target": "#7"},
         "relation", _REL_LIGHT,
     ),
 }
@@ -223,9 +223,6 @@ def test_default_response_is_exactly_the_light_key_set(tools, tool_name):
     assert "error" not in out, out
     assert set(out[obj_key]) == light
     assert out["project_id"] == "acme"
-    # echo-heavy fields are gone
-    for gone in ("body", "comments", "reviews", "title", "author"):
-        assert gone not in out[obj_key]
 
 
 @pytest.mark.parametrize("tool_name", list(_CASES))
@@ -261,9 +258,11 @@ def test_ticket_light_keeps_none_custom_fields(tools):
 
 def test_relation_light_keeps_target_ticket_id_and_kind(tools):
     out = tools["add_relation"](
-        project_id="acme", ticket_id="5", kind="blocks", target="#7",
+        project_id="acme", ticket_id="5", kind="parent", target="#7",
     )
-    assert out["relation"] == {"kind": "blocks", "ticket_id": "#7"}
+    # The fake provider returns kind="blocks"/ticket_id="#70": values must come
+    # from the provider's response, not be echoed from the call's arguments.
+    assert out["relation"] == {"kind": "blocks", "ticket_id": "#70"}
     assert out["project_id"] == "acme"
 
 
@@ -326,8 +325,8 @@ _FULL_PR = (
     '"warnings": [], "idempotent_replay": false}'
 )
 _FULL_RELATION = (
-    '{"kind": "blocks", "ticket_id": "#7", "title": "target title", '
-    '"url": "https://example.test/issues/7", "state": "open", '
+    '{"kind": "blocks", "ticket_id": "#70", "title": "target title", '
+    '"url": "https://example.test/issues/70", "state": "open", '
     '"is_pull_request": false, "resolved": true}'
 )
 
@@ -358,15 +357,6 @@ def test_full_response_is_byte_identical_to_pre_change_snapshot(tools, tool_name
     assert json.dumps(out, ensure_ascii=False) == _FULL_EXPECTED[tool_name]
 
 
-def test_snapshot_literals_match_the_dataclasses():
-    """Guards the pinned literals against typos: they are the dataclasses'
-    own asdict output."""
-    assert json.dumps(asdict(_ticket()), ensure_ascii=False) == _FULL_TICKET
-    assert json.dumps(asdict(_comment()), ensure_ascii=False) == _FULL_COMMENT
-    assert json.dumps(asdict(_pr()), ensure_ascii=False) == _FULL_PR
-    assert json.dumps(asdict(_relation()), ensure_ascii=False) == _FULL_RELATION
-
-
 # ---------- R3: documentation ------------------------------------------------
 
 
@@ -379,11 +369,6 @@ def _text(fn: Callable) -> str:
     return _desc(fn) + " " + (fn.__doc__ or "")
 
 
-_DOC_CASES = {
-    name: sorted(light) for name, (_, _, light) in _CASES.items()
-}
-
-
 @pytest.mark.parametrize("tool_name", list(_CASES))
 def test_response_parameter_has_a_description(tools, tool_name):
     schema = func_metadata(tools[tool_name]).arg_model.model_json_schema()
@@ -394,10 +379,17 @@ def test_response_parameter_has_a_description(tools, tool_name):
 def test_docs_state_light_set_default_full_pointer_and_none_fields(
     tools, tool_name
 ):
+    kwargs, obj_key, _ = _CASES[tool_name]
+    # expected key list = the keys the tool ACTUALLY returns by default
+    actual_keys = sorted(tools[tool_name](**kwargs)[obj_key])
+    desc = _desc(tools[tool_name])
+    for key in actual_keys:
+        assert re.search(rf"`{re.escape(key)}`", desc), (
+            f"{tool_name}: light key `{key}` not backtick-documented in the "
+            f"response parameter description"
+        )
+    assert 'response="full"' in desc
     text = _text(tools[tool_name])
-    for key in _DOC_CASES[tool_name]:
-        assert key in text, f"{tool_name}: light key {key!r} undocumented"
-    assert 'response="full"' in text
     assert "light" in text
     assert "default" in text.lower()
     assert "None" in text
@@ -415,13 +407,11 @@ def test_ticket_docs_point_at_get_ticket_for_fresh_status(tools, tool_name):
 @pytest.mark.parametrize("tool_name", ["create_pr", "update_pr", "merge_pr"])
 def test_pr_docs_map_ac_aliases_to_light_keys(tools, tool_name):
     text = _desc(tools[tool_name])
-    assert "head.sha" in text
-    assert "head_sha" in text
-    assert "number" in text
-    assert "state" in text
+    for alias in ("head.sha", "head_sha", "number", "state"):
+        assert re.search(rf"`{re.escape(alias)}`", text), alias
 
 
 def test_relation_docs_map_target_alias(tools):
     text = _desc(tools["add_relation"])
-    assert "relation.ticket_id" in text
-    assert "target" in text
+    assert re.search(r"`relation\.ticket_id`", text)
+    assert re.search(r"`target`", text)

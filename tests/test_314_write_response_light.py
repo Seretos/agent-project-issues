@@ -358,6 +358,8 @@ def test_full_response_is_byte_identical_to_pre_change_snapshot(tools, tool_name
 
 
 # ---------- R3: documentation ------------------------------------------------
+# Every check reads the `response` PARAMETER description only: it does not exist
+# before this ticket, so pre-existing docstring prose cannot pre-satisfy it.
 
 
 def _desc(fn: Callable) -> str:
@@ -365,8 +367,13 @@ def _desc(fn: Callable) -> str:
     return schema.get("properties", {}).get("response", {}).get("description", "")
 
 
-def _text(fn: Callable) -> str:
-    return _desc(fn) + " " + (fn.__doc__ or "")
+def _ticks(text: str) -> set[str]:
+    return set(re.findall(r"`([^`]+)`", text))
+
+
+_PR_TOOLS = ["create_pr", "update_pr", "merge_pr"]
+# dropped-from-light keys that MAY be named in the "use full for ..." pointer
+_POINTER_ALLOWED = {"body", "comments", "reviews"}
 
 
 @pytest.mark.parametrize("tool_name", list(_CASES))
@@ -376,42 +383,69 @@ def test_response_parameter_has_a_description(tools, tool_name):
 
 
 @pytest.mark.parametrize("tool_name", list(_CASES))
-def test_docs_state_light_set_default_full_pointer_and_none_fields(
+def test_docs_list_exactly_the_light_keys(tools, tool_name):
+    kwargs, obj_key, light = _CASES[tool_name]
+    desc = _desc(tools[tool_name])
+    ticks = _ticks(desc)
+    for key in light:
+        assert key in ticks, f"{tool_name}: light key `{key}` not backticked"
+    # no key that light DROPS may be documented as returned
+    full_keys = set(tools[tool_name](**kwargs, response="full")[obj_key])
+    for key in (full_keys - light) - _POINTER_ALLOWED:
+        assert key not in ticks, (
+            f"{tool_name}: `{key}` is not in the light set but is backticked"
+        )
+
+
+@pytest.mark.parametrize("tool_name", list(_CASES))
+def test_docs_state_default_light_full_pointer_no_reload_labels_none(
     tools, tool_name
 ):
-    kwargs, obj_key, _ = _CASES[tool_name]
-    # expected key list = the keys the tool ACTUALLY returns by default
-    actual_keys = sorted(tools[tool_name](**kwargs)[obj_key])
-    desc = _desc(tools[tool_name])
-    for key in actual_keys:
-        assert re.search(rf"`{re.escape(key)}`", desc), (
-            f"{tool_name}: light key `{key}` not backtick-documented in the "
-            f"response parameter description"
-        )
+    fn = tools[tool_name]
+    desc = _desc(fn)
     assert 'response="full"' in desc
-    text = _text(tools[tool_name])
-    assert "light" in text
-    assert "default" in text.lower()
-    assert "None" in text
-    assert "reload" in text.lower()
-    assert "still applied" in text
+    assert re.search(r"default.{0,40}light|light.{0,40}default", desc, re.I | re.S)
+    assert re.search(r"\b(no|without an?)\s+(extra\s+)?reload", desc, re.I)
+    assert re.search(r"labels?\b.{0,80}still applied", desc, re.I | re.S)
+    assert re.search(r"\bNone\b", desc)
+    # one-line default note on the tool docstring or the description
+    both = desc + " " + (fn.__doc__ or "")
+    assert 'response="light"' in both and 'response="full"' in both
+
+
+@pytest.mark.parametrize("tool_name", _PR_TOOLS)
+def test_pr_docs_name_provider_specific_none_fields(tools, tool_name):
+    desc = _desc(tools[tool_name])
+    assert re.search(
+        r"\bNone\b.{0,120}(GitHub|GitLab|Azure)|(GitHub|GitLab|Azure).{0,120}\bNone\b",
+        desc, re.S,
+    )
 
 
 @pytest.mark.parametrize("tool_name", ["create_ticket", "update_ticket"])
 def test_ticket_docs_point_at_get_ticket_for_fresh_status(tools, tool_name):
-    text = _desc(tools[tool_name])
-    assert "get_ticket(..., include_custom_fields=True)" in text
-    assert "pre-cascade" in text
+    desc = _desc(tools[tool_name])
+    assert re.search(r"pre-cascade", desc)
+    assert re.search(
+        r"get_ticket\(\.\.\.,\s*include_custom_fields=True\)", desc
+    )
 
 
-@pytest.mark.parametrize("tool_name", ["create_pr", "update_pr", "merge_pr"])
+def _paired(text: str, a: str, b: str) -> bool:
+    a, b = re.escape(a), re.escape(b)
+    return bool(re.search(
+        rf"`{a}`[^.]{{0,40}}`{b}`|`{b}`[^.]{{0,40}}`{a}`", text
+    ))
+
+
+@pytest.mark.parametrize("tool_name", _PR_TOOLS)
 def test_pr_docs_map_ac_aliases_to_light_keys(tools, tool_name):
-    text = _desc(tools[tool_name])
-    for alias in ("head.sha", "head_sha", "number", "state"):
-        assert re.search(rf"`{re.escape(alias)}`", text), alias
+    desc = _desc(tools[tool_name])
+    for alias, key in (("number", "id"), ("state", "status"),
+                       ("head_sha", "head.sha")):
+        assert _paired(desc, alias, key), f"{alias} not paired with {key}"
 
 
 def test_relation_docs_map_target_alias(tools):
-    text = _desc(tools["add_relation"])
-    assert re.search(r"`relation\.ticket_id`", text)
-    assert re.search(r"`target`", text)
+    desc = _desc(tools["add_relation"])
+    assert _paired(desc, "target", "relation.ticket_id")

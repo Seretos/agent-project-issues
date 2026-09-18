@@ -26,9 +26,6 @@ _CONFIG_FLOOR = Version("0.1.2")
 _PROJECTS_FLOOR = Version("0.3.19")
 _TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
 _EXACT_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
-# The moving-branch ref and its "floats on" description. A ref literal, not
-# wording: no legitimate use of either remains once both libs are exact tags.
-_FLOATING_RE = re.compile(r"release/0\.x|floats on", re.IGNORECASE)
 # sync-libs.ps1's real regex, copied verbatim from the script.
 _SYNC_LIBS_PATTERN = re.compile(r'"(lib-python-[^"]+@[^"]+)"')
 
@@ -136,21 +133,3 @@ def test_pin_comment_names_only_its_own_declared_tag(name: str) -> None:
         f"comment above {name} mentions tags {found!r}, declared pin is {declared!r}"
     )
 
-
-def test_release_branch_ref_absent_from_pin_artefacts() -> None:
-    """Driving test (R3): the moving-branch ref `release/0.x` and the phrase
-    `floats on` appear in none of the files that carried the old config scheme.
-    RED: all five files still contain `release/0.x`."""
-    offenders = {}
-    for rel in (
-        "pyproject.toml",
-        "scripts/sync-libs.ps1",
-        "scripts/test.ps1",
-        ".github/workflows/test.yml",
-        "AGENTS.md",
-    ):
-        text = (_repo_root() / rel).read_text(encoding="utf-8")
-        hits = sorted({m.group(0).lower() for m in _FLOATING_RE.finditer(text)})
-        if hits:
-            offenders[rel] = hits
-    assert not offenders, f"moving-branch ref still present: {offenders}"

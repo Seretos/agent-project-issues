@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agentplugins.org/schemas/mcp.schema.json",
+  "mcpServers": {
+    "project-issues": {
+      "type": "stdio",
+      "command": "./bin/project-issues",
+      "args": []
+    }
+  }
+}

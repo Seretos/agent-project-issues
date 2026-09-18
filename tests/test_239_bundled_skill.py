@@ -85,14 +85,18 @@ def _release_yml_text() -> str:
 
 
 def test_release_workflow_stages_skills_into_zip_and_release_branch():
+    # #315: staging moved into the shared script both release steps call.
     text = _release_yml_text()
-    assert 'cp -a skills "$STAGE/"' in text, (
-        "ZIP staging step (STAGE) must copy skills/ so the install ZIP "
-        "ships the bundled skill"
+    assert text.count("bash .github/scripts/stage-plugin-payload.sh") == 2, (
+        "both the ZIP step and the release-branch step must stage via the "
+        "shared script"
     )
-    assert 'cp -a skills "$STAGE_DIR/"' in text, (
-        "orphan release-branch staging step (STAGE_DIR) must copy skills/ "
-        "so the marketplace dispatch tag ships the bundled skill"
+    script = (
+        _repo_root() / ".github" / "scripts" / "stage-plugin-payload.sh"
+    ).read_text(encoding="utf-8")
+    assert 'cp -a "$SRC/skills" "$DEST/"' in script, (
+        "shared staging script must copy skills/ so the install ZIP and the "
+        "marketplace dispatch tag ship the bundled skill"
     )
 
 
@@ -131,14 +135,14 @@ def test_claude_plugin_manifest_declares_skills():
     assert "mcpServers" in data
 
 
-def test_codex_manifest_untouched_and_valid_json():
-    path = _repo_root() / ".codex-plugin" / "plugin.json"
+def test_root_manifest_valid_json_without_skills_or_mcp():
+    # #315: the legacy .codex-plugin manifest was replaced by the portable
+    # root plugin.json (metadata only; the MCP server lives in mcp.json).
+    path = _repo_root() / "plugin.json"
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert "mcpServers" in data
-    assert "skills" not in data, (
-        "codex manifest schema has no known skills contract; this ticket "
-        "does not add one"
-    )
+    assert data["name"] == "agent-project-issues"
+    assert "mcpServers" not in data
+    assert "skills" not in data
 
 
 # --------------------------------------------------------------------------

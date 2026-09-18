@@ -18,6 +18,7 @@ FileNotFoundError.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -92,7 +93,8 @@ def staged(tmp_path: Path) -> Path:
 def test_staged_package_declares_resolvable_stdio_command(staged: Path) -> None:
     mcp = json.loads((staged / "mcp.json").read_text(encoding="utf-8"))
     schema = mcp.get("$schema")
-    assert isinstance(schema, str) and schema.strip()
+    # The value is unverifiable here, so only its shape is pinned.
+    assert isinstance(schema, str) and schema.startswith("https://")
 
     server = mcp["mcpServers"]["project-issues"]
     assert server["type"] == "stdio"
@@ -103,7 +105,21 @@ def test_staged_package_declares_resolvable_stdio_command(staged: Path) -> None:
     # The plugin-relative command resolves inside the staged package.
     assert (staged / server["command"]).is_file()
     assert (staged / "bin" / "project-issues.exe").is_file()
-    assert not (staged / ".codex-plugin").exists()
+
+
+@needs_bash
+def test_stale_codex_plugin_dir_is_not_staged(tmp_path: Path) -> None:
+    src = tmp_path / "source tree"
+    dest = tmp_path / "installed plugin dir"
+    _build_source(src)
+    stale = src / ".codex-plugin" / "plugin.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"mcpServers": {"x": {"command": "${PLUGIN_ROOT}/bin/x"}}}', encoding="utf-8")
+    result = _stage(src, dest)
+    assert result.returncode == 0, (
+        f"staging failed rc={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert not (dest / ".codex-plugin").exists()
 
 
 @needs_bash
@@ -123,7 +139,16 @@ def test_staging_fails_when_required_member_missing(tmp_path: Path) -> None:
 
 def test_release_workflow_uses_shared_staging_script_in_both_steps() -> None:
     text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    assert text.count("stage-plugin-payload.sh") >= 2
+
+    # The old duplicated inline staging blocks are gone.
+    assert "cp -a skills" not in text
+    assert "cp -a hooks" not in text
+
+    # The script is *invoked* (not merely mentioned) in >= 2 distinct steps.
+    call = re.compile(r"^\s*bash\s+\S*stage-plugin-payload\.sh", re.MULTILINE)
+    steps = re.split(r"^\s*-\s+name:", text, flags=re.MULTILINE)
+    invoking = [step for step in steps if call.search(step)]
+    assert len(invoking) >= 2, f"stage-plugin-payload.sh invoked in {len(invoking)} step(s)"
 
 
 def test_root_and_claude_manifests_agree() -> None:

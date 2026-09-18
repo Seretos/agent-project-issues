@@ -151,7 +151,7 @@ jobs:
             || { echo "::error::pyproject.toml stamp failed"; exit 1; }
 
           # Both plugin manifests get the same version, patched via jq for JSON safety.
-          for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
+          for manifest in .claude-plugin/plugin.json plugin.json; do
             tmp=$(mktemp)
             jq --arg v "$V" '.version = $v' "$manifest" > "$tmp"
             mv "$tmp" "$manifest"
@@ -167,7 +167,7 @@ jobs:
           path: |
             pyproject.toml
             .claude-plugin/plugin.json
-            .codex-plugin/plugin.json
+            plugin.json
 
   # ---------------------------------------------------------------------------
   # Job 2 - Cross-OS binary build
@@ -298,17 +298,7 @@ jobs:
           ZIP_NAME="project-issues-plugin-${V}.zip"
           ZIP_PATH="${RUNNER_TEMP}/${ZIP_NAME}"
 
-          cp -a .claude-plugin "$STAGE/"
-          [ -d .codex-plugin ] && cp -a .codex-plugin "$STAGE/"
-          [ -f .mcp.json     ] && cp -a .mcp.json     "$STAGE/"
-          cp -a bin             "$STAGE/"
-          [ -d hooks          ] && cp -a hooks         "$STAGE/"
-          # #239: ship the bundled skill in the install ZIP too.
-          [ -d skills ] && cp -a skills "$STAGE/"
-          [ -f README.md      ] && cp README.md      "$STAGE/"
-          [ -f LICENSE        ] && cp LICENSE        "$STAGE/"
-          [ -f description.md ] && cp description.md "$STAGE/"
-          [ -d assets         ] && cp -a assets       "$STAGE/"
+          bash .github/scripts/stage-plugin-payload.sh . "$STAGE"
 
           python3 - "$STAGE" "$ZIP_PATH" <<'PYEOF'
           import os, sys, time, zipfile
@@ -397,18 +387,7 @@ jobs:
         shell: bash
         run: |
           STAGE_DIR=$(mktemp -d)
-          cp -a .claude-plugin "$STAGE_DIR/"
-          [ -d .codex-plugin ] && cp -a .codex-plugin "$STAGE_DIR/"
-          [ -f .mcp.json     ] && cp -a .mcp.json     "$STAGE_DIR/"
-          cp -a bin             "$STAGE_DIR/"
-          [ -d hooks          ] && cp -a hooks         "$STAGE_DIR/"
-          # #239: ship the bundled skill on the orphan release branch too
-          # (this is exactly the tree the marketplace dispatch serves).
-          [ -d skills ] && cp -a skills "$STAGE_DIR/"
-          [ -f README.md      ] && cp README.md      "$STAGE_DIR/"
-          [ -f LICENSE        ] && cp LICENSE        "$STAGE_DIR/"
-          [ -f description.md ] && cp description.md "$STAGE_DIR/"
-          [ -d assets         ] && cp -a assets       "$STAGE_DIR/"
+          bash .github/scripts/stage-plugin-payload.sh . "$STAGE_DIR"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

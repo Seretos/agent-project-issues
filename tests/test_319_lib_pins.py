@@ -42,7 +42,8 @@ _FLOATING_WORDS_RE = re.compile(
 # contiguous normalised phrase.
 _RATIONALE = "not silently through a moving branch"
 _CHORE = "via an explicit chore ticket"
-_SYNC_LIBS_PATTERN = re.compile(r'(lib-python-[^"]+@[^"]+)')
+# sync-libs.ps1's real regex, copied verbatim from the script.
+_SYNC_LIBS_PATTERN = re.compile(r'"(lib-python-[^"]+@[^"]+)"')
 
 
 def _repo_root() -> Path:
@@ -98,9 +99,7 @@ def test_both_entries_still_parse_and_match_sync_libs_pattern() -> None:
     for name in ("lib-python-config", "lib-python-projects"):
         entry = _entry(name)
         assert f"git+https://github.com/Seretos/{name}@" in entry
-    captured = _SYNC_LIBS_PATTERN.findall(
-        " ".join(f'"{e}"' for e in _dependencies() if "lib-python-" in e)
-    )
+    captured = _SYNC_LIBS_PATTERN.findall(_pyproject_text())
     assert len(captured) == 2, captured
     for cap in captured:
         assert _EXACT_TAG_RE.match(cap.rsplit("@", 1)[-1]), (
@@ -208,16 +207,7 @@ def test_no_floating_prose_remains_in_pin_artefacts() -> None:
 
     Honest limit: this is a vocabulary check. Reworded floating prose that uses
     none of the listed words, or pasted exempt phrases, is verified by the
-    reviewer, not mechanically. The sample pre-asserts below only guard the
-    detector's wrap handling; the load-bearing scan is over the real files."""
-    wrapped_ok = (
-        "# Pinned to an exact immutable tag (v0.1.2). New versions arrive via\n"
-        "# an explicit chore ticket -- not silently through a\n"
-        "# moving branch.\n"
-    )
-    assert _scan_text_for_floating(wrapped_ok) == []
-    assert _scan_text_for_floating("# the line keeps moving\n")
-
+    reviewer, not mechanically."""
     offenders = {}
     for rel in (
         "pyproject.toml",

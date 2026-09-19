@@ -116,11 +116,16 @@ call, with a self-correcting payload instead of an `{"error": ...}`:
   (`create_ticket`) or none could be inferred from the ticket's current
   labels (`update_ticket`). Pick one from `templates` (or call
   `list_ticket_templates` yourself) and retry with `template=<name>`.
+  `templates` entries carry the template's name, kind, labels, title
+  prefix and required sections but no skeleton — call `list_ticket_templates`
+  for one.
 - `template_unknown` — the `template=` name you passed doesn't match
   any of `templates`. Re-check the exact `name` field and retry.
 - `template_violation` — a template was resolved, but the submitted
   body doesn't satisfy it. `violations` names each unmet field;
-  `skeleton` is a ready-to-fill `### <heading>` starting point.
+  `template` is the resolved template (no skeleton inside), `templates`
+  is empty, and the top-level `skeleton` — the only place it appears —
+  is a ready-to-fill `### <heading>` starting point.
 
 Every refusal's `hint` is a real, executable re-call, not just a
 mention of the tool's name — copy it (filling in the skeleton) to

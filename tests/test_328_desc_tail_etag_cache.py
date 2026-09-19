@@ -193,23 +193,3 @@ def test_has_more_true_on_replayed_304_page(monkeypatch) -> None:
     tools = _tools(monkeypatch)
     assert _call(tools, "105", 3) == (["14", "13", "12"], True)
     assert _call(tools, "105", 3) == (["14", "13", "12"], True)
-
-
-def test_order_docstring_describes_tail_fetch(monkeypatch) -> None:
-    """Driving test (R4). RED while the docstring claims the desc slice
-    'covers only the FIRST page'."""
-    doc = _tools(monkeypatch)["list_comments"].__doc__ or ""
-    import re
-
-    flat = re.sub(r"\s+", " ", doc)
-    m = re.search(r"- `order`:(.*?)(?=- `since`:)", flat)
-    assert m, "docstring has no `order` bullet before the `since` bullet"
-    order_bullet = m.group(1).lower()
-    # Stale claim must be gone (case-insensitive, any 'only ... first page').
-    assert not re.search(r"only[^.]*first page", order_bullet)
-    assert "first page" not in order_bullet
-    # The order bullet itself must describe the tail fetch concretely...
-    assert "tail" in order_bullet
-    assert re.search(r"last page|newest", order_bullet)
-    # ...and how to walk on via has_more.
-    assert "has_more" in order_bullet

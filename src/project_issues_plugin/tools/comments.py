@@ -77,11 +77,12 @@ def register(mcp: FastMCP) -> None:
         Args:
           - `order`: `"asc"` (default, chronological) or `"desc"`
             (reverse). For the "give me the most recent N comments"
-            use-case, pass `order="desc", limit=N` — the page is fetched
-            ascending from the provider and reversed client-side. On
-            threads longer than `limit`, the reversed slice covers only
-            the FIRST page; pass an explicit `page` to walk older
-            comments.
+            use-case, pass `order="desc", limit=N` — with `page=1` and
+            no `since`, the provider tail-fetches the last page(s) and
+            returns the NEWEST N comments, newest-first; `has_more` is
+            true when older comments exist before that slice. An
+            explicit `page=N` or a `since` instead fetches that
+            ascending page and reverses it client-side.
           - `since`: ISO-8601 timestamp. Comments updated at or after
             this instant are returned — GitHub filters by `updated_at`,
             GitLab uses `updated_after`. Useful for "what changed since

@@ -166,7 +166,7 @@ def test_release_stamp_step_covers_exactly_the_shipped_plugin_manifests() -> Non
     assert "plugin.json" not in uploaded and "mcp.json" not in uploaded
 
 
-_HAS_STAMP_TOOLS = bool(shutil.which("bash") and shutil.which("jq"))
+_HAS_STAMP_TOOLS = bool(_bash() and shutil.which("jq"))
 
 
 @pytest.mark.skipif(not _HAS_STAMP_TOOLS, reason="bash and jq are required to execute the release stamp step")
@@ -185,7 +185,7 @@ def test_release_stamp_step_executes_and_stamps_every_shipped_manifest() -> None
             (work / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / rel, work / rel)
         script = stamp["run"].replace("${{ inputs.version }}", "9.9.9")
-        res = subprocess.run(["bash", "-c", script], cwd=work, capture_output=True, text=True)
+        res = subprocess.run([_bash(), "-c", script], cwd=work, capture_output=True, text=True)
         assert res.returncode == 0, res.stderr
         for rel in expected:
             assert json.loads((work / rel).read_text(encoding="utf-8"))["version"] == "9.9.9"

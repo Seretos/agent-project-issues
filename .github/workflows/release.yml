@@ -151,7 +151,7 @@ jobs:
             || { echo "::error::pyproject.toml stamp failed"; exit 1; }
 
           # Both plugin manifests get the same version, patched via jq for JSON safety.
-          for manifest in .claude-plugin/plugin.json plugin.json; do
+          for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
             tmp=$(mktemp)
             jq --arg v "$V" '.version = $v' "$manifest" > "$tmp"
             mv "$tmp" "$manifest"
@@ -167,7 +167,7 @@ jobs:
           path: |
             pyproject.toml
             .claude-plugin/plugin.json
-            plugin.json
+            .codex-plugin/plugin.json
 
   # ---------------------------------------------------------------------------
   # Job 2 - Cross-OS binary build

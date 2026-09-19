@@ -135,14 +135,13 @@ def test_claude_plugin_manifest_declares_skills():
     assert "mcpServers" in data
 
 
-def test_root_manifest_valid_json_without_skills_or_mcp():
-    # #315: the legacy .codex-plugin manifest was replaced by the portable
-    # root plugin.json (metadata only; the MCP server lives in mcp.json).
-    path = _repo_root() / "plugin.json"
+def test_codex_manifest_valid_json_points_at_mcp_and_skills():
+    # #332: Codex reads .codex-plugin/plugin.json; the server lives in .mcp.json.
+    path = _repo_root() / ".codex-plugin" / "plugin.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["name"] == "agent-project-issues"
-    assert "mcpServers" not in data
-    assert "skills" not in data
+    assert data["mcpServers"] == "./.mcp.json"
+    assert data["skills"] == "./skills"
 
 
 # --------------------------------------------------------------------------

@@ -100,10 +100,11 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
   at `main`'s new tip. Do **not** introduce a PAT to work around this.
 
 - **Package layout is staged by one script.** `.github/scripts/stage-plugin-payload.sh <src> <dest>`
-  is the single list of what ships (root `plugin.json` + `mcp.json`, `.claude-plugin/`, `hooks/`,
-  `skills/`, `bin/`); `release.yml` calls it from both the ZIP and orphan-branch steps. The MCP
-  server is declared in root `mcp.json` with a plugin-relative `./bin/project-issues` (no
-  `${...}` placeholder - that broke Codex on Windows, #315). Add new shipped members in the script.
+  is the single list of what ships (`.claude-plugin/`, `.codex-plugin/`, root `.mcp.json`, `hooks/`,
+  `skills/`, `bin/`); `release.yml` calls it from both the ZIP and orphan-branch steps. Codex reads
+  `.codex-plugin/plugin.json`, whose `mcpServers` points at `./.mcp.json`, which declares the server
+  with a plugin-relative `./bin/project-issues` (no `${...}` placeholder - that broke Codex on
+  Windows, #315; root `plugin.json`/`mcp.json` are read by no host, #332). Add new shipped members in the script.
 
 ## More
 

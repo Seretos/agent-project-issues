@@ -40,9 +40,9 @@ ROOT = Path(__file__).resolve().parent.parent
 STAGE_SCRIPT = ROOT / ".github" / "scripts" / "stage-plugin-payload.sh"
 
 MEMBERS = [
-    "plugin.json",
-    "mcp.json",
+    ".mcp.json",
     ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
     "hooks/hooks.json",
     "hooks/security_hint.mjs",
     "skills/project-issues/SKILL.md",
@@ -91,13 +91,13 @@ def staged(tmp_path: Path) -> Path:
 
 @needs_bash
 def test_staged_package_declares_resolvable_stdio_command(staged: Path) -> None:
-    mcp = json.loads((staged / "mcp.json").read_text(encoding="utf-8"))
-    schema = mcp.get("$schema")
-    # The value is unverifiable here, so only its shape is pinned.
-    assert isinstance(schema, str) and schema.startswith("https://")
+    # #332: the server lives in the dot-prefixed .mcp.json Codex reaches via
+    # .codex-plugin/plugin.json; no $schema / type keys (unobserved in Codex).
+    mcp = json.loads((staged / ".mcp.json").read_text(encoding="utf-8"))
+    assert "$schema" not in mcp
 
     server = mcp["mcpServers"]["project-issues"]
-    assert server["type"] == "stdio"
+    assert "type" not in server
     assert server["command"] == "./bin/project-issues"
     assert server["args"] == []
     assert "${" not in json.dumps(mcp)
@@ -105,21 +105,6 @@ def test_staged_package_declares_resolvable_stdio_command(staged: Path) -> None:
     # The plugin-relative command resolves inside the staged package.
     assert (staged / server["command"]).is_file()
     assert (staged / "bin" / "project-issues.exe").is_file()
-
-
-@needs_bash
-def test_stale_codex_plugin_dir_is_not_staged(tmp_path: Path) -> None:
-    src = tmp_path / "source tree"
-    dest = tmp_path / "installed plugin dir"
-    _build_source(src)
-    stale = src / ".codex-plugin" / "plugin.json"
-    stale.parent.mkdir(parents=True)
-    stale.write_text('{"mcpServers": {"x": {"command": "${PLUGIN_ROOT}/bin/x"}}}', encoding="utf-8")
-    result = _stage(src, dest)
-    assert result.returncode == 0, (
-        f"staging failed rc={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
-    )
-    assert not (dest / ".codex-plugin").exists()
 
 
 @needs_bash
@@ -131,7 +116,7 @@ def test_staged_package_contains_every_member(staged: Path) -> None:
 @needs_bash
 def test_staging_fails_when_required_member_missing(tmp_path: Path) -> None:
     src = tmp_path / "source tree"
-    _build_source(src, skip=("mcp.json",))
+    _build_source(src, skip=(".mcp.json",))
     result = _stage(src, tmp_path / "dest dir")
     assert result.returncode != 0
     assert result.returncode != 127, "script must exist and fail loudly, not be missing"
@@ -159,10 +144,9 @@ def test_release_workflow_uses_shared_staging_script_in_both_steps() -> None:
         assert not residual.search(run), f"step {step['name']!r} still copies package members inline"
 
 
-def test_root_and_claude_manifests_agree() -> None:
-    root = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
+def test_codex_and_claude_manifests_agree() -> None:
+    codex = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     claude = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    assert root["name"] == claude["name"]
-    assert root["version"] == claude["version"]
-    assert "mcpServers" not in root
-    assert not (ROOT / ".codex-plugin" / "plugin.json").exists()
+    assert codex["name"] == claude["name"]
+    assert codex["version"] == claude["version"]
+    assert codex["mcpServers"] == "./.mcp.json"

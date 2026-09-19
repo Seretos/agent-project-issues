@@ -40,8 +40,14 @@ from project_issues_plugin.tools._providers import (
     _safe,
 )
 from project_issues_plugin.tools._slicing import (
+    COMMENT_LIGHT_KEYS,
+    COMMENT_RESPONSE_DESC,
     PR_LIGHT_KEYS,
     PR_RESPONSE_DESC,
+    REVIEW_COMMENT_LIGHT_KEYS,
+    REVIEW_COMMENT_RESPONSE_DESC,
+    REVIEW_LIGHT_KEYS,
+    REVIEW_RESPONSE_DESC,
     apply_body_knobs,
     apply_omit_nulls,
     apply_order,
@@ -586,7 +592,14 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
-    def add_pr_comment(project_id: str, pr_id: str, body: str) -> dict:
+    def add_pr_comment(
+        project_id: str,
+        pr_id: str,
+        body: str,
+        response: Annotated[
+            Literal["light", "full"], Field(description=COMMENT_RESPONSE_DESC)
+        ] = "light",
+    ) -> dict:
         """Add a discussion (issue-style) comment to a pull request.
 
         Uses the shared issue-comments endpoint; the body is
@@ -607,6 +620,8 @@ def register(mcp: FastMCP) -> None:
         merge/pull-request comments and issue comments on entirely
         separate endpoints, so no such aliasing happens there.
 
+        Default `response="light"`; pass `response="full"` for the full comment.
+
         Requires the project's `pulls.modify` permission.
         """
         def go() -> dict:
@@ -616,7 +631,10 @@ def register(mcp: FastMCP) -> None:
             provider = _provider_for(project)
             normalized_pr = _normalize_id(project, pr_id)
             comment = provider.add_pr_comment(project, token, normalized_pr, body)
-            return {"project_id": project.id, "comment": asdict(comment)}
+            row = asdict(comment)
+            if response == "light":
+                row = pick_light(row, COMMENT_LIGHT_KEYS)
+            return {"project_id": project.id, "comment": row}
         return _safe(go)
 
     @mcp.tool()
@@ -629,6 +647,9 @@ def register(mcp: FastMCP) -> None:
         side: Literal["LEFT", "RIGHT"] = "RIGHT",
         commit_sha: Annotated[str | None, Field(description="New-thread mode: the commit SHA the comment is anchored to. Set together with path and line. Leave unset in reply mode.")] = None,
         in_reply_to: Annotated[str | None, Field(description="Reply mode: opaque discussion id from get_pr review_comments — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric). Leave path/line/commit_sha unset.")] = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=REVIEW_COMMENT_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Add an inline code-review comment to a pull request.
 
@@ -649,6 +670,10 @@ def register(mcp: FastMCP) -> None:
         `side` is `"RIGHT"` (default) for the post-change side of the
         diff or `"LEFT"` for the pre-change side. GitLab ignores it and
         uses the supplied `line` as the new-side anchor.
+
+        Default `response="light"` returns `id`, `url`, `created_at` and
+        `discussion_id` (the reply anchor); pass `response="full"` for the
+        full review comment.
 
         Body is marker-prefixed automatically. Requires the project's
         `pulls.modify` permission. To post a discussion-level comment
@@ -690,7 +715,10 @@ def register(mcp: FastMCP) -> None:
                 path=path, line=line, side=side,
                 commit_sha=commit_sha, in_reply_to=in_reply_to,
             )
-            return {"project_id": project.id, "review_comment": asdict(rc)}
+            row = asdict(rc)
+            if response == "light":
+                row = pick_light(row, REVIEW_COMMENT_LIGHT_KEYS)
+            return {"project_id": project.id, "review_comment": row}
         return _safe(go)
 
     @mcp.tool()
@@ -700,6 +728,9 @@ def register(mcp: FastMCP) -> None:
         state: Annotated[str, Field(description="Required. Lowercase only. One of: 'approve', 'request_changes', 'comment'. A non-empty body is required when state is 'request_changes' or 'comment'; optional for 'approve'. Kept as str (not Literal) so invalid values return a friendly error. Azure DevOps note: Azure natively has 5 reviewer votes but this tool only exposes 3 — 'approve_with_suggestions' and 'wait_for_author' are not supported values here (see docstring).")],
         body: Annotated[str | None, Field(description="Required when state is 'request_changes' or 'comment'; optional for 'approve'. Do not prepend '#ai-generated' — added automatically.")] = None,
         commit_sha: str | None = None,
+        response: Annotated[
+            Literal["light", "full"], Field(description=REVIEW_RESPONSE_DESC)
+        ] = "light",
     ) -> dict:
         """Submit a review on a pull request.
 
@@ -762,7 +793,11 @@ def register(mcp: FastMCP) -> None:
         ignores `commit_sha` and the returned review always has
         `commit_sha: null` regardless of what you pass. Only set it for
         GitHub commit-pinning — it has no effect on GitLab, so don't read
-        the response `commit_sha` there as confirmation.
+        the response `commit_sha` there as confirmation (it is only
+        present with `response="full"`).
+
+        Default `response="light"` returns `id`, `url` and `submitted_at`;
+        pass `response="full"` for the full review.
 
         The review body is marker-prefixed automatically — callers
         should NOT prepend `#ai-generated` themselves. Requires the
@@ -795,7 +830,10 @@ def register(mcp: FastMCP) -> None:
                 project, token, normalized_pr,
                 state=state, body=body, commit_sha=commit_sha,
             )
-            return {"project_id": project.id, "review": asdict(review)}
+            row = asdict(review)
+            if response == "light":
+                row = pick_light(row, REVIEW_LIGHT_KEYS)
+            return {"project_id": project.id, "review": row}
         return _safe(go)
 
     @mcp.tool()

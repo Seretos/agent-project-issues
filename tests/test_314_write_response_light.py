@@ -513,9 +513,13 @@ def test_docs_name_the_fields_light_does_not_echo(tools, tool_name):
     desc = _desc(tools[tool_name])
     ticks = _ticks(desc)
     for field in omitted:
-        assert re.search(rf"\b{re.escape(field)}\b", desc), (
-            f"{tool_name}: light-omitted `{field}` is not named in the description"
-        )
+        # named in the *absent* sense: inside a sentence saying light does not
+        # echo it / it is absent from the response
+        assert any(
+            re.search(rf"\b{re.escape(field)}\b", sent)
+            and re.search(r"does not echo|\babsent\b|not returned", sent, re.I)
+            for sent in re.split(r"(?<=\.)\s+", desc)
+        ), f"{tool_name}: light-omitted `{field}` is not named as absent"
         assert field not in ticks, (
             f"{tool_name}: `{field}` is omitted by light but backticked as returned"
         )
@@ -588,15 +592,24 @@ _NOT_AN_INPUT_NAME = re.compile(
 )
 
 
+def _alias_sentence(desc: str, alias: str) -> str:
+    """The sentence of `desc` that introduces the backticked alias."""
+    hits = [s for s in re.split(r"(?<=\.)\s+", desc) if f"`{alias}`" in s]
+    assert hits, f"alias `{alias}` not mentioned"
+    return hits[0]
+
+
 @pytest.mark.parametrize("tool_name", _PR_TOOLS)
 def test_pr_docs_say_aliases_are_neither_response_keys_nor_input_names(
     tools, tool_name
 ):
     desc = _desc(tools[tool_name])
-    assert _NOT_A_RESPONSE_KEY.search(desc), "aliases not disowned as response keys"
-    assert _NOT_AN_INPUT_NAME.search(desc), "aliases not disowned as input names"
+    for alias in ("number", "state", "head_sha"):
+        sent = _alias_sentence(desc, alias)
+        assert _NOT_A_RESPONSE_KEY.search(sent), "aliases not disowned as response keys"
+        assert _NOT_AN_INPUT_NAME.search(sent), "aliases not disowned as input names"
 
 
 def test_relation_docs_say_target_is_not_a_response_key(tools):
     desc = _desc(tools["add_relation"])
-    assert _NOT_A_RESPONSE_KEY.search(desc)
+    assert _NOT_A_RESPONSE_KEY.search(_alias_sentence(desc, "target"))

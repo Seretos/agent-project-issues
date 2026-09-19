@@ -124,47 +124,87 @@ TICKET_LIGHT_KEYS = ("id", "url", "status", "labels", "custom_fields", "updated_
 COMMENT_LIGHT_KEYS = ("id", "url", "created_at")
 PR_LIGHT_KEYS = ("id", "url", "status", "merged", "mergeable_state", "head")
 RELATION_LIGHT_KEYS = ("kind", "ticket_id")
+REVIEW_LIGHT_KEYS = ("id", "url", "submitted_at")
+REVIEW_COMMENT_LIGHT_KEYS = ("id", "url", "created_at", "discussion_id")
 
 TICKET_RESPONSE_DESC = (
-    "Response shape. Default `light`: the ticket carries only `id`, `url`, "
+    "Response shape. Default `light`: the ticket carries exactly `id`, `url`, "
     "`status`, `labels`, `custom_fields`, `updated_at` (plus project_id and any "
     "warning). Values come from the write response with no reload, so `status` "
     "and `custom_fields` may be pre-cascade; read the settled values with "
     "`get_ticket(..., include_custom_fields=True)`. Labels such as ai-modified "
     "and column labels are still applied - light only shrinks the response. "
     "`custom_fields` is None when the provider returns none on a write. "
+    "Light does not echo edited content: the title and body you changed are "
+    "absent from this response, so pass response=full or re-read with "
+    "get_ticket to confirm they landed. "
     'Pass `response="full"` for the full ticket (body, comments and review '
     "data)."
 )
 
 COMMENT_RESPONSE_DESC = (
-    "Response shape. Default `light`: the comment carries only `id`, `url`, "
+    "Response shape. Default `light`: the comment carries exactly `id`, `url`, "
     "`created_at` (plus project_id). Values come from the write response with "
     "no reload. The marker prefix and any labels are still applied - light only "
     "shrinks the response. A field the provider does not return is None. "
+    "Light does not echo comment content: the body and updated_at are absent "
+    "from this response, so pass response=full to confirm an edit landed. "
     'Pass `response="full"` for the full comment (body, author).'
 )
 
 PR_RESPONSE_DESC = (
-    "Response shape. Default `light`: the pull request carries only `id`, "
-    "`url`, `status`, `merged`, `mergeable_state`, `head` (a dict with the sha). "
-    "Aliases: `number` = `id`, `state` = `status`, `head_sha` = `head.sha`. "
+    "Response shape. Default `light`: the pull request carries exactly `id`, "
+    "`url`, `status`, `merged`, `mergeable_state`, `head` (plus project_id). "
+    "`head` is a dict with exactly `head.ref`, `head.sha`, "
+    "`head.repo_full_name` - on GitLab `head.repo_full_name` is None for an "
+    "unresolved cross-fork source. "
+    "Name mappings only, not keys of this response and not input parameter "
+    "names: `number` is `id`, `state` is `status`, `head_sha` is `head.sha`. "
     "Values come from the write response with no reload. Labels and the "
     "ai-generated/ai-modified markers are still applied - light only shrinks "
     "the response. `mergeable_state` is provider-specific and None where the "
     "provider does not report it (e.g. GitHub right after a merge, GitLab, "
     "Azure DevOps). "
+    "Light does not echo edited content: the title, body and draft flag are "
+    "absent from this response, so pass response=full or re-read with get_pr "
+    "to confirm a change landed. "
     'Pass `response="full"` for the full pull request (body, reviews, '
     "comments data)."
 )
 
 RELATION_RESPONSE_DESC = (
-    "Response shape. Default `light`: the relation carries only `kind`, "
-    "`ticket_id` (plus project_id). Alias: `target` = `relation.ticket_id`, the "
-    "far end of the relation. Values come from the write response with no "
-    "reload. The relation and any labels are still applied - light only shrinks "
-    "the response. A field the provider does not return is None. "
+    "Response shape. Default `light`: the relation carries exactly `kind`, "
+    "`ticket_id` (plus project_id). `relation.ticket_id` echoes the input "
+    "`target`, which is not a response key itself. Values come from the write "
+    "response with no reload. The relation and any labels are still applied - "
+    "light only shrinks the response. A field the provider does not return is "
+    "None. Light does not echo the related ticket's title or state: they are "
+    "absent from this response. "
     'Pass `response="full"` for the full relation (title, url, state).'
+)
+
+REVIEW_RESPONSE_DESC = (
+    "Response shape. Default `light`: the review carries exactly `id`, `url`, "
+    "`submitted_at` (plus project_id). Values come from the write response "
+    "with no reload. The marker prefix and any labels are still applied - "
+    "light only shrinks the response. A field the provider does not return is None. "
+    "Light does not echo review content: the state and body are absent from "
+    "this response, so pass response=full to confirm them. "
+    'Pass `response="full"` for the full review (state, author, body, '
+    "commit_sha)."
+)
+
+REVIEW_COMMENT_RESPONSE_DESC = (
+    "Response shape. Default `light`: the review comment carries exactly "
+    "`id`, `url`, `created_at`, `discussion_id` (plus project_id); pass "
+    "the discussion_id back as in_reply_to to continue the thread. Values "
+    "come from the write response with no reload. The marker prefix and any "
+    "labels are still applied - light only shrinks the response. A field the provider does not "
+    "return is None. "
+    "Light does not echo anchor or content: the path, line, side, commit_sha "
+    "and body are absent from this response, so pass response=full to confirm "
+    "them. "
+    'Pass `response="full"` for the full review comment.'
 )
 
 
@@ -183,6 +223,10 @@ __all__ = [
     "PR_RESPONSE_DESC",
     "RELATION_LIGHT_KEYS",
     "RELATION_RESPONSE_DESC",
+    "REVIEW_COMMENT_LIGHT_KEYS",
+    "REVIEW_COMMENT_RESPONSE_DESC",
+    "REVIEW_LIGHT_KEYS",
+    "REVIEW_RESPONSE_DESC",
     "TICKET_LIGHT_KEYS",
     "TICKET_RESPONSE_DESC",
     "pick_light",

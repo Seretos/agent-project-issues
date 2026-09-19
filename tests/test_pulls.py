@@ -446,6 +446,7 @@ def test_add_pr_comment_succeeds_with_modify(monkeypatch: pytest.MonkeyPatch) ->
     _install_mock(monkeypatch, handler)
     result = tools["add_pr_comment"](
         project_id="acme", pr_id="7", body="LGTM",
+        response="full",
     )
     assert "error" not in result, result
     assert captured["body"]["body"] == "#ai-generated\n\nLGTM"
@@ -612,6 +613,7 @@ def test_add_pr_review_comment_reply(monkeypatch: pytest.MonkeyPatch) -> None:
         pr_id="7",
         body="agreed",
         in_reply_to="99",
+        response="full",
     )
     assert "error" not in result, result
     # A fresh reply-only pending review is created bare — no seeded comments.
@@ -710,6 +712,7 @@ def test_submit_pr_review_approve(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_mock(monkeypatch, handler)
     result = tools["submit_pr_review"](
         project_id="acme", pr_id="7", state="approve", body="lgtm!",
+        response="full",
     )
     assert "error" not in result, result
     assert captured["body"]["event"] == "APPROVE"

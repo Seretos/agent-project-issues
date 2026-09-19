@@ -92,7 +92,8 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
   relation direction, and board write keys.
 - **Write ops return a light response by default.** `create_ticket`,
   `update_ticket`, `add_comment`, `update_comment`, `create_pr`, `update_pr`,
-  `merge_pr` and `add_relation` echo only a few identifying fields. Pass
+  `merge_pr`, `add_relation`, `add_pr_comment`, `add_pr_review_comment` and
+  `submit_pr_review` echo only a few identifying fields. Pass
   `response="full"` when you need the body, comments or review data back.
 
 ## Ticket templates

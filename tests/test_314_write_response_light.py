@@ -24,6 +24,8 @@ from lib_python_projects.providers.base import (
     Comment,
     PullRequest,
     Relation,
+    Review,
+    ReviewComment,
     Ticket,
 )
 from project_issues_plugin.tools import _providers as providers_mod
@@ -87,7 +89,7 @@ def _pr() -> PullRequest:
         reviewers=[],
         requested_reviewers=["carol"],
         labels=["ai-generated"],
-        head={"ref": "feature/x", "sha": "deadbeef", "repo": "acme/backend"},
+        head={"ref": "feature/x", "sha": "deadbeef", "repo_full_name": "acme/backend"},
         base={"ref": "main", "sha": "cafebabe"},
         merged=True,
         mergeable=None,
@@ -95,6 +97,33 @@ def _pr() -> PullRequest:
         created_at="2026-05-18T10:00:00Z",
         updated_at="2026-05-18T20:00:00Z",
         merge_commit_sha="abc123",
+    )
+
+
+def _review() -> Review:
+    return Review(
+        id="31",
+        state="approve",
+        author="alice",
+        body="#ai-generated\n\nlgtm",
+        url="https://example.test/pull/7#pullrequestreview-31",
+        submitted_at="2026-05-18T11:00:00Z",
+        commit_sha="deadbeef",
+    )
+
+
+def _review_comment() -> ReviewComment:
+    return ReviewComment(
+        id="55",
+        author="alice",
+        body="#ai-generated\n\nnit",
+        path="src/foo.py",
+        line=3,
+        side="RIGHT",
+        commit_sha="deadbeef",
+        created_at="2026-05-18T10:30:00Z",
+        url="https://example.test/pull/7#discussion_r55",
+        discussion_id="55",
     )
 
 
@@ -138,6 +167,15 @@ class _FakeProvider:
     def add_relation(self, *a, **k):
         return _relation()
 
+    def add_pr_comment(self, *a, **k):
+        return _comment()
+
+    def add_pr_review_comment(self, *a, **k):
+        return _review_comment()
+
+    def submit_pr_review(self, *a, **k):
+        return _review()
+
 
 class _StubMCP:
     def __init__(self) -> None:
@@ -170,45 +208,62 @@ def tools(monkeypatch: pytest.MonkeyPatch) -> dict[str, Callable]:
     return stub.tools
 
 
-# tool name -> (call kwargs, result key of the object, light key set)
+# tool name -> (call kwargs, result key of the object, light key set,
+#               fields light does NOT echo that the description must name)
 _TICKET_LIGHT = {"id", "url", "status", "labels", "custom_fields", "updated_at"}
 _COMMENT_LIGHT = {"id", "url", "created_at"}
 _PR_LIGHT = {"id", "url", "status", "merged", "mergeable_state", "head"}
 _REL_LIGHT = {"kind", "ticket_id"}
+_REVIEW_LIGHT = {"id", "url", "submitted_at"}
+_REVIEW_COMMENT_LIGHT = {"id", "url", "created_at", "discussion_id"}
 
-_CASES: dict[str, tuple[dict[str, Any], str, set[str]]] = {
+_CASES: dict[str, tuple[dict[str, Any], str, set[str], tuple[str, ...]]] = {
     "create_ticket": (
         {"project_id": "acme", "title": "a title", "body": "b"},
-        "ticket", _TICKET_LIGHT,
+        "ticket", _TICKET_LIGHT, ("title",),
     ),
     "update_ticket": (
         {"project_id": "acme", "ticket_id": "5", "title": "a title"},
-        "ticket", _TICKET_LIGHT,
+        "ticket", _TICKET_LIGHT, ("title",),
     ),
     "add_comment": (
         {"project_id": "acme", "ticket_id": "5", "body": "hello"},
-        "comment", _COMMENT_LIGHT,
+        "comment", _COMMENT_LIGHT, ("body", "updated_at"),
     ),
     "update_comment": (
         {"project_id": "acme", "comment_id": "99", "body": "hello", "ticket_id": "5"},
-        "comment", _COMMENT_LIGHT,
+        "comment", _COMMENT_LIGHT, ("body", "updated_at"),
     ),
     "create_pr": (
         {"project_id": "acme", "title": "a pr", "body": "b", "head": "feature/x",
          "base": "main"},
-        "pull_request", _PR_LIGHT,
+        "pull_request", _PR_LIGHT, ("title", "body", "draft"),
     ),
     "update_pr": (
         {"project_id": "acme", "pr_id": "7", "title": "a pr"},
-        "pull_request", _PR_LIGHT,
+        "pull_request", _PR_LIGHT, ("title", "body", "draft"),
     ),
     "merge_pr": (
         {"project_id": "acme", "pr_id": "7"},
-        "pull_request", _PR_LIGHT,
+        "pull_request", _PR_LIGHT, ("title", "body", "draft"),
     ),
     "add_relation": (
         {"project_id": "acme", "ticket_id": "5", "kind": "parent", "target": "#7"},
-        "relation", _REL_LIGHT,
+        "relation", _REL_LIGHT, ("title", "state"),
+    ),
+    "add_pr_comment": (
+        {"project_id": "acme", "pr_id": "7", "body": "hello"},
+        "comment", _COMMENT_LIGHT, ("body", "updated_at"),
+    ),
+    "submit_pr_review": (
+        {"project_id": "acme", "pr_id": "7", "state": "approve"},
+        "review", _REVIEW_LIGHT, ("state", "body"),
+    ),
+    "add_pr_review_comment": (
+        {"project_id": "acme", "pr_id": "7", "body": "nit",
+         "in_reply_to": "55"},
+        "review_comment", _REVIEW_COMMENT_LIGHT,
+        ("path", "line", "side", "commit_sha", "body"),
     ),
 }
 
@@ -218,7 +273,7 @@ _CASES: dict[str, tuple[dict[str, Any], str, set[str]]] = {
 
 @pytest.mark.parametrize("tool_name", list(_CASES))
 def test_default_response_is_exactly_the_light_key_set(tools, tool_name):
-    kwargs, obj_key, light = _CASES[tool_name]
+    kwargs, obj_key, light, _omitted = _CASES[tool_name]
     out = tools[tool_name](**kwargs)
     assert "error" not in out, out
     assert set(out[obj_key]) == light
@@ -230,7 +285,7 @@ def test_light_values_are_the_full_values_for_every_kept_key(
     tools, tool_name
 ):
     """`light` is a strict subset of `full`: same values for every kept key."""
-    kwargs, obj_key, light = _CASES[tool_name]
+    kwargs, obj_key, light, _omitted = _CASES[tool_name]
     lite = tools[tool_name](**kwargs)[obj_key]
     full = tools[tool_name](**kwargs, response="full")[obj_key]
     assert set(lite) == light
@@ -315,7 +370,7 @@ _FULL_PR = (
     '{"id": "7", "number": 7, "title": "a pr", "body": "#ai-generated\\n\\npr body", '
     '"status": "merged", "draft": false, "author": "alice", "assignees": ["bob"], '
     '"reviewers": [], "requested_reviewers": ["carol"], "labels": ["ai-generated"], '
-    '"head": {"ref": "feature/x", "sha": "deadbeef", "repo": "acme/backend"}, '
+    '"head": {"ref": "feature/x", "sha": "deadbeef", "repo_full_name": "acme/backend"}, '
     '"base": {"ref": "main", "sha": "cafebabe"}, "merged": true, "mergeable": null, '
     '"url": "https://example.test/pull/7", "created_at": "2026-05-18T10:00:00Z", '
     '"updated_at": "2026-05-18T20:00:00Z", "mergeable_state": null, '
@@ -328,6 +383,21 @@ _FULL_RELATION = (
     '{"kind": "blocks", "ticket_id": "#70", "title": "target title", '
     '"url": "https://example.test/issues/70", "state": "open", '
     '"is_pull_request": false, "resolved": true}'
+)
+
+_FULL_REVIEW = (
+    '{"id": "31", "state": "approve", "author": "alice", '
+    '"body": "#ai-generated\\n\\nlgtm", '
+    '"url": "https://example.test/pull/7#pullrequestreview-31", '
+    '"submitted_at": "2026-05-18T11:00:00Z", "commit_sha": "deadbeef"}'
+)
+_FULL_REVIEW_COMMENT = (
+    '{"id": "55", "author": "alice", "body": "#ai-generated\\n\\nnit", '
+    '"path": "src/foo.py", "line": 3, "original_line": null, "side": "RIGHT", '
+    '"commit_sha": "deadbeef", "in_reply_to": null, '
+    '"created_at": "2026-05-18T10:30:00Z", "updated_at": "", '
+    '"url": "https://example.test/pull/7#discussion_r55", '
+    '"discussion_id": "55"}'
 )
 
 _FULL_EXPECTED = {
@@ -345,6 +415,11 @@ _FULL_EXPECTED = {
     "update_pr": '{"project_id": "acme", "pull_request": ' + _FULL_PR + "}",
     "merge_pr": '{"project_id": "acme", "pull_request": ' + _FULL_PR + "}",
     "add_relation": '{"project_id": "acme", "relation": ' + _FULL_RELATION + "}",
+    "add_pr_comment": '{"project_id": "acme", "comment": ' + _FULL_COMMENT + "}",
+    "submit_pr_review": '{"project_id": "acme", "review": ' + _FULL_REVIEW + "}",
+    "add_pr_review_comment": (
+        '{"project_id": "acme", "review_comment": ' + _FULL_REVIEW_COMMENT + "}"
+    ),
 }
 
 
@@ -384,7 +459,7 @@ def test_response_parameter_has_a_description(tools, tool_name):
 
 @pytest.mark.parametrize("tool_name", list(_CASES))
 def test_docs_list_exactly_the_light_keys(tools, tool_name):
-    kwargs, obj_key, light = _CASES[tool_name]
+    kwargs, obj_key, light, _omitted = _CASES[tool_name]
     desc = _desc(tools[tool_name])
     ticks = _ticks(desc)
     for key in light:
@@ -397,6 +472,56 @@ def test_docs_list_exactly_the_light_keys(tools, tool_name):
     for key in (full_keys - light) - _POINTER_ALLOWED - {"number"}:
         assert key not in ticks, (
             f"{tool_name}: `{key}` is not in the light set but is backticked"
+        )
+    if tool_name in _PR_TOOLS:
+        # set EQUALITY on the head sub-keys: the description names exactly the
+        # sub-keys the real light `head` carries, no more and no fewer.
+        head_keys = set(tools[tool_name](**kwargs)[obj_key]["head"])
+        assert head_keys == {"ref", "sha", "repo_full_name"}
+        documented = {t for t in ticks if t.startswith("head.")}
+        assert documented == {f"head.{k}" for k in head_keys}
+
+
+@pytest.mark.parametrize("tool_name", _PR_TOOLS)
+def test_pr_light_head_keeps_repo_full_name_key_when_none(
+    tools, monkeypatch, tool_name
+):
+    """GitLab yields `repo_full_name=None` for an unresolved cross-fork source:
+    the key must survive light (present-as-None) and be documented as nullable."""
+    def pr_none(*a, **k):
+        pr = _pr()
+        pr.head = {"ref": "feature/x", "sha": "deadbeef", "repo_full_name": None}
+        return pr
+
+    monkeypatch.setattr(_FakeProvider, tool_name, pr_none)
+    kwargs, obj_key, _light, _omitted = _CASES[tool_name]
+    head = tools[tool_name](**kwargs)[obj_key]["head"]
+    assert set(head) == {"ref", "sha", "repo_full_name"}
+    assert head["repo_full_name"] is None
+    desc = _desc(tools[tool_name])
+    assert re.search(
+        r"head\.repo_full_name`?[^.]{0,120}\bNone\b|\bNone\b[^.]{0,120}head\.repo_full_name",
+        desc,
+    )
+
+
+@pytest.mark.parametrize("tool_name", list(_CASES))
+def test_docs_name_the_fields_light_does_not_echo(tools, tool_name):
+    """Each description says (in plain words, not as a returned key) which
+    edited fields light does not confirm."""
+    _kwargs, _obj_key, _light, omitted = _CASES[tool_name]
+    desc = _desc(tools[tool_name])
+    ticks = _ticks(desc)
+    for field in omitted:
+        # named in the *absent* sense: inside a sentence saying light does not
+        # echo it / it is absent from the response
+        assert any(
+            re.search(rf"\b{re.escape(field)}\b", sent)
+            and re.search(r"does not echo|\babsent\b|not returned", sent, re.I)
+            for sent in re.split(r"(?<=\.)\s+", desc)
+        ), f"{tool_name}: light-omitted `{field}` is not named as absent"
+        assert field not in ticks, (
+            f"{tool_name}: `{field}` is omitted by light but backticked as returned"
         )
 
 
@@ -452,3 +577,39 @@ def test_pr_docs_map_ac_aliases_to_light_keys(tools, tool_name):
 def test_relation_docs_map_target_alias(tools):
     desc = _desc(tools["add_relation"])
     assert _paired(desc, "target", "relation.ticket_id")
+
+
+# Alias semantics (#323): the alias pairs are reading aids. A description must
+# say what they are NOT: not keys of the response, and (PR tools) not input
+# parameter names either. Concept-level regexes, not an exact phrase.
+_NOT_A_RESPONSE_KEY = re.compile(
+    r"\bnot\b[^.]{0,60}\b(keys?|fields?)\b[^.]{0,30}\bresponse\b"
+    r"|\bnot\b[^.]{0,60}\bresponse\b[^.]{0,30}\b(keys?|fields?)\b",
+    re.I,
+)
+_NOT_AN_INPUT_NAME = re.compile(
+    r"\b(neither|nor|not)\b[^.]{0,80}\b(input|parameters?|arguments?)\b", re.I
+)
+
+
+def _alias_sentence(desc: str, alias: str) -> str:
+    """The sentence of `desc` that introduces the backticked alias."""
+    hits = [s for s in re.split(r"(?<=\.)\s+", desc) if f"`{alias}`" in s]
+    assert hits, f"alias `{alias}` not mentioned"
+    return hits[0]
+
+
+@pytest.mark.parametrize("tool_name", _PR_TOOLS)
+def test_pr_docs_say_aliases_are_neither_response_keys_nor_input_names(
+    tools, tool_name
+):
+    desc = _desc(tools[tool_name])
+    for alias in ("number", "state", "head_sha"):
+        sent = _alias_sentence(desc, alias)
+        assert _NOT_A_RESPONSE_KEY.search(sent), "aliases not disowned as response keys"
+        assert _NOT_AN_INPUT_NAME.search(sent), "aliases not disowned as input names"
+
+
+def test_relation_docs_say_target_is_not_a_response_key(tools):
+    desc = _desc(tools["add_relation"])
+    assert _NOT_A_RESPONSE_KEY.search(_alias_sentence(desc, "target"))

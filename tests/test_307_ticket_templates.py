@@ -294,8 +294,14 @@ def _bug_template() -> templates_lib.IssueTemplate:
 _TEMPLATE_VIEW_KEYS = {"name", "kind", "labels", "title_prefix", "required_sections", "skeleton"}
 
 
-def _assert_template_view_shape(entry: dict) -> None:
-    assert set(entry.keys()) == _TEMPLATE_VIEW_KEYS, entry
+_TEMPLATE_SUMMARY_KEYS = _TEMPLATE_VIEW_KEYS - {"skeleton"}
+
+
+def _assert_template_view_shape(entry: dict, *, with_skeleton: bool = True) -> None:
+    """`with_skeleton=True` is the `list_ticket_templates` shape; refusal
+    payloads carry the skeleton-free summary (#325)."""
+    expected = _TEMPLATE_VIEW_KEYS if with_skeleton else _TEMPLATE_SUMMARY_KEYS
+    assert set(entry.keys()) == expected, entry
     assert isinstance(entry["required_sections"], list)
     for rs in entry["required_sections"]:
         assert set(rs.keys()) == {"heading", "expected"}, rs
@@ -317,7 +323,7 @@ def _assert_refusal_shape(result: dict, *, expected_state: str) -> None:
     assert isinstance(result["received_sections"], list)
     assert isinstance(result["hint"], str) and result["hint"]
     for entry in result["templates"]:
-        _assert_template_view_shape(entry)
+        _assert_template_view_shape(entry, with_skeleton=False)
 
 
 def _fake_ticket(*, id: str, title: str = "t", body: str = "", labels=None) -> Ticket:
@@ -544,7 +550,7 @@ def test_create_ticket_refuses_with_violations(monkeypatch: pytest.MonkeyPatch) 
 
     _assert_refusal_shape(result, expected_state="template_violation")
     assert result["template"] is not None
-    _assert_template_view_shape(result["template"])
+    _assert_template_view_shape(result["template"], with_skeleton=False)
     assert result["template"]["name"] == "Bug Report"
     assert result["received_sections"] == ["Severity"]
     assert "Bug Report" in result["hint"]

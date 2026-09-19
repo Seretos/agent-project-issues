@@ -205,6 +205,16 @@ def _template_view(template) -> dict[str, Any]:
     }
 
 
+def _template_summary(template) -> dict[str, Any]:
+    """`_template_view` without its `skeleton` — the shape used inside refusal
+    payloads (#325). Derived from `_template_view` so the two cannot drift;
+    the skeleton is delivered once, top-level, on `template_violation`, and
+    via `list_ticket_templates` otherwise."""
+    view = _template_view(template)
+    del view["skeleton"]
+    return view
+
+
 def _refusal_hint(
     tool_name: str, *, project_id: str, ticket_id: str | None, template_name: str | None,
 ) -> str:
@@ -244,8 +254,12 @@ def _refusal_payload(
     return {
         "written": False,
         "state": state,
-        "templates": [_template_view(t) for t in all_templates],
-        "template": _template_view(template) if template is not None else None,
+        # Only when no template was resolved: on a violation the caller already
+        # has the resolved template, and the full list is redundant (#325).
+        "templates": (
+            [_template_summary(t) for t in all_templates] if template is None else []
+        ),
+        "template": _template_summary(template) if template is not None else None,
         "violations": [asdict(v) for v in violations] if violations else [],
         "skeleton": templates.render_skeleton(template) if template is not None else None,
         "received_sections": _received_sections(body),

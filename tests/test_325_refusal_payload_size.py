@@ -20,6 +20,8 @@ import pytest
 from lib_python_projects import templates as templates_lib
 from lib_python_projects.providers import github as github_provider
 
+from project_issues_plugin.tools.tickets import _template_view
+
 from tests.test_307_ticket_templates import (
     _FakeTemplateProvider,
     _fake_ticket,
@@ -38,6 +40,14 @@ def _real_template():
     return github_provider.GitHubProvider().list_issue_templates(
         _project(), token=None,
     )[0]
+
+
+def _expected_summary(template) -> dict:
+    """What a refusal's template entry must equal: the real template's view
+    (fixture-independent, computed by the tool's own contract) minus skeleton."""
+    view = _template_view(template)
+    view.pop("skeleton")
+    return view
 
 
 def _escaped(text: str) -> str:
@@ -70,8 +80,14 @@ def test_create_ticket_template_required_refusal_carries_no_skeletons(
     assert len(result["templates"]) == 1
     for entry in result["templates"]:
         assert set(entry.keys()) == _SUMMARY_KEYS, entry
+    entry = result["templates"][0]
     assert entry["name"] == "Bug Report"
     assert entry["required_sections"], "required_sections must be kept"
+    real = _real_template()
+    assert entry == _expected_summary(real)
+    assert entry["kind"] == real.kind
+    assert entry["labels"] == list(real.labels)
+    assert entry["title_prefix"] == real.title_prefix
 
     skeleton = templates_lib.render_skeleton(_real_template())
     assert skeleton
@@ -99,6 +115,8 @@ def test_template_violation_refusal_contains_skeleton_exactly_once(
     assert result["templates"] == []
     assert "skeleton" not in result["template"]
     assert result["template"]["name"] == "Bug Report"
+    assert result["template"] == _expected_summary(real_template)
+    assert result["template"]["required_sections"]
     assert result["skeleton"] == skeleton
     assert result["violations"] == [
         asdict(v) for v in templates_lib.validate_ticket_body(body, real_template)
@@ -124,6 +142,7 @@ def test_template_unknown_refusal_carries_no_skeletons(
     assert len(result["templates"]) == 1
     for entry in result["templates"]:
         assert set(entry.keys()) == _SUMMARY_KEYS, entry
+    assert result["templates"] == [_expected_summary(_real_template())]
     skeleton = templates_lib.render_skeleton(_real_template())
     assert _escaped(skeleton) not in json.dumps(result)
     assert "Bug Report" not in result["hint"]
@@ -162,6 +181,7 @@ def test_update_ticket_refusals_are_trimmed_like_create(
     assert json.dumps(result).count(_escaped(skeleton)) == 1
     assert result["templates"] == []
     assert "skeleton" not in result["template"]
+    assert result["template"] == _expected_summary(_real_template())
     assert result["skeleton"] == skeleton
 
     # Leg 2: ambiguous labels -> template_required listing both (Route B).
@@ -187,4 +207,7 @@ def test_update_ticket_refusals_are_trimmed_like_create(
     assert [e["name"] for e in result_b["templates"]] == ["A", "B"]
     for entry in result_b["templates"]:
         assert set(entry.keys()) == _SUMMARY_KEYS, entry
+    assert result_b["templates"] == [
+        _expected_summary(template_a), _expected_summary(template_b),
+    ]
     assert provider.update_calls == []

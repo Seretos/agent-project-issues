@@ -89,6 +89,8 @@ def test_staged_codex_chain_resolves_end_to_end(staged: Path) -> None:
     servers = mcp["mcpServers"]
     assert list(servers) == ["project-issues"]
     command = servers["project-issues"]["command"]
+    # The declared string stays the extensionless name; only on-disk resolution tolerates .exe.
+    assert command == "./bin/project-issues", f"declared command changed: {command!r}"
     command_path = _resolve_in(staged, command)
     # Pinned to the staged bin/ dir, not merely any existing file in the package.
     assert command_path.is_relative_to((staged / "bin").resolve()), (
@@ -106,6 +108,9 @@ def test_staged_package_has_no_unread_root_manifests(staged: Path) -> None:
     assert (staged / ".codex-plugin" / "plugin.json").is_file()
     assert not (staged / "plugin.json").exists()
     assert not (staged / "mcp.json").exists()
+    # The repository itself must not carry them either (not merely dropped from the copy list).
+    assert not (ROOT / "plugin.json").exists(), "root plugin.json still in the repo"
+    assert not (ROOT / "mcp.json").exists(), "root mcp.json still in the repo"
 
 
 @needs_bash
@@ -160,22 +165,30 @@ def test_release_stamp_step_covers_exactly_the_shipped_plugin_manifests() -> Non
     assert expected <= uploaded
     assert "plugin.json" not in uploaded and "mcp.json" not in uploaded
 
-    # Execute the real stamp step against a scratch tree when jq/bash exist (behavioural proof).
-    if shutil.which("bash") and shutil.which("jq"):
-        import subprocess
-        import tempfile
 
-        with tempfile.TemporaryDirectory() as td:
-            work = Path(td)
-            (work / "pyproject.toml").write_text('[project]\nversion = "0.0.0"\n', encoding="utf-8")
-            for rel in expected:
-                (work / rel).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ROOT / rel, work / rel)
-            script = run.replace("${{ inputs.version }}", "9.9.9")
-            res = subprocess.run(["bash", "-c", script], cwd=work, capture_output=True, text=True)
-            assert res.returncode == 0, res.stderr
-            for rel in expected:
-                assert json.loads((work / rel).read_text(encoding="utf-8"))["version"] == "9.9.9"
+_HAS_STAMP_TOOLS = bool(shutil.which("bash") and shutil.which("jq"))
+
+
+@pytest.mark.skipif(not _HAS_STAMP_TOOLS, reason="bash and jq are required to execute the release stamp step")
+def test_release_stamp_step_executes_and_stamps_every_shipped_manifest() -> None:
+    import subprocess
+    import tempfile
+
+    expected = {".claude-plugin/plugin.json", ".codex-plugin/plugin.json"}
+    stamp, _ = _stamp_and_upload_steps()
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td)
+        (work / "pyproject.toml").write_text(
+            "[project]" + chr(10) + 'version = "0.0.0"' + chr(10), encoding="utf-8"
+        )
+        for rel in expected:
+            (work / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / rel, work / rel)
+        script = stamp["run"].replace("${{ inputs.version }}", "9.9.9")
+        res = subprocess.run(["bash", "-c", script], cwd=work, capture_output=True, text=True)
+        assert res.returncode == 0, res.stderr
+        for rel in expected:
+            assert json.loads((work / rel).read_text(encoding="utf-8"))["version"] == "9.9.9"
 
 
 def _package_copy_statements() -> tuple[list[tuple[list[str], str]], str]:
@@ -205,7 +218,12 @@ def _package_copy_statements() -> tuple[list[tuple[list[str], str]], str]:
 
 
 @needs_bash
-def test_build_package_block_copies_every_staged_member(staged: Path) -> None:
+def test_build_package_block_structurally_lists_every_staged_member(staged: Path) -> None:
+    """Structural parity guard only: parses build.ps1's Copy-Item block for every staged member.
+
+    It does NOT prove the built ZIP's contents (that needs PyInstaller via
+    `build.ps1 -Package`); that is covered by the plan's live substitute execution.
+    """
     stmts, live = _package_copy_statements()
     # Every live Copy-Item targets the staging directory that is then zipped.
     assert stmts and all(dest == "$stage" for _, dest in stmts)

@@ -365,3 +365,24 @@ CI-run lookup and dispatch against GitHub Actions. `list_pipeline_runs` / `get_p
 - `trigger_pipeline(project_id, workflow, ref="main", inputs?, wait_for_run=true, wait_timeout_seconds=30)` — dispatches a new pipeline run. Gated by `permissions.pipelines.trigger` (new namespace, defaults to false — opt in deliberately). `wait_for_run=true` (default) polls for the resulting run for up to `wait_timeout_seconds` (hard-capped at 120, silently clamped) and returns it under `run`; on a poll timeout the dispatch has still succeeded — `run` comes back `null` and `hint` explains to poll `list_pipeline_runs`/`get_pipeline_run` instead of re-triggering. `wait_for_run=false` skips polling and returns the same degraded `{run, hint}` shape. `triggered` is always `true` once the call returns without an `error`, independent of whether `run` could be resolved.
 - `get_ref(project_id, ref)` — resolves a branch name, tag name, or commit sha to its peeled commit sha. Resolution order is branch → tag → commit (a branch and a tag sharing the same name resolve as the branch). Returns `{"project_id", "ref": {"name", "kind", "sha", "url"}}`; a ref that resolves as none of the three returns a structured error naming the project and ref.
 - `list_releases(project_id, limit=10)` — lists published releases, most recent first. `sha` on each release is the peeled commit sha the release's tag points to. Azure DevOps has no native "release" concept — its releases are annotated tags mapped into this shape with `draft`/`prerelease` always `false`; GitLab has no prerelease flag either, so `prerelease` is always `false` there too.
+
+### CLI: wait-pipeline
+
+The bundled binary also has a blocking command-line subcommand, so an agent can wait for a commit's CI in one foreground shell call (no polling loop, no MCP round-trips). Run with no arguments the binary still starts the MCP stdio server exactly as before.
+
+```
+project-issues wait-pipeline --project <id> --sha <commit> [--timeout 600] [--interval 20]
+```
+
+It reads `projects.yml` like the MCP tools, polls the commit's runs until they reach a verdict or `--timeout` (seconds) elapses, returns as soon as any run fails, and prints exactly one JSON object on stdout (`{"state", "waited_s", "runs": [{"id", "event", "status", "conclusion", "url"}]}`); diagnostics go to stderr. Exit code:
+
+| Code | `state` | Meaning |
+|------|---------|---------|
+| 0 | `success` | every run completed green |
+| 1 | `failure` | at least one run failed |
+| 2 | `pending` | runs still in progress when `--timeout` elapsed |
+| 3 | `no_runs` | no run exists for the commit |
+| 4 | (none) | config / provider / usage error: message on stderr, empty stdout |
+| 5 | `cancelled` / `timed_out` / `skipped` / `no_verdict` | runs finished but none green or red; `state` names which |
+
+Invoke it through a shell tool call whose own timeout exceeds `--timeout`. `--help` lists the same arguments and exit codes.

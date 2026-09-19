@@ -248,6 +248,11 @@ def test_exit_codes_for_each_outcome(
     assert payload["state"] == state
     assert isinstance(payload["waited_s"], (int, float))
     assert isinstance(payload["runs"], list)
+    # waited_s is real elapsed time, rounded to 0.1 s and bounded by the run.
+    assert 0 <= payload["waited_s"] <= proc.elapsed + 0.5
+    assert payload["waited_s"] == round(payload["waited_s"], 1)
+    if state == "pending":
+        assert payload["waited_s"] >= 1.5  # blocked until --timeout 2 elapsed
 
 
 def test_unknown_project_exits_4_with_empty_stdout(tmp_path):
@@ -359,11 +364,11 @@ def test_help_lists_arguments_and_exit_codes(tmp_path):
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     for flag in ("--project", "--sha", "--timeout", "--interval"):
         assert flag in proc.stdout
-    for code in range(6):
-        assert re.search(rf"(?m)^\s*{code}\b", proc.stdout), f"exit code {code} missing"
-    lowered = proc.stdout.lower()
-    for word in ("success", "fail", "pending", "no run", "error", "verdict"):
-        assert word in lowered
+    meanings = {0: "success", 1: "fail", 2: "pending", 3: "no run", 4: "error", 5: "verdict"}
+    for code, word in meanings.items():
+        assert re.search(
+            rf"(?mi)^\s*{code}\s+.*{word}", proc.stdout
+        ), f"exit code {code} not paired with {word!r}"
 
 
 def test_unknown_flag_exits_4_not_argparse_default_2(tmp_path):

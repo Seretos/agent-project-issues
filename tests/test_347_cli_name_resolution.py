@@ -111,7 +111,9 @@ def test_documented_snippet_resolves_windows_binary(tmp_path: Path) -> None:
     _assert_selects_runnable_name(*_run_snippet(_resolution_snippet(), tmp_path))
 
 
-_BARE_RESOLVE = re.compile(r"\b(command\s+-v|which|type|hash)\s+project-issues(?![.\w-])")
+_BARE_RESOLVE = re.compile(
+    r"(command\s+-v|which|type|hash)\s+[\"']?project-issues[\"']?(?![.\w-])"
+)
 
 
 def _blocks(text: str) -> list[str]:
@@ -129,29 +131,6 @@ def _selects_exe_on_windows(block: str) -> bool:
     )
 
 
-_NEGATION = re.compile(r"\b(do not|don't|dont|never|not|no need|without|instead of)\b", re.IGNORECASE)
-
-
-def _is_retry_paragraph(b: str) -> bool:
-    """One paragraph: the `"$PI" --help` check, 126/127, and AFFIRMATIVE
-    sentences saying a wrong name is retried with the other name (both
-    `project-issues.exe` and the bare `project-issues` are named)."""
-    if not re.search(r"\"\$PI\"\s+(wait-pipeline\s+)?--help", b):
-        return False
-    sentences = [x for x in re.split(r"(?<=[.;!?])\s+|\n", b) if x.strip()]
-    codes = [x for x in sentences if re.search(r"\b126\b", x) and re.search(r"\b127\b", x)]
-    wrong = [x for x in sentences if re.search(r"wrong name", x, re.IGNORECASE)]
-    retry = [
-        x for x in sentences
-        if re.search(r"\b(retry|try)\b[^.\n]{0,40}\bother (name|binary)\b", x, re.IGNORECASE)
-    ]
-    if not (codes and wrong and retry):
-        return False
-    if any(_NEGATION.search(x) for x in codes + wrong + retry):
-        return False
-    return "project-issues.exe" in b and re.search(r"project-issues(?![.\w-])", b) is not None
-
-
 def _assert_usage_line_parses(text: str) -> None:
     """Every documented `"$PI" wait-pipeline` usage line carries --project and
     --sha and is accepted by the real CLI parser (as test_339 does)."""
@@ -164,35 +143,91 @@ def _assert_usage_line_parses(text: str) -> None:
         cmd = re.sub(r"<[^>]*>", "x1", cmd).replace("[", "").replace("]", "")
         argv = shlex.split(cmd)[2:]  # drop "project-issues wait-pipeline"
         assert "--project" in argv and "--sha" in argv, ln
-        ns = parser.parse_args(argv)  # every shown flag must be accepted
-        assert ns.project and ns.sha, ln
+        parser.parse_args(argv)  # every shown flag must be accepted
 
 
-def test_skill_snippet_selects_exe_and_documents_126_127_retry() -> None:
-    """R5a (driving): the SKILL.md snippet R1 executes selects the .exe on
-    Windows shells, and ONE paragraph pairs the `"$PI" --help` sanity check with
-    'rc 126/127 = wrong name -> retry the other name'."""
+def _run_retry_case(snippet: str, tmp_path: Path, uname_out: str, first: str, mode: str) -> tuple[int, str]:
+    """Execute the SKILL.md snippet under real bash. CONTRACT: the snippet picks
+    PI by `uname`, runs `"$PI" --help` and, when that exits 126/127, switches PI
+    to the other name (`project-issues.exe` <-> `project-issues`) and re-checks;
+    it leaves the final name in `$PI` and itself exits 0.
+    Fixture: a fake `uname` (printing `uname_out`) makes the snippet's first
+    choice `first`; that name is broken per `mode` (ok / rc126 / rc127 /
+    absent); the other name is a working stub printing usage.
+    Returns (snippet_rc, final PI)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+
+    def stub(name: str, body: str) -> None:
+        f = bindir / name
+        f.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8", newline="\n")
+        f.chmod(0o755)
+
+    stub("uname", f"echo {uname_out}")
+    other = "project-issues" if first == "project-issues.exe" else "project-issues.exe"
+    stub(other, "echo 'usage: project-issues [-h] {wait-pipeline}'")
+    if mode == "ok":
+        stub(first, "echo 'usage: project-issues [-h] {wait-pipeline}'")
+    elif mode in ("rc126", "rc127"):
+        stub(first, f"exit {mode[2:]}")
+    # mode == "absent": the first-choice name does not exist -> bash rc 127
+
+    runnable = "\n".join(
+        ln for ln in snippet.splitlines() if "wait-pipeline" not in ln or "--help" in ln
+    )
+    script = tmp_path / "retry.sh"
+    # bash's startup files may re-order PATH (Git Bash puts /usr/bin first) and a
+    # real project-issues may sit elsewhere on PATH: pin PATH inside the script to
+    # the fixture dir plus the system dirs, so "absent" is truly absent.
+    q = shlex.quote(str(bindir).replace("\\", "/"))
+    pin = f'BIN="$(cygpath -u {q} 2>/dev/null || echo {q})"\nPATH="$BIN:/usr/bin:/bin"\n'
+    script.write_text(
+        pin + runnable + '\nSNIPRC=$?\nprintf "SNIPRC=%s\\nPI=%s\\n" "$SNIPRC" "$PI"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    env = dict(os.environ)
+    env.pop("CLAUDE_PLUGIN_ROOT", None)
+    env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
+    proc = subprocess.run([_bash(), str(script)], capture_output=True, text=True, env=env, timeout=60)
+    out = dict(ln.split("=", 1) for ln in proc.stdout.splitlines() if ln.startswith(("SNIPRC=", "PI=")))
+    assert "PI" in out, proc.stdout + proc.stderr
+    return int(out["SNIPRC"]), out["PI"].strip()
+
+
+_FIRST_CHOICE = [("MINGW64_NT-10.0", "project-issues.exe"), ("Linux", "project-issues")]
+
+
+@needs_bash
+@pytest.mark.parametrize("uname_out,first", _FIRST_CHOICE)
+@pytest.mark.parametrize("mode", ["rc126", "rc127", "absent"])
+def test_snippet_switches_to_other_name_when_first_choice_fails(
+    tmp_path: Path, uname_out: str, first: str, mode: str
+) -> None:
+    """R5a (driving): first-choice name fails with 126/127 -> the executed
+    snippet ends on the other, working name and exits 0."""
+    if mode == "absent" and first == "project-issues" and sys.platform == "win32":
+        pytest.skip("MSYS resolves a missing `project-issues` to `project-issues.exe` itself")
+    other = "project-issues" if first == "project-issues.exe" else "project-issues.exe"
+    rc, pi = _run_retry_case(_resolution_snippet(), tmp_path, uname_out, first, mode)
+    assert rc == 0
+    assert pi == other
+
+
+@needs_bash
+@pytest.mark.parametrize("uname_out,first", _FIRST_CHOICE)
+def test_snippet_keeps_first_choice_when_it_works(tmp_path: Path, uname_out: str, first: str) -> None:
+    """R5a: first-choice name works -> PI unchanged, snippet exits 0."""
+    rc, pi = _run_retry_case(_resolution_snippet(), tmp_path, uname_out, first, "ok")
+    assert rc == 0
+    assert pi == first
+
+
+def test_skill_docs_do_not_resolve_bare_name_and_usage_lines_parse() -> None:
+    """R5a: SKILL.md never resolves the bare name (incl. quoted forms) and every
+    `"$PI" wait-pipeline` usage line is accepted by the real CLI parser."""
     skill = _pipelines_section()
-    assert _selects_exe_on_windows(_resolution_snippet()), (
-        "SKILL.md snippet does not assign PI=project-issues.exe under MINGW*|MSYS*|CYGWIN* "
-        "(and PI=project-issues otherwise)"
-    )
     assert not _BARE_RESOLVE.search(skill), "SKILL.md resolves the bare name (command -v/which/type project-issues)"
-    hits = [b for b in _blocks(skill) if _is_retry_paragraph(b)]
-    assert hits, (
-        "no single SKILL.md paragraph pairs the `\"$PI\" --help` check with "
-        "'126/127 = wrong name, retry the other name' (affirmatively)"
-    )
-    # Structural link (prose can only be checked structurally): the paragraph
-    # sits after the executed snippet, in the same subsection (no heading between).
-    snippet = _resolution_snippet()
-    snippet_end = skill.index(snippet) + len(snippet)
-    linked = [
-        b for b in hits
-        if skill.find(b, snippet_end) != -1
-        and not re.search(r"^#{1,6} ", skill[snippet_end:skill.find(b, snippet_end)], re.MULTILINE)
-    ]
-    assert linked, "the 126/127 paragraph is not after, and in the same subsection as, the resolution snippet"
     _assert_usage_line_parses(skill)
 
 

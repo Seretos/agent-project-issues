@@ -94,6 +94,13 @@ def test_list_ticket_templates_reports_markdown_required_sections(
     real = _real_template()
     violations = templates_lib.validate_ticket_body(_NO_HEADINGS_BODY, real)
     assert _headings(entry) == [v.field_label for v in violations]
+    # each entry's `expected` is non-empty and is the lib's heading-missing wording
+    for rs in entry["required_sections"]:
+        assert rs["expected"]
+        assert rs["expected"] == f"a `{rs['heading']}` heading"
+    assert [rs["expected"] for rs in entry["required_sections"]] == [
+        v.expected for v in violations
+    ]
     # skeleton order
     assert _headings(entry) == _HEADINGS
     positions = [entry["skeleton"].index(h) for h in _headings(entry)]

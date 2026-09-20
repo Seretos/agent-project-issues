@@ -160,7 +160,7 @@ def _received_sections(body: str) -> list[str]:
     return [m.group(1).strip() for m in _SECTION_HEADING_RE.finditer(body or "")]
 
 
-def _required_field_expected(f) -> str:
+def _required_section_expected(label: str, f) -> str:
     """A short, meaningful (non-placeholder) description of what a required
     template field expects, used to build `required_sections` in
     `_template_view`.
@@ -170,6 +170,8 @@ def _required_field_expected(f) -> str:
     own violation-message generation, not a surface this plugin should
     depend on.
     """
+    if f is None:
+        return f"a `{label}` heading"
     if f.type == "dropdown":
         options = f.options or []
         if options:
@@ -186,14 +188,18 @@ def _template_view(template) -> dict[str, Any]:
 
     Shared by `list_ticket_templates` and the refusal payloads built by
     `create_ticket`/`update_ticket` so the two surfaces can never drift
-    apart (ticket #307 step 9). `required_sections` lists only *required*,
-    non-`markdown` fields — optional fields and informational `markdown`
-    blocks are never something a caller must fill in.
+    apart (ticket #307 step 9). `required_sections` is the lib's own
+    `IssueTemplate.required_sections` (a form's required, non-`markdown`
+    fields; a markdown template's `##`/`###` headings) — optional fields and
+    informational `markdown` blocks are never something a caller must fill in.
     """
+    fields_by_label = {f.label: f for f in template.fields}
     required_sections = [
-        {"heading": f.label, "expected": _required_field_expected(f)}
-        for f in template.fields
-        if f.required and f.type != "markdown"
+        {
+            "heading": label,
+            "expected": _required_section_expected(label, fields_by_label.get(label)),
+        }
+        for label in template.required_sections
     ]
     return {
         "name": template.name,
@@ -1245,6 +1251,7 @@ def register(mcp: FastMCP) -> None:
               "labels":            [str, ...],  # auto-applied on a conforming create_ticket
               "title_prefix":      str,         # auto-applied on a conforming create_ticket
               "required_sections": [{"heading": str, "expected": str}, ...],
+                                              # form: required ### fields; markdown: its ##/### headings
               "skeleton":          str,         # ready-to-fill ### <heading> body
             },
             ...

@@ -174,6 +174,39 @@ def _needs(job: dict) -> list[str]:
     return [n] if isinstance(n, str) else list(n)
 
 
+def _matrix_entries(job: dict) -> list[dict]:
+    """Expand strategy.matrix (plain axes + include) into per-combination dicts."""
+    m = (job.get("strategy") or {}).get("matrix") or {}
+    include = m.get("include", []) if isinstance(m, dict) else []
+    axes = {k: v for k, v in m.items() if k not in ("include", "exclude") and isinstance(v, list)}
+    combos: list[dict] = [{}]
+    for k, vals in axes.items():
+        combos = [{**c, k: v} for c in combos for v in vals]
+    if axes:
+        return combos + list(include)
+    return list(include)
+
+
+def _matrix_oses(job: dict) -> set[str]:
+    return {str(e["os"]) for e in _matrix_entries(job) if "os" in e}
+
+
+def _uploaded_names(job: dict) -> set[str]:
+    """Artifact names uploaded by upload-artifact steps that fail on missing files,
+    with `${{ matrix.X }}` expanded from the job's parsed matrix."""
+    out: set[str] = set()
+    for st in job.get("steps", []):
+        if not str(st.get("uses", "")).startswith("actions/upload-artifact"):
+            continue
+        w = st.get("with", {})
+        if str(w.get("if-no-files-found", "")) != "error":
+            continue
+        raw = str(w.get("name", ""))
+        for e in _matrix_entries(job) or [{}]:
+            out.add(re.sub(r"\$\{\{\s*matrix\.([\w-]+)\s*\}\}", lambda mm: str(e.get(mm.group(1), mm.group(0))), raw))
+    return out
+
+
 @pytest.mark.parametrize("wf", ["release.yml", "test.yml"])
 def test_both_workflows_call_the_shared_smoke_script(wf: str) -> None:
     """R4 (driving): each workflow has exactly one enabled step calling the
@@ -193,28 +226,48 @@ def test_both_workflows_call_the_shared_smoke_script(wf: str) -> None:
     assert job.get("continue-on-error") in (None, False), f"{wf}: job {jid} continue-on-error"
     assert step.get("continue-on-error") in (None, False), f"{wf}: step continue-on-error"
 
-    # runs against built artifacts: needs a build job, downloads both bin artifacts
+    # every PR must run it: test.yml triggers on pull_request
+    if wf == "test.yml":
+        triggers = doc.get("on", doc.get(True))
+        assert "pull_request" in triggers, f"{wf} triggers: {triggers}"
+
+    # runs against built artifacts: needs a build job that uploads both bin artifacts
     needs = _needs(job)
     assert needs, f"{wf}: job {jid} has no `needs` (no built binary)"
     for n in needs:
         assert n in doc["jobs"], f"{wf}: needs unknown job {n}"
-    build_text = " ".join(str(doc["jobs"][n]) for n in needs)
-    assert "upload-artifact" in build_text or any(
-        "upload-artifact" in str(doc["jobs"][n]) for n in doc["jobs"]
-    ), f"{wf}: no artifact producer"
+    produced: set[str] = set()
+    for n in needs:
+        produced |= _uploaded_names(doc["jobs"][n])
+    assert {"bin-windows", "bin-linux"} <= produced, (
+        f"{wf}: jobs {needs} (needed by smoke) must upload bin-windows and bin-linux with "
+        f"if-no-files-found: error, got {sorted(produced)}"
+    )
+    for n in needs:
+        oses = _matrix_oses(doc["jobs"][n])
+        assert {"windows-latest", "ubuntu-22.04"} <= oses, f"{wf}: build job {n} matrix os: {oses}"
+        assert "matrix.os" in str(doc["jobs"][n].get("runs-on", "")), f"{wf}: build {n} runs-on"
+
     downloads = [
-        str(st.get("with", {}).get("name", ""))
+        st.get("with", {})
         for st in job.get("steps", [])
         if str(st.get("uses", "")).startswith("actions/download-artifact")
     ]
-    assert "bin-windows" in downloads and "bin-linux" in downloads, (
-        f"{wf}: smoke job must download bin-windows and bin-linux, got {downloads}"
+    names = {str(d.get("name", "")) for d in downloads}
+    assert {"bin-windows", "bin-linux"} <= names, (
+        f"{wf}: smoke job must download bin-windows and bin-linux, got {names}"
     )
-    # both OSes are exercised
-    smoke_text = str(job)
-    assert "windows" in smoke_text and ("ubuntu" in smoke_text or "linux" in smoke_text), (
-        f"{wf}: smoke job does not cover both OSes"
-    )
+    for d in downloads:
+        if str(d.get("name", "")) in ("bin-windows", "bin-linux"):
+            path = str(d.get("path", "")).strip().rstrip("/\\")
+            assert path == "bin" or path.endswith("/bin"), (
+                f"{wf}: download of {d.get('name')} must land in bin/, path={d.get('path')!r}"
+            )
+
+    # both OSes are exercised: parsed matrix, and runs-on uses it
+    oses = _matrix_oses(job)
+    assert {"windows-latest", "ubuntu-22.04"} <= oses, f"{wf}: smoke matrix os: {oses}"
+    assert "matrix.os" in str(job.get("runs-on", "")), f"{wf}: smoke runs-on {job.get('runs-on')!r}"
 
     # no inline copy of the resolution body anywhere
     for j in doc["jobs"].values():
@@ -224,19 +277,12 @@ def test_both_workflows_call_the_shared_smoke_script(wf: str) -> None:
             )
 
 
-def test_release_needs_smoke_and_test_runs_on_pull_request() -> None:
-    """R4: release publishing waits on the smoke job; test.yml (every PR)
-    triggers on pull_request and builds/smokes on windows and ubuntu-22.04."""
+def test_release_publishing_needs_the_smoke_job() -> None:
+    """R4: release publishing waits on the smoke job (retrospective guard: the
+    smoke job already gated release before #349; kept so the move to the shared
+    script cannot drop the gate)."""
     rel = _load_workflow("release.yml")
-    rjid = _callers(rel)[0][0]
+    callers = _callers(rel)
+    assert callers, "release.yml has no job calling the shared smoke script"
+    rjid = callers[0][0]
     assert rjid in _needs(rel["jobs"]["release"]), "release must need the smoke job"
-
-    doc = _load_workflow("test.yml")
-    triggers = doc.get("on", doc.get(True))
-    assert "pull_request" in triggers, f"test.yml triggers: {triggers}"
-    jid, job, _ = _callers(doc)[0]
-    for n in _needs(job):
-        m = str(doc["jobs"][n].get("strategy", {}))
-        assert "windows-latest" in m and "ubuntu-22.04" in m, f"build job {n} matrix: {m}"
-    sm = str(job.get("strategy", {})) + str(job.get("runs-on", ""))
-    assert "windows-latest" in sm and "ubuntu-22.04" in sm, f"smoke job {jid} matrix: {sm}"

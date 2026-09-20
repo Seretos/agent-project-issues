@@ -207,7 +207,7 @@ In Claude Code CLI the host passes the user's working directory to the MCP, so t
 - **Recommended:** put your config in `~/.seretos/projects.yml`. The user-level fallback is the dedicated escape hatch.
 - **Per-project:** export `PROJECT_ISSUES_PLUGIN_CWD=$(pwd)` before launching `copilot`. The plugin reads it as the search root.
 
-Each `projects[]` entry can reuse the global `GITHUB_TOKEN` or scope to a per-project token (`token_env: GITHUB_TOKEN_ACME`) — the env var name is just a pointer; the token value itself is read from the process environment. Under Codex the bundled server receives `GITHUB_TOKEN`, `GITLAB_TOKEN` and `AZURE_DEVOPS_TOKEN` from the shell that launched Codex (forwarded by name via `env_vars` in `.mcp.json`); custom `token_env` names must be supplied through `env_file:` in `projects.yml`.
+Each `projects[]` entry can reuse the global `GITHUB_TOKEN` or scope to a per-project token (`token_env: GITHUB_TOKEN_ACME`) — the env var name is just a pointer; the token value itself is read from the process environment. Under Codex the bundled server receives `GITHUB_TOKEN`, `GITLAB_TOKEN` and `AZURE_DEVOPS_TOKEN` from the shell that launched Codex (forwarded by name via `env_vars` in `.mcp.json`); custom `token_env` names must be supplied through `env_file:` in `projects.yml`. Names only are forwarded, never values. Live Codex behaviour for this forwarding is not covered by CI and has not been verified end to end.
 
 ## Security hardening
 

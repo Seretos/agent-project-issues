@@ -23,6 +23,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SECRET = "ghp_test_value_344"
 
@@ -34,6 +36,7 @@ _BOOTSTRAP = (
 
 _SNIPPET = r"""
 import json
+import sys
 from lib_python_projects import ProjectConfig, ProjectsLoadResult
 from project_issues_plugin.tools import projects as projects_mod
 
@@ -46,8 +49,10 @@ class _StubMCP:
             return fn
         return deco
 
+provider, token_env = sys.argv[1], sys.argv[2]
 project = ProjectConfig(
-    id="acme", provider="github", path="acme/backend", token_env="GITHUB_TOKEN"
+    id="acme", provider=provider, path=("acme/proj/backend" if provider == "azuredevops" else "acme/backend"),
+    token_env=token_env
 )
 projects_mod.load_projects = lambda *a, **k: ProjectsLoadResult(
     projects=[project], state="ok", search_root="/tmp"
@@ -67,7 +72,11 @@ def _declared() -> list[str]:
     return list(_server().get("env_vars", []))
 
 
-def _run_child(ambient_token: bool = True) -> subprocess.CompletedProcess:
+def _run_child(
+    ambient_token: bool = True,
+    provider: str = "github",
+    token_env: str = "GITHUB_TOKEN",
+) -> subprocess.CompletedProcess:
     env: dict[str, str] = {}
     for name in _BOOTSTRAP:
         if name in os.environ:
@@ -75,13 +84,13 @@ def _run_child(ambient_token: bool = True) -> subprocess.CompletedProcess:
     # What Codex would forward: declared names present in the parent shell.
     parent = dict(os.environ)
     if ambient_token:
-        parent["GITHUB_TOKEN"] = SECRET
+        parent[token_env] = SECRET
     for name in _declared():
         if name in parent:
             env[name] = parent[name]
     env["PYTHONPATH"] = str(REPO / "src")
     return subprocess.run(
-        [sys.executable, "-c", _SNIPPET],
+        [sys.executable, "-c", _SNIPPET, provider, token_env],
         env=env, capture_output=True, text=True, timeout=120, cwd=str(REPO),
     )
 
@@ -113,10 +122,21 @@ def test_without_the_token_the_child_reports_env_var_unset():
         if parent_had is not None:
             os.environ["GITHUB_TOKEN"] = parent_had
     assert proj["token_error"] == "env_var_unset"
+    assert proj["token_available"] is False
 
 
-def test_all_default_provider_tokens_are_declared():
-    assert {"GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_TOKEN"} <= set(_declared())
+@pytest.mark.parametrize(
+    "provider,token_env",
+    [
+        ("github", "GITHUB_TOKEN"),
+        ("gitlab", "GITLAB_TOKEN"),
+        ("azuredevops", "AZURE_DEVOPS_TOKEN"),
+    ],
+)
+def test_declared_env_vars_carry_every_default_provider_token(provider, token_env):
+    proj = _project(_run_child(provider=provider, token_env=token_env))
+    assert proj["token_error"] is None
+    assert proj["token_available"] is True
 
 
 def test_declaration_carries_names_only():

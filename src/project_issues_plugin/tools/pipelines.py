@@ -177,6 +177,9 @@ def register(mcp: FastMCP) -> None:
         mode and, when a non-`all` `status` filter is active or a
         `workflow`/`event`/`since` filter is active, notes that the
         filter(s) may be excluding matching runs.
+        The generic hint also names the `project-issues wait-pipeline`
+        CLI, the way to block on a run that has not started yet instead of
+        polling this tool.
 
         Run details (`name`, `branch`, `head_sha`, `event`, `status`,
         `conclusion`, `url`, `created_at`, `updated_at`, `run_attempt`)
@@ -310,6 +313,15 @@ def register(mcp: FastMCP) -> None:
                         f" ({', '.join(active_filters)} active and may be "
                         "excluding matching runs)"
                     )
+                # Ticket #339: an agent that sees "no runs yet" right after a
+                # push is about to start a poll loop; point it at the CLI
+                # that blocks until the run finishes instead.
+                hint += (
+                    ". If you are waiting for a run that has not started or "
+                    "finished yet, do not poll this tool in a loop: run the "
+                    "bundled CLI `project-issues wait-pipeline` once "
+                    "(see the project-issues skill)"
+                )
 
             return {
                 "project_id": project.id,

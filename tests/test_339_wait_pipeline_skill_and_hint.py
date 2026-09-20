@@ -58,7 +58,7 @@ def test_skill_wait_pipeline_command_parses_with_cli_parser() -> None:
     assert cmds, "no full `project-issues wait-pipeline --...` command in Pipelines section"
     parser = cli._build_parser()
     m = re.search(r"project-issues\s+wait-pipeline[^\n`]*", cmds[0])
-    argv = shlex.split(m.group(0))[1:]
+    argv = shlex.split(m.group(0))[2:]  # drop "project-issues wait-pipeline"
     argv = [a.replace("<id>", "acme").replace("<commit>", "abc123") for a in argv]
     ns = parser.parse_args(argv)  # every shown flag must be accepted
     assert ns.timeout == 540

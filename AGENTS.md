@@ -101,7 +101,11 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
 
 - **Package layout is staged by one script.** `.github/scripts/stage-plugin-payload.sh <src> <dest>`
   is the single list of what ships (`.claude-plugin/`, `.codex-plugin/`, root `.mcp.json`, `hooks/`,
-  `skills/`, `bin/`); `release.yml` calls it from both the ZIP and orphan-branch steps. Codex reads
+  `skills/`, `bin/`); `release.yml` calls it from both the ZIP and orphan-branch steps. The server
+  entry in `.mcp.json` carries `env_vars: ["GITHUB_TOKEN","GITLAB_TOKEN","AZURE_DEVOPS_TOKEN"]`
+  (#344): Codex starts stdio servers with a curated environment, so tokens are forwarded **by name**
+  only - never an `env` map, a `${...}` placeholder or a literal value. Custom per-project
+  `token_env` names cannot be listed statically; use `env_file:` in `.seretos/projects.yml`. Codex reads
   `.codex-plugin/plugin.json`, whose `mcpServers` points at `./.mcp.json`, which declares the server
   with a plugin-relative `./bin/project-issues` (no `${...}` placeholder - that broke Codex on
   Windows, #315; root `plugin.json`/`mcp.json` are read by no host, #332). Add new shipped members in the script.

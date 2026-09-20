@@ -7,6 +7,7 @@ snippet and name `project-issues.exe` for Windows / Git Bash.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -39,12 +40,10 @@ def _resolution_snippet() -> str:
     return blocks[0]
 
 
-@needs_bash
-def test_documented_snippet_resolves_windows_binary(tmp_path: Path) -> None:
-    """R1 (driving): with the ELF and the .exe side by side on PATH, the
-    documented snippet selects the name that really runs on this OS."""
-    snippet = _resolution_snippet()
-
+def _run_snippet(snippet: str, tmp_path: Path) -> tuple[str, dict[str, str], str]:
+    """Run a documented resolution snippet under real bash with the ELF and the
+    .exe side by side on PATH. Returns (expected_name, printed vars, stdout).
+    Lines invoking `"$PI" wait-pipeline ...` (usage lines) are not executed."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     elf = bindir / "project-issues"
@@ -60,16 +59,15 @@ def test_documented_snippet_resolves_windows_binary(tmp_path: Path) -> None:
         exe.write_bytes(b"MZ" + b"\0" * 60)
         expected = "project-issues"
 
+    runnable = "\n".join(ln for ln in snippet.splitlines() if "wait-pipeline" not in ln)
     script = tmp_path / "resolve.sh"
     script.write_text(
-        snippet
-        + '\nprintf "PI=%s\\n" "$PI"\n'
+        runnable
+        + '\nprintf "PI=%s\\n" "$PI"\nprintf "CV=%s\\n" "$(command -v "$PI")"\n'
         + ('"$PI" --help\n' if sys.platform != "win32" else ""),
         encoding="utf-8",
         newline="\n",
     )
-    import os
-
     env = dict(os.environ)
     env.pop("CLAUDE_PLUGIN_ROOT", None)
     env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
@@ -78,12 +76,26 @@ def test_documented_snippet_resolves_windows_binary(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out = dict(
-        ln.split("=", 1) for ln in proc.stdout.splitlines() if ln.startswith("PI=")
+        ln.split("=", 1) for ln in proc.stdout.splitlines() if ln.startswith(("PI=", "CV="))
     )
+    return expected, out, proc.stdout
+
+
+def _assert_selects_runnable_name(expected: str, out: dict[str, str], stdout: str) -> None:
     assert out["PI"] == expected
-    assert (bindir / out["PI"]).is_file()  # the selected name is the file placed next to the shadowing ELF
+    # `command -v "$PI"` (captured from the run) resolves to the intended file in
+    # the dir holding both names: the .exe on Windows, never the ELF stub.
+    resolved = out["CV"].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    assert resolved.lower() == expected.lower(), out["CV"]
     if sys.platform != "win32":
-        assert "ran-posix-binary" in proc.stdout  # the resolved name actually executed
+        assert "ran-posix-binary" in stdout  # the resolved name actually executed
+
+
+@needs_bash
+def test_documented_snippet_resolves_windows_binary(tmp_path: Path) -> None:
+    """R1 (driving): with the ELF and the .exe side by side on PATH, the
+    documented snippet selects the name that really runs on this OS."""
+    _assert_selects_runnable_name(*_run_snippet(_resolution_snippet(), tmp_path))
 
 
 _BARE_RESOLVE = re.compile(r"\b(command\s+-v|which|type|hash)\s+project-issues(?![.\w-])")
@@ -125,14 +137,38 @@ def test_skill_snippet_selects_exe_and_documents_126_127_retry() -> None:
         "no single SKILL.md paragraph pairs the `\"$PI\" --help` check with "
         "'126/127 = wrong name, retry the other name'"
     )
+    # Structural link (prose can only be checked structurally): the paragraph
+    # sits after the executed snippet, in the same subsection (no heading between).
+    snippet = _resolution_snippet()
+    snippet_end = skill.index(snippet) + len(snippet)
+    linked = [
+        b for b in hits
+        if skill.find(b, snippet_end) != -1
+        and not re.search(r"^#{1,6} ", skill[snippet_end:skill.find(b, snippet_end)], re.MULTILINE)
+    ]
+    assert linked, "the 126/127 paragraph is not after, and in the same subsection as, the resolution snippet"
 
 
-def test_readme_cli_section_gives_windows_resolution() -> None:
-    """R5b (driving): README's CLI section carries a fenced uname-driven
-    selection of project-issues.exe on Windows / Git Bash, used via "$PI",
-    and no bare-name resolution."""
+@needs_bash
+def test_readme_cli_section_gives_windows_resolution(tmp_path: Path) -> None:
+    """R5b (driving): README's CLI section carries a fenced uname block that,
+    EXECUTED under real bash, selects the name that runs on this OS, and the
+    `"$PI" wait-pipeline` usage line is in that block or right after it."""
     readme = _readme_cli_section()
-    fenced = [b for b in _fenced_blocks(readme) if _selects_exe_on_windows(b)]
-    assert fenced, "README CLI section has no fenced uname block selecting project-issues.exe on MINGW*/MSYS*/CYGWIN*"
-    assert re.search(r"\"\$PI\"\s+wait-pipeline", readme), 'README CLI usage does not invoke "$PI" wait-pipeline'
+    spans = [
+        (m.group(1), m.end())
+        for m in re.finditer(r"```[a-z]*\n(.*?)```", readme, re.DOTALL)
+        if "uname" in m.group(1)
+    ]
+    assert spans, "README CLI section has no fenced uname block"
+    block, end = spans[0]
+    assert _selects_exe_on_windows(block), (
+        "README uname block does not select project-issues.exe under MINGW*|MSYS*|CYGWIN*"
+    )
+    usage = r"\"\$PI\"\s+wait-pipeline"
+    after = readme[end:].lstrip("\n").split("\n", 1)[0]
+    assert re.search(usage, block) or re.search(usage, after), (
+        'README `"$PI" wait-pipeline` usage is neither in the PI= block nor on the line right after it'
+    )
+    _assert_selects_runnable_name(*_run_snippet(block, tmp_path))
     assert not _BARE_RESOLVE.search(readme), "README resolves the bare name (command -v/which/type project-issues)"

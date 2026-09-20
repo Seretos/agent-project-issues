@@ -322,7 +322,8 @@ build a sleep/poll loop around `list_pipeline_runs`, and never end your
 session as failed just because the pipeline is still running.
 
 Run the CLI in ONE foreground Bash call whose own tool timeout is
-longer than the CLI's `--timeout`:
+longer than the CLI's `--timeout` (Linux/macOS form; on Windows Git Bash
+use `project-issues.exe`, see below):
 
 ```
 project-issues wait-pipeline --project <id> --sha <commit> --timeout 540 --interval 20
@@ -342,15 +343,45 @@ Exit codes, one per line:
 - 4 - config, provider or usage error (message on stderr, empty stdout).
 - 5 - no verdict: runs ended cancelled, timed_out or skipped.
 
-Where the binary lives: it ships as `bin/project-issues`
-(`bin/project-issues.exe` on Windows) inside the installed plugin
-directory and is not on `PATH` by default. Resolve it, do not guess:
-first try `command -v project-issues`; otherwise use
-`"$CLAUDE_PLUGIN_ROOT/bin/project-issues"` if that variable is set in
-your shell; otherwise ask the user once for the plugin install
-directory. Confirm the resolved path with `--help` before the long
-call. If nothing resolves, say so, make a single `list_pipeline_runs`
-check and report what you saw.
+Where the binary lives: it ships in the installed plugin directory as
+`bin/project-issues` (a Linux binary) next to `bin/project-issues.exe`
+(Windows), and is not on `PATH` by default. The bare name does not work
+everywhere: bash on Windows (Git Bash) never falls back to `.exe`, so
+`project-issues` there hits the Linux binary and fails with rc 126.
+Pick the name by OS, confirm it with `--help`, and switch to the other
+name if it fails. rc 126/127 means the wrong name, not a wrong
+architecture install - retry the other name before reporting anything:
+
+```
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) PI=project-issues.exe ;;
+  *) PI=project-issues ;;
+esac
+"$PI" --help >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+  FIRST=$PI
+  if [ "$PI" = project-issues.exe ]; then PI=project-issues; else PI=project-issues.exe; fi
+  "$PI" --help >/dev/null 2>&1
+  rc=$?
+  # the other name fails too: keep the first choice (and report that)
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then PI=$FIRST; fi
+fi
+true
+```
+
+Then, if `"$PI"` is not on `PATH`, use `"$CLAUDE_PLUGIN_ROOT/bin/$PI"`
+when that variable is set in your shell; otherwise ask the user once
+for the plugin install directory. Run the wait with the resolved name:
+
+```
+"$PI" wait-pipeline --project <id> --sha <commit> --timeout 540 --interval 20
+```
+
+On Windows from PowerShell/cmd, `project-issues` also works (`.exe` is
+resolved automatically); only bash needs the explicit name. If nothing
+resolves, say so, make a single `list_pipeline_runs` check and report
+what you saw.
 
 `get_ref(project_id, ref)` resolves a branch, tag, or commit sha to its
 peeled commit sha and reports which kind it resolved as (`branch` /

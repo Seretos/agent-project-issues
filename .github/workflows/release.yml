@@ -247,6 +247,11 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-22.04]
     steps:
+      # The smoke script lives in the repo (#349); without a checkout the
+      # job has no .github/scripts/ and dies with exit 127 (#351).
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download Windows binary
         uses: actions/download-artifact@v4
         with:

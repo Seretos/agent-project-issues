@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "project-issues": {
+      "command": "./bin/project-issues",
+      "args": [],
+      "cwd": "."
+    }
+  }
+}

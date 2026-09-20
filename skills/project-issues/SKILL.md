@@ -313,6 +313,45 @@ new namespace with no flat-form equivalent, opt in deliberately):
    from a follow-up `list_pipeline_runs`/`get_pipeline_run` poll), the
    normal drill-down chain above applies.
 
+### Waiting for CI: one blocking call, not a poll loop
+
+There is deliberately no MCP tool that waits for a pipeline. An MCP
+call that blocks for minutes holds the whole session open and cannot be
+used from scripts, so waiting lives in the bundled CLI instead. Never
+build a sleep/poll loop around `list_pipeline_runs`, and never end your
+session as failed just because the pipeline is still running.
+
+Run the CLI in ONE foreground Bash call whose own tool timeout is
+longer than the CLI's `--timeout`:
+
+```
+project-issues wait-pipeline --project <id> --sha <commit> --timeout 540 --interval 20
+```
+
+Pass `timeout: 600000` (milliseconds) on that Bash call. The CLI's own
+default is 600 seconds, which would race a 600 second tool cap, so
+always pass `--timeout 540` explicitly. Do not background the call.
+It prints one JSON object on stdout; diagnostics go to stderr.
+
+Exit codes, one per line:
+
+- 0 - green: every run succeeded.
+- 1 - at least one run failed (drill down with `get_pipeline_run`).
+- 2 - timeout: runs were still pending when `--timeout` elapsed.
+- 3 - no run exists for the commit.
+- 4 - config, provider or usage error (message on stderr, empty stdout).
+- 5 - no verdict: runs ended cancelled, timed_out or skipped.
+
+Where the binary lives: it ships as `bin/project-issues`
+(`bin/project-issues.exe` on Windows) inside the installed plugin
+directory and is not on `PATH` by default. Resolve it, do not guess:
+first try `command -v project-issues`; otherwise use
+`"$CLAUDE_PLUGIN_ROOT/bin/project-issues"` if that variable is set in
+your shell; otherwise ask the user once for the plugin install
+directory. Confirm the resolved path with `--help` before the long
+call. If nothing resolves, say so, make a single `list_pipeline_runs`
+check and report what you saw.
+
 `get_ref(project_id, ref)` resolves a branch, tag, or commit sha to its
 peeled commit sha and reports which kind it resolved as (`branch` /
 `tag` / `commit`; resolution order is branch -> tag -> commit).

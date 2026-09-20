@@ -9,6 +9,11 @@ name: tests
 # matches the WSL2 target environment from #10 / #11; building on
 # glibc 2.39 (ubuntu-latest today) would produce binaries that fail
 # to start under WSL2-Ubuntu-22.04's glibc 2.35.
+#
+# Besides pytest, every PR also builds the per-OS binary (build job) and runs
+# the shared .github/scripts/smoke-cli-resolution.sh against both built
+# binaries (smoke job), the same script release.yml runs before publishing
+# (#349), so a broken CLI invocation goes red on the PR, not at release time.
 on:
   pull_request:
 
@@ -67,3 +72,69 @@ jobs:
       - name: Run pytest
         shell: pwsh
         run: python -m pytest
+
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: bin-windows
+            binary: project-issues.exe
+          - os: ubuntu-22.04
+            artifact-name: bin-linux
+            binary: project-issues
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Build binary
+        shell: pwsh
+        run: ./scripts/build.ps1 -Clean
+
+      - name: Upload built binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: bin/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-windows
+          path: bin/
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-linux
+          path: bin/
+
+      - name: Run documented CLI name resolution
+        shell: bash
+        run: bash .github/scripts/smoke-cli-resolution.sh

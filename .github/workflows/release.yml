@@ -261,31 +261,7 @@ jobs:
 
       - name: Run documented CLI name resolution
         shell: bash
-        run: |
-          chmod +x bin/project-issues bin/project-issues.exe || true
-          test -f bin/project-issues && test -f bin/project-issues.exe
-          export PATH="$PWD/bin:$PATH"
-          case "$(uname -s)" in
-            MINGW*|MSYS*|CYGWIN*) PI=project-issues.exe ;;
-            *) PI=project-issues ;;
-          esac
-          "$PI" --help >/dev/null 2>&1
-          rc=$?
-          if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
-            if [ "$PI" = project-issues.exe ]; then PI=project-issues; else PI=project-issues.exe; fi
-          fi
-          echo "resolved PI=$PI"
-          out="$("$PI" wait-pipeline --help)"
-          rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::$PI wait-pipeline --help exited $rc"
-            exit 1
-          fi
-          case "$out" in
-            *--sha*) ;;
-            *) echo "::error::--sha missing from wait-pipeline --help"; exit 1 ;;
-          esac
+        run: bash .github/scripts/smoke-cli-resolution.sh
 
   # ---------------------------------------------------------------------------
   # Job 3 - Assemble orphan release branch, build ZIP, publish

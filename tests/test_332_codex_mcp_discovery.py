@@ -103,6 +103,25 @@ def test_staged_codex_chain_resolves_end_to_end(staged: Path) -> None:
 
 
 @needs_bash
+def test_staged_codex_server_forwards_provider_token_env_vars(staged: Path) -> None:
+    """#344 config regression guard: the staged Codex server declares provider tokens by name only.
+
+    Shape check on the shipped config; the forwarding behaviour itself needs a real Codex host.
+    """
+    manifest = json.loads((staged / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    mcp = json.loads(_resolve_in(staged, manifest["mcpServers"]).read_text(encoding="utf-8"))
+    server = mcp["mcpServers"]["project-issues"]
+
+    forwarded = server["env_vars"]
+    assert set(forwarded) >= {"GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_TOKEN"}
+
+    # By reference only: no literal env map, every entry a bare variable name.
+    assert "env" not in server
+    for name in forwarded:
+        assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name), f"not a bare env var name: {name!r}"
+
+
+@needs_bash
 def test_staged_package_has_no_unread_root_manifests(staged: Path) -> None:
     # Reached only after the Codex chain exists, so a missing chain cannot pass this.
     assert (staged / ".codex-plugin" / "plugin.json").is_file()

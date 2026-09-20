@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from project_issues_plugin import cli
 from tests.test_315_portable_plugin_layout import _bash, needs_bash
 from tests.test_339_wait_pipeline_skill_and_hint import _pipelines_section
 
@@ -63,8 +65,12 @@ def _run_snippet(snippet: str, tmp_path: Path) -> tuple[str, dict[str, str], str
     script = tmp_path / "resolve.sh"
     script.write_text(
         runnable
-        + '\nprintf "PI=%s\\n" "$PI"\nprintf "CV=%s\\n" "$(command -v "$PI")"\n'
-        + ('"$PI" --help\n' if sys.platform != "win32" else ""),
+        + '\nprintf "PI=%s\\n" "$PI"\n'
+        # directory `command -v "$PI"` resolves into, as a native path when the
+        # shell offers `pwd -W` (MSYS/Git Bash), else plain `pwd`
+        + 'CVP="$(command -v "$PI")"\n'
+        + 'printf "CVD=%s\\n" "$(cd "$(dirname "$CVP")" && { pwd -W 2>/dev/null || pwd; })"\n'
+        + 'printf "CVB=%s\\n" "$(basename "$CVP")"\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -76,19 +82,26 @@ def _run_snippet(snippet: str, tmp_path: Path) -> tuple[str, dict[str, str], str
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out = dict(
-        ln.split("=", 1) for ln in proc.stdout.splitlines() if ln.startswith(("PI=", "CV="))
+        ln.split("=", 1) for ln in proc.stdout.splitlines() if ln.startswith(("PI=", "CVD=", "CVB="))
     )
-    return expected, out, proc.stdout
+    return expected, out, str(bindir)
 
 
-def _assert_selects_runnable_name(expected: str, out: dict[str, str], stdout: str) -> None:
+def _norm_dir(p: str) -> str:
+    """Normalise Windows / MSYS (`/c/Users/...`) / POSIX path spellings."""
+    p = p.strip().replace("\\", "/")
+    m = re.match(r"^/([a-zA-Z])/(.*)$", p)
+    if m and sys.platform == "win32":
+        p = f"{m.group(1)}:/{m.group(2)}"
+    return os.path.normcase(os.path.realpath(p)).replace("\\", "/").rstrip("/")
+
+
+def _assert_selects_runnable_name(expected: str, out: dict[str, str], bindir: str) -> None:
     assert out["PI"] == expected
     # `command -v "$PI"` (captured from the run) resolves to the intended file in
-    # the dir holding both names: the .exe on Windows, never the ELF stub.
-    resolved = out["CV"].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    assert resolved.lower() == expected.lower(), out["CV"]
-    if sys.platform != "win32":
-        assert "ran-posix-binary" in stdout  # the resolved name actually executed
+    # the dir holding both names, not to a same-named binary elsewhere on PATH.
+    assert out["CVB"].lower() == expected.lower(), out
+    assert _norm_dir(out["CVD"]) == _norm_dir(bindir), (out["CVD"], bindir)
 
 
 @needs_bash
@@ -116,6 +129,45 @@ def _selects_exe_on_windows(block: str) -> bool:
     )
 
 
+_NEGATION = re.compile(r"\b(do not|don't|dont|never|not|no need|without|instead of)\b", re.IGNORECASE)
+
+
+def _is_retry_paragraph(b: str) -> bool:
+    """One paragraph: the `"$PI" --help` check, 126/127, and AFFIRMATIVE
+    sentences saying a wrong name is retried with the other name (both
+    `project-issues.exe` and the bare `project-issues` are named)."""
+    if not re.search(r"\"\$PI\"\s+(wait-pipeline\s+)?--help", b):
+        return False
+    sentences = [x for x in re.split(r"(?<=[.;!?])\s+|\n", b) if x.strip()]
+    codes = [x for x in sentences if re.search(r"\b126\b", x) and re.search(r"\b127\b", x)]
+    wrong = [x for x in sentences if re.search(r"wrong name", x, re.IGNORECASE)]
+    retry = [
+        x for x in sentences
+        if re.search(r"\b(retry|try)\b[^.\n]{0,40}\bother (name|binary)\b", x, re.IGNORECASE)
+    ]
+    if not (codes and wrong and retry):
+        return False
+    if any(_NEGATION.search(x) for x in codes + wrong + retry):
+        return False
+    return "project-issues.exe" in b and re.search(r"project-issues(?![.\w-])", b) is not None
+
+
+def _assert_usage_line_parses(text: str) -> None:
+    """Every documented `"$PI" wait-pipeline` usage line carries --project and
+    --sha and is accepted by the real CLI parser (as test_339 does)."""
+    lines = [ln for ln in text.splitlines() if re.search(r"\"\$PI\"\s+wait-pipeline", ln)]
+    assert lines, 'no `"$PI" wait-pipeline ...` usage line'
+    parser = cli._build_parser()
+    for ln in lines:
+        m = re.search(r"\"\$PI\"\s+wait-pipeline[^\n`]*", ln)
+        cmd = m.group(0).replace('"$PI"', "project-issues")
+        cmd = re.sub(r"<[^>]*>", "x1", cmd).replace("[", "").replace("]", "")
+        argv = shlex.split(cmd)[2:]  # drop "project-issues wait-pipeline"
+        assert "--project" in argv and "--sha" in argv, ln
+        ns = parser.parse_args(argv)  # every shown flag must be accepted
+        assert ns.project and ns.sha, ln
+
+
 def test_skill_snippet_selects_exe_and_documents_126_127_retry() -> None:
     """R5a (driving): the SKILL.md snippet R1 executes selects the .exe on
     Windows shells, and ONE paragraph pairs the `"$PI" --help` sanity check with
@@ -126,16 +178,10 @@ def test_skill_snippet_selects_exe_and_documents_126_127_retry() -> None:
         "(and PI=project-issues otherwise)"
     )
     assert not _BARE_RESOLVE.search(skill), "SKILL.md resolves the bare name (command -v/which/type project-issues)"
-    hits = [
-        b for b in _blocks(skill)
-        if re.search(r"\"\$PI\"\s+(wait-pipeline\s+)?--help", b)
-        and re.search(r"\b126\b[^\n]{0,40}\b127\b|\b127\b[^\n]{0,40}\b126\b", b)
-        and re.search(r"wrong name", b, re.IGNORECASE)
-        and re.search(r"(retry|try)[^.\n]{0,40}other (name|binary)", b, re.IGNORECASE)
-    ]
+    hits = [b for b in _blocks(skill) if _is_retry_paragraph(b)]
     assert hits, (
         "no single SKILL.md paragraph pairs the `\"$PI\" --help` check with "
-        "'126/127 = wrong name, retry the other name'"
+        "'126/127 = wrong name, retry the other name' (affirmatively)"
     )
     # Structural link (prose can only be checked structurally): the paragraph
     # sits after the executed snippet, in the same subsection (no heading between).
@@ -147,6 +193,7 @@ def test_skill_snippet_selects_exe_and_documents_126_127_retry() -> None:
         and not re.search(r"^#{1,6} ", skill[snippet_end:skill.find(b, snippet_end)], re.MULTILINE)
     ]
     assert linked, "the 126/127 paragraph is not after, and in the same subsection as, the resolution snippet"
+    _assert_usage_line_parses(skill)
 
 
 @needs_bash
@@ -170,5 +217,6 @@ def test_readme_cli_section_gives_windows_resolution(tmp_path: Path) -> None:
     assert re.search(usage, block) or re.search(usage, after), (
         'README `"$PI" wait-pipeline` usage is neither in the PI= block nor on the line right after it'
     )
+    _assert_usage_line_parses(block + "\n" + after)
     _assert_selects_runnable_name(*_run_snippet(block, tmp_path))
     assert not _BARE_RESOLVE.search(readme), "README resolves the bare name (command -v/which/type project-issues)"

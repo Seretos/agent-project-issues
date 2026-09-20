@@ -374,6 +374,16 @@ The bundled binary also has a blocking command-line subcommand, so an agent can 
 project-issues wait-pipeline --project <id> --sha <commit> [--timeout 600] [--interval 20]
 ```
 
+That is the Linux/macOS name (and works in PowerShell/cmd on Windows). In bash on Windows (Git Bash) the bare name resolves to the Linux binary in `bin/` and fails with rc 126, because bash never falls back to `.exe`; use `project-issues.exe` there. A name that fails with rc 126/127 is the wrong name, not a wrong-architecture install. Resolve it portably:
+
+```bash
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) PI=project-issues.exe ;;
+  *) PI=project-issues ;;
+esac
+"$PI" wait-pipeline --project <id> --sha <commit> [--timeout 600] [--interval 20]
+```
+
 It reads `projects.yml` like the MCP tools, polls the commit's runs until they reach a verdict or `--timeout` (seconds) elapses, returns as soon as any run fails, and prints exactly one JSON object on stdout (`{"state", "waited_s", "runs": [{"id", "event", "status", "conclusion", "url"}]}`); diagnostics go to stderr. Exit code:
 
 | Code | `state` | Meaning |

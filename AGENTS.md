@@ -99,6 +99,11 @@ tools: tool modules are registered in `src/project_issues_plugin/server.py`; sha
   re-run `release.yml` with the **same version**; the re-run re-dispatches
   at `main`'s new tip. Do **not** introduce a PAT to work around this.
 
+- **`bin/project-issues` is the Linux ELF; Windows callers from bash use `project-issues.exe`.**
+  Bash on Windows never falls back to `.exe`, so the bare name fails with rc 126 there (#347).
+  Docs must give the `uname`-based name resolution, never a bare `command -v project-issues`;
+  the `smoke` job in `release.yml` runs that snippet on windows and linux before publishing.
+
 - **Package layout is staged by one script.** `.github/scripts/stage-plugin-payload.sh <src> <dest>`
   is the single list of what ships (`.claude-plugin/`, `.codex-plugin/`, root `.mcp.json`, `hooks/`,
   `skills/`, `bin/`); `release.yml` calls it from both the ZIP and orphan-branch steps. The server

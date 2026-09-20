@@ -233,6 +233,61 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Job 2b - Smoke: the documented CLI name resolution really runs (#347)
+  # ---------------------------------------------------------------------------
+  smoke:
+    # Both binaries sit side by side in bin/ (as in the shipped plugin), so
+    # the Linux ELF shadows nothing on Windows only if the docs name the
+    # right file. Runs the documented `uname` resolution from bash.
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    steps:
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-windows
+          path: bin/
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-linux
+          path: bin/
+
+      - name: Run documented CLI name resolution
+        shell: bash
+        run: |
+          chmod +x bin/project-issues bin/project-issues.exe || true
+          test -f bin/project-issues && test -f bin/project-issues.exe
+          export PATH="$PWD/bin:$PATH"
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) PI=project-issues.exe ;;
+            *) PI=project-issues ;;
+          esac
+          "$PI" --help >/dev/null 2>&1
+          rc=$?
+          if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+            if [ "$PI" = project-issues.exe ]; then PI=project-issues; else PI=project-issues.exe; fi
+          fi
+          echo "resolved PI=$PI"
+          out="$("$PI" wait-pipeline --help)"
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::$PI wait-pipeline --help exited $rc"
+            exit 1
+          fi
+          case "$out" in
+            *--sha*) ;;
+            *) echo "::error::--sha missing from wait-pipeline --help"; exit 1 ;;
+          esac
+
+  # ---------------------------------------------------------------------------
   # Job 3 - Assemble orphan release branch, build ZIP, publish
   # ---------------------------------------------------------------------------
   release:
@@ -241,7 +296,7 @@ jobs:
     # propagates job outputs to jobs that declare a direct dependency,
     # so even though `build` transitively depends on `stamp`, that
     # alone leaves needs.stamp.outputs.* empty here.
-    needs: [stamp, build]
+    needs: [stamp, build, smoke]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:

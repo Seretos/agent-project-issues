@@ -111,8 +111,8 @@ def test_fails_when_both_names_are_unrunnable(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "wait_help, expect",
     [
-        ("echo 'usage: project-issues wait-pipeline [-h] --project P'", "--sha missing from wait-pipeline --help"),
-        ("echo boom >&2; exit 2", "wait-pipeline --help exited 2"),
+        ("echo 'usage: project-issues wait-pipeline [-h] --project P'", r"::error::[^\n]*--sha"),
+        ("echo boom >&2; exit 2", r"::error::[^\n]*wait-pipeline[^\n]*\b2\b"),
     ],
     ids=["omits-sha", "help-fails"],
 )
@@ -129,7 +129,7 @@ def test_fails_when_wait_pipeline_help_fails_or_omits_sha(tmp_path: Path, wait_h
     proc = _run(tmp_path, "Linux", {"project-issues": body, "project-issues.exe": body})
     out = proc.stdout + proc.stderr
     assert proc.returncode not in (0, 127), out
-    assert "::error::" in out and expect in out, out
+    assert re.search(expect, out), out
 
 
 @needs_bash
@@ -140,26 +140,103 @@ def test_fails_when_a_binary_is_missing(tmp_path: Path, missing: str) -> None:
     proc = _run(tmp_path, "Linux", {_other(missing): _working_body(), missing: None})
     out = proc.stdout + proc.stderr
     assert proc.returncode not in (0, 127), out
-    assert "::error::" in out and missing in out, out
+    # exact filename tokens: `project-issues` must not match inside `project-issues.exe`
+    token = r"(?<![\w.-])" + re.escape(missing) + r"(?![\w.-])"
+    errors = [ln for ln in out.splitlines() if "::error::" in ln]
+    assert any(re.search(token, ln) for ln in errors), out
+    # and no error line may blame the file that IS present
+    present = _other(missing)
+    present_token = r"(?<![\w.-])" + re.escape(present) + r"(?![\w.-])"
+    assert not any(re.search(present_token, ln) for ln in errors), out
 
 
-def _workflow_steps(name: str) -> list[dict]:
+def _load_workflow(name: str) -> dict:
     from ruamel.yaml import YAML  # transitive dep via lib-python-projects
 
-    doc = YAML(typ="safe").load((WORKFLOWS / name).read_text(encoding="utf-8"))
-    return [step for job in doc["jobs"].values() for step in job.get("steps", [])]
+    return YAML(typ="safe").load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
-def test_both_workflows_call_the_shared_smoke_script() -> None:
-    """R4 (driving): release.yml and test.yml each have exactly one step calling
-    the shared script, and neither keeps an inline copy of the resolution body."""
-    call = re.compile(r"^\s*bash\s+\.github/scripts/smoke-cli-resolution\.sh\s*$", re.MULTILINE)
-    residual = re.compile(r"uname\s+-s|PI=project-issues|wait-pipeline\s+--help")
-    for wf in ("release.yml", "test.yml"):
-        steps = _workflow_steps(wf)
-        callers = [s for s in steps if call.search(str(s.get("run", "")))]
-        assert len(callers) == 1, f"{wf}: expected one step calling the smoke script, found {len(callers)}"
-        for s in steps:
-            assert not residual.search(str(s.get("run", ""))), (
-                f"{wf}: step {s.get('name')!r} still holds the inline resolution body"
+_CALL = re.compile(r"^\s*bash\s+\.github/scripts/smoke-cli-resolution\.sh\s*$", re.MULTILINE)
+_RESIDUAL = re.compile(r"uname\s+-s|PI=project-issues|wait-pipeline\s+--help")
+
+
+def _callers(doc: dict) -> list[tuple[str, dict, dict]]:
+    return [
+        (jid, job, step)
+        for jid, job in doc["jobs"].items()
+        for step in job.get("steps", [])
+        if _CALL.search(str(step.get("run", "")))
+    ]
+
+
+def _needs(job: dict) -> list[str]:
+    n = job.get("needs", [])
+    return [n] if isinstance(n, str) else list(n)
+
+
+@pytest.mark.parametrize("wf", ["release.yml", "test.yml"])
+def test_both_workflows_call_the_shared_smoke_script(wf: str) -> None:
+    """R4 (driving): each workflow has exactly one enabled step calling the
+    shared script, in a job that runs after a build producing both bin
+    artifacts, downloads them, and cannot be disabled; no inline copy remains."""
+    doc = _load_workflow(wf)
+    callers = _callers(doc)
+    assert len(callers) == 1, f"{wf}: expected one step calling the smoke script, found {len(callers)}"
+    jid, job, step = callers[0]
+
+    # the script the step calls exists
+    assert SCRIPT.is_file(), f"{SCRIPT} missing"
+
+    # nothing may disable the guard
+    assert "if" not in job, f"{wf}: job {jid} has a job-level `if`"
+    assert "if" not in step, f"{wf}: smoke step has a step-level `if`"
+    assert job.get("continue-on-error") in (None, False), f"{wf}: job {jid} continue-on-error"
+    assert step.get("continue-on-error") in (None, False), f"{wf}: step continue-on-error"
+
+    # runs against built artifacts: needs a build job, downloads both bin artifacts
+    needs = _needs(job)
+    assert needs, f"{wf}: job {jid} has no `needs` (no built binary)"
+    for n in needs:
+        assert n in doc["jobs"], f"{wf}: needs unknown job {n}"
+    build_text = " ".join(str(doc["jobs"][n]) for n in needs)
+    assert "upload-artifact" in build_text or any(
+        "upload-artifact" in str(doc["jobs"][n]) for n in doc["jobs"]
+    ), f"{wf}: no artifact producer"
+    downloads = [
+        str(st.get("with", {}).get("name", ""))
+        for st in job.get("steps", [])
+        if str(st.get("uses", "")).startswith("actions/download-artifact")
+    ]
+    assert "bin-windows" in downloads and "bin-linux" in downloads, (
+        f"{wf}: smoke job must download bin-windows and bin-linux, got {downloads}"
+    )
+    # both OSes are exercised
+    smoke_text = str(job)
+    assert "windows" in smoke_text and ("ubuntu" in smoke_text or "linux" in smoke_text), (
+        f"{wf}: smoke job does not cover both OSes"
+    )
+
+    # no inline copy of the resolution body anywhere
+    for j in doc["jobs"].values():
+        for st in j.get("steps", []):
+            assert not _RESIDUAL.search(str(st.get("run", ""))), (
+                f"{wf}: step {st.get('name')!r} still holds the inline resolution body"
             )
+
+
+def test_release_needs_smoke_and_test_runs_on_pull_request() -> None:
+    """R4: release publishing waits on the smoke job; test.yml (every PR)
+    triggers on pull_request and builds/smokes on windows and ubuntu-22.04."""
+    rel = _load_workflow("release.yml")
+    rjid = _callers(rel)[0][0]
+    assert rjid in _needs(rel["jobs"]["release"]), "release must need the smoke job"
+
+    doc = _load_workflow("test.yml")
+    triggers = doc.get("on", doc.get(True))
+    assert "pull_request" in triggers, f"test.yml triggers: {triggers}"
+    jid, job, _ = _callers(doc)[0]
+    for n in _needs(job):
+        m = str(doc["jobs"][n].get("strategy", {}))
+        assert "windows-latest" in m and "ubuntu-22.04" in m, f"build job {n} matrix: {m}"
+    sm = str(job.get("strategy", {})) + str(job.get("runs-on", ""))
+    assert "windows-latest" in sm and "ubuntu-22.04" in sm, f"smoke job {jid} matrix: {sm}"

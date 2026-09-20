@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "project-issues": {
+      "command": "./bin/project-issues",
+      "args": [],
+      "cwd": ".",
+      "env_vars": ["GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_TOKEN"]
+    }
+  }
+}

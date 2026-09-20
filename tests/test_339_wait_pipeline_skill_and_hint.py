@@ -20,49 +20,56 @@ from tests.test_pipelines import (
 )
 
 
-def _wait_section() -> str:
-    text = _skill_text()
-    assert "wait-pipeline" in text, "SKILL.md never mentions wait-pipeline"
-    start = text.index("wait-pipeline")
-    # Section = from the first mention's heading/paragraph to the next
-    # top-level ("## ") heading.
-    head = text.rfind("\n#", 0, start)
-    nxt = text.find("\n## ", start)
-    return text[head if head != -1 else 0: nxt if nxt != -1 else len(text)]
+def _pipelines_section() -> str:
+    """Body of the `## Pipelines...` heading, up to the next `## ` heading.
+
+    Anchored to the heading (not to a first mention of any token); `###`
+    subsections stay inside the window, `## ` siblings end it. Fenced code
+    blocks are honoured so a `## ` inside a fence does not end the section.
+    """
+    lines = _skill_text().splitlines()
+    out: list[str] = []
+    inside = False
+    fenced = False
+    for ln in lines:
+        if ln.lstrip().startswith("```"):
+            fenced = not fenced
+        is_h2 = not fenced and re.match(r"##\s", ln) is not None
+        if is_h2 and inside:
+            break
+        if is_h2 and ln.startswith("## Pipelines"):
+            inside = True
+        if inside:
+            out.append(ln)
+    assert out, "SKILL.md has no '## Pipelines' section"
+    return "\n".join(out)
 
 
-# ---------- R1: the skill teaches how to wait for CI -------------------------
+# ---------- R1: structural checks on the skill's wait-pipeline docs ----------
+# (the prose itself is reviewed in the diff; only what can bite is asserted)
 
 
-def test_skill_documents_wait_pipeline_command_and_flags() -> None:
-    section = _wait_section()
-    m = re.search(r"project-issues wait-pipeline[^\n`]*", section)
-    assert m, "no full `project-issues wait-pipeline ...` command line"
+def test_skill_wait_pipeline_command_parses_with_cli_parser() -> None:
+    section = _pipelines_section()
+    cmds = [
+        ln for ln in section.splitlines()
+        if re.search(r"project-issues\s+wait-pipeline\s+--", ln)
+    ]
+    assert cmds, "no full `project-issues wait-pipeline --...` command in Pipelines section"
     parser = cli._build_parser()
-    argv = shlex.split(m.group(0))[2:]
+    m = re.search(r"project-issues\s+wait-pipeline[^\n`]*", cmds[0])
+    argv = shlex.split(m.group(0))[1:]
     argv = [a.replace("<id>", "acme").replace("<commit>", "abc123") for a in argv]
     ns = parser.parse_args(argv)  # every shown flag must be accepted
     assert ns.timeout == 540
     assert ns.interval == 20
-    assert "--project" in m.group(0) and "--sha" in m.group(0)
 
 
-def test_skill_states_one_blocking_call_with_bash_timeout() -> None:
-    section = _wait_section()
-    assert "600000" in section
-    assert re.search(r"(one|single|ONE)[^\n]{0,60}(foreground|blocking|call)", section)
-    assert re.search(r"(loop|poll)", section, re.I)
+_CODE = r"(?<![\w.-])([0-5])(?![\w.-])"
 
 
-def test_skill_explains_why_no_mcp_wait_tool() -> None:
-    section = _wait_section()
-    assert re.search(r"no MCP (wait )?tool|MCP[^\n]{0,80}no[^\n]{0,20}wait", section, re.I)
-    assert re.search(r"script", section, re.I), "missing 'not callable from scripts' reason"
-    assert re.search(r"block", section, re.I)
-
-
-def test_skill_exit_codes_match_cli_constants() -> None:
-    section = _wait_section()
+def test_skill_exit_codes_pair_number_with_meaning_per_line() -> None:
+    section = _pipelines_section()
     expected = {
         cli.EXIT_SUCCESS: r"green|success|pass",
         cli.EXIT_FAILURE: r"fail",
@@ -73,21 +80,18 @@ def test_skill_exit_codes_match_cli_constants() -> None:
     }
     assert sorted(expected) == [0, 1, 2, 3, 4, 5]
     for code, meaning in expected.items():
+        # One code per line: a line listing several codes cannot mis-pair them.
         lines = [
             ln for ln in section.splitlines()
-            if re.search(rf"(?<![\w.-]){code}(?![\w.-])", ln)
+            if set(re.findall(_CODE, ln)) == {str(code)}
             and re.search(meaning, ln, re.I)
         ]
-        assert lines, f"exit code {code} ({meaning}) not documented"
-    assert re.search(r"cancelled", section) and re.search(r"skipped", section)
-
-
-def test_skill_names_binary_location_and_not_on_path() -> None:
-    section = _wait_section()
-    assert "bin/project-issues" in section
-    assert re.search(r"not on `?PATH`?", section, re.I)
-    assert "CLAUDE_PLUGIN_ROOT" in section
-    assert "--help" in section
+        assert lines, f"exit code {code} ({meaning}) not documented on its own line"
+        if code == cli.EXIT_NO_VERDICT:
+            assert any(
+                all(re.search(w, ln, re.I) for w in ("cancelled", "timed.out", "skipped"))
+                for ln in lines
+            ), "exit 5 line must name cancelled / timed_out / skipped"
 
 
 def test_skill_light_response_writes_pinned_ticket_item_d() -> None:

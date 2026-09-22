@@ -787,6 +787,7 @@ def test_get_pipeline_run_cancelled_run_exposes_job_and_log(
     assert len(failing) == 1
     job = failing[0]
     assert job["job_id"] == "7101"
+    assert job["failed_step"] == "run tests"
 
     log_result = tools["get_pipeline_step_log"](
         project_id="acme", run_id="5101", job_id=job["job_id"], mode="tail",

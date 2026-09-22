@@ -350,8 +350,10 @@ def register(mcp: FastMCP) -> None:
         top.
 
         When `include_failure_excerpt=True` (default) AND the run
-        concluded as `failure`, the response also carries a
-        `run.failure` block, grouped per failing job:
+        concluded as `failure` or `cancelled` (GitHub reports a job
+        killed by its own `timeout-minutes` as `cancelled`), the
+        response also carries a `run.failure` block, grouped per
+        failing job:
 
         ```
         {
@@ -406,8 +408,9 @@ def register(mcp: FastMCP) -> None:
         whole unbounded text.
 
         In-progress runs (`conclusion=None`) never trigger the failure
-        fetch. 403/404 on the log endpoint degrades to
-        `log_excerpt=None` plus `note="logs unavailable"`.
+        fetch; both `failure`- and `cancelled`-concluded runs do.
+        403/404 on the log endpoint degrades to `log_excerpt=None` plus
+        `note="logs unavailable"`.
 
         Read-only: no permission flag required.
         """
@@ -478,7 +481,9 @@ def register(mcp: FastMCP) -> None:
         failing job from `get_pipeline_run`
         (`run.failure.failing_jobs[].job_id`, alongside the `run_id`
         you already used to call it) — obtain them there first, don't
-        guess or construct them.
+        guess or construct them. `job_id` may equally come from a
+        `cancelled`-concluded run's `failing_jobs` (e.g. a job killed by
+        its own `timeout-minutes`), not only a `failure`-concluded one.
 
         `mode` controls how the raw log is sliced down to `max_lines`:
           - `"around_failure"` (default): finds the first line that

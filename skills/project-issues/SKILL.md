@@ -262,7 +262,8 @@ CI/pipeline triage is a three-tool chain, each step narrowing scope:
    always pass it quoted (e.g. "9876543210"), never as a bare integer.
    Only this tool returns the `failure` block on the run (failing
    jobs, annotations, log excerpt), and only when the run's
-   `conclusion` is "failure".
+   `conclusion` is "failure" or "cancelled" (GitHub reports a job
+   killed by its own `timeout-minutes` as "cancelled").
 3. `get_pipeline_step_log` fetches one failing job's full log, bounded
    to a small slice, when step 2's `log_excerpt` (~30 lines) isn't
    enough. `job_id` must come from `run.failure.failing_jobs[].job_id`

@@ -6,6 +6,14 @@ mock transport. The log-fetch path (which uses a separate
 `httpx.Client(follow_redirects=True)`) is handled by patching
 `_fetch_job_log` directly — `MockTransport` doesn't auto-follow
 redirects and the log fetch is the only call that needs it.
+
+`test_get_pipeline_run_cancelled_run_exposes_job_and_log` (ticket #352)
+drives the real log fetch instead: it monkeypatches `httpx.Client`
+itself with a subclass that defaults in a `MockTransport`, so
+`_fetch_job_log`'s own client — which passes no `transport=` — runs its
+real redirect-following, status handling and decoding against the mock
+too, while `_install_mock`'s client (which does pass `transport=`
+explicitly) is unaffected.
 """
 from __future__ import annotations
 
@@ -683,6 +691,113 @@ def test_get_pipeline_run_failed_populates_failure(
     assert run["failure"]["note"] is None
     assert "annotation_count" not in job
     assert "annotations_fetched" not in job
+
+
+def test_get_pipeline_run_cancelled_run_exposes_job_and_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ticket #352: a job killed by its own job-level `timeout-minutes`
+    makes GitHub conclude both the job AND the run as "cancelled", not
+    "failure". Drives the real `GitHubProvider.get_run` ->
+    `_get_failure_excerpt` -> `get_step_log` -> `_fetch_job_log` path
+    through `httpx.MockTransport` — no provider function is patched,
+    only HTTP is simulated, including the cross-host 302 redirect to a
+    signed blob URL that carries the actual log text.
+    """
+    tools = _register_tools_with(monkeypatch, _project())
+
+    seen: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        if req.url.host == "blob.example.test":
+            return httpx.Response(
+                200,
+                content=(
+                    b"Setting up runner...\n"
+                    b"Running tests...\n"
+                    b"##[error]The operation was canceled: run tests has "
+                    b"exceeded the maximum execution time of 10 minutes.\n"
+                ),
+            )
+        path = req.url.path
+        if path == "/repos/acme/backend/actions/runs/5101":
+            return _json(_run_payload(
+                5101,
+                name="test",
+                status="completed",
+                conclusion="cancelled",
+            ))
+        if path == "/repos/acme/backend/actions/runs/5101/jobs":
+            return _json({
+                "jobs": [
+                    {
+                        "id": 7101,
+                        "name": "pytest",
+                        "html_url": "https://github.com/acme/backend/actions/runs/5101/job/7101",
+                        "conclusion": "cancelled",
+                        "check_run_url": "https://api.github.com/repos/acme/backend/check-runs/9101",
+                        "steps": [
+                            {"name": "checkout", "conclusion": "success"},
+                            {"name": "run tests", "conclusion": "cancelled"},
+                        ],
+                    }
+                ]
+            })
+        if path == "/repos/acme/backend/check-runs/9101/annotations":
+            return _json([])
+        if path == "/repos/acme/backend/actions/jobs/7101/logs":
+            return httpx.Response(
+                302,
+                content=b"",
+                headers={"Location": "https://blob.example.test/logs/7101.txt"},
+            )
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    # `_fetch_job_log` (github.py) builds its own `httpx.Client` and
+    # passes no `transport=`, so `_client`'s mock above never reaches it.
+    # Patch `httpx.Client` itself with a subclass that defaults in the
+    # same MockTransport/handler when the caller doesn't supply its own
+    # `transport=`. `_install_mock`'s client passes `transport=`
+    # explicitly, so it is unaffected — the real `_fetch_job_log` still
+    # runs its own redirect-following, status handling and decoding.
+    real_client = httpx.Client
+
+    class _MockedClient(real_client):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("transport", httpx.MockTransport(handler))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", _MockedClient)
+
+    result = tools["get_pipeline_run"](
+        project_id="acme", run_id="5101", include_failure_excerpt=True,
+    )
+    assert "error" not in result, result
+    run = result["run"]
+    assert run["conclusion"] == "cancelled"
+    # Ticket #352 symptom: v0.3.21's run-level gate only fires on
+    # conclusion == "failure", so a cancelled run's failure context is
+    # silently dropped — an agent investigating a timeout-killed job gets
+    # `run.failure: null` and no job_id to follow up with.
+    assert run["failure"] is not None
+    failing = run["failure"]["failing_jobs"]
+    assert len(failing) == 1
+    job = failing[0]
+    assert job["job_id"] == "7101"
+    assert job["failed_step"] == "run tests"
+
+    log_result = tools["get_pipeline_step_log"](
+        project_id="acme", run_id="5101", job_id=job["job_id"], mode="tail",
+    )
+    assert "error" not in log_result, log_result
+    assert "exceeded the maximum execution time" in log_result["lines"]
+
+    seen_paths = [req.url.path for req in seen]
+    assert "/repos/acme/backend/actions/jobs/7101/logs" in seen_paths
+    assert any(req.url.host == "blob.example.test" for req in seen)
 
 
 def test_get_pipeline_run_compact_annotations_summary(

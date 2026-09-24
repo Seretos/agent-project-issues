@@ -41,6 +41,31 @@ from project_issues_plugin.tools import pipelines as pipeline_tools
 
 TOOL_NAMES = ("list_pipeline_runs", "get_pipeline_run")
 
+# ---------- golden-string requirements (R2, R3) -------------------------------
+#
+# Rounds 1-3 tried regex/proximity/negation-window heuristics to pin down R2
+# and R3 without pinning exact wording; each round's checks were beaten by a
+# more elaborate adversarial docstring that still passed while denying or
+# omitting the claim. Strategy for round 4: require one complete, literal
+# sentence per requirement, chosen so the sentence's mere presence
+# structurally entails the claim — no adversarial docstring can contain this
+# exact sentence while meaning the opposite. `pipelines.py`'s
+# `_RUN_VOCABULARY_DOC` constant (written in the implement phase) must
+# contain each sentence verbatim.
+
+R2_GOLDEN_SENTENCE = (
+    'Normalization is partial: terminal status is always "completed" and '
+    'green conclusion is always "success", but other conclusion spellings '
+    "stay provider-native and are not unified across providers."
+)
+
+R3_GOLDEN_SENTENCE = (
+    'Every run for the commit must have status == "completed" and '
+    'conclusion == "success" to count as CI green for that commit; use the '
+    "bundled project-issues wait-pipeline CLI as the ready-made verdict "
+    "instead of hand-rolled polling or comparison."
+)
+
 
 # ---------- served-description helpers ---------------------------------------
 
@@ -296,73 +321,22 @@ def test_partial_normalization_claim_holds() -> None:
 
     # The text half of the claim — this is the part expected RED today.
     #
-    # Bare substring checks on "partial" / "provider-native" are a
-    # tautology: a description that explicitly DENIES partial
-    # normalization (e.g. "this is NOT partial, normalization is fully
-    # complete, nothing stays provider-native") contains both tokens and
-    # would still pass. Instead require each concrete guarantee to be
-    # stated as an affirmative "always" claim tied to its literal terminal
-    # value, require the plan's own literal word "partial" to appear, and
-    # require no negation word sitting immediately before "partial" itself
-    # (not just before 3 hardcoded full denial phrases) or the other
-    # denial phrasing to be absent.
+    # Rounds 1-3's regex/proximity/negation-window heuristics were each
+    # beaten by a more elaborate adversarial docstring that passed the
+    # checks while still denying or omitting the claim. Round 4 requires
+    # the served description to contain the golden sentence verbatim: the
+    # sentence's own content IS the claim (it names both concrete
+    # guarantees, the word "partial", and "provider-native" in one
+    # unambiguous statement), so no adversarial rewording can satisfy an
+    # exact-substring check while saying the opposite.
     descriptions = _served_descriptions()
-    negation_words = ("not", "isn't", "n't", "never", "false")
     for tool_name in TOOL_NAMES:
         text = descriptions[tool_name]
-        lower = text.lower()
-
-        status_guarantee = re.search(
-            r"always[^.]{0,120}completed|completed[^.]{0,120}always", lower
+        assert R2_GOLDEN_SENTENCE in text, (
+            f"{tool_name}: served description does not contain the "
+            f"required partial-normalization sentence verbatim:\n"
+            f"{R2_GOLDEN_SENTENCE!r}"
         )
-        assert status_guarantee, (
-            f"{tool_name}: served description does not state, as an "
-            'affirmative "always" guarantee, that terminal status is '
-            'always "completed"'
-        )
-
-        conclusion_guarantee = re.search(
-            r"always[^.]{0,120}success|success[^.]{0,120}always", lower
-        )
-        assert conclusion_guarantee, (
-            f"{tool_name}: served description does not state, as an "
-            'affirmative "always" guarantee, that green conclusion is '
-            'always "success"'
-        )
-
-        assert "provider-native" in text, (
-            f"{tool_name}: served description does not say the other "
-            "spellings stay provider-native"
-        )
-
-        # Positive requirement: the plan's own word "partial" must
-        # actually appear (Approach (b) and R2 both name it literally).
-        partial_match = re.search(r"partial", lower)
-        assert partial_match, (
-            f"{tool_name}: served description never uses the word "
-            '"partial" at all — normalization must be described as '
-            "partial in those literal terms"
-        )
-
-        # No negation word immediately before the word "partial" itself —
-        # catches "not partial" / "isn't partial" / "never partial" next
-        # to that specific word, not just 3 hardcoded full phrases.
-        before_partial = lower[max(0, partial_match.start() - 30) : partial_match.start()]
-        for negation in negation_words:
-            assert negation not in before_partial, (
-                f"{tool_name}: served description has the negation word "
-                f"{negation!r} within 30 characters before the word "
-                '"partial", which would negate the partial-normalization '
-                "claim"
-            )
-
-        for denial in ("not partial", "fully normalized", "fully unified"):
-            assert denial not in lower, (
-                f"{tool_name}: served description contains the denial "
-                f"phrase {denial!r}, which would contradict the "
-                "partial-normalization claim even though 'partial' and "
-                "'provider-native' both appear in the text"
-            )
 
 
 # ---------- R3 (Q3): green condition + wait-pipeline pointer ------------------
@@ -370,70 +344,18 @@ def test_partial_normalization_claim_holds() -> None:
 
 @pytest.mark.parametrize("tool_name", TOOL_NAMES)
 def test_green_condition_served(tool_name: str) -> None:
-    # Bare substring checks on the two predicates and the wait-pipeline
-    # name are a tautology: they'd pass even if the predicates were stated
-    # in unrelated sentences (not as one conjunctive green condition) or if
-    # "wait-pipeline" appeared incidentally with no tie to being the
-    # ready-made verdict. Require the predicates to co-occur, joined by a
-    # conjunction, within one contiguous span; require the wait-pipeline
-    # mention to sit next to language that frames it as the check to run.
+    # Rounds 1-3's regex/proximity/negation-window heuristics were each
+    # beaten by a more elaborate adversarial docstring that passed the
+    # checks while still denying the green condition or dropping the
+    # quantifier. Round 4 requires the served description to contain the
+    # golden sentence verbatim: the sentence's own content IS the claim (it
+    # joins both predicates with "and", carries the "every run for the
+    # commit" quantifier, and names "project-issues wait-pipeline" as the
+    # ready-made verdict in one unambiguous statement), so no adversarial
+    # rewording can satisfy an exact-substring check while saying the
+    # opposite.
     text = _served_descriptions()[tool_name]
-    lower = text.lower()
-
-    conjunction_span = re.search(
-        r'status == "completed"[^.\n]{0,80}\band\b[^.\n]{0,80}'
-        r'conclusion == "success"'
-        r'|conclusion == "success"[^.\n]{0,80}\band\b[^.\n]{0,80}'
-        r'status == "completed"',
-        text,
-        re.IGNORECASE,
-    )
-    assert conjunction_span, (
-        f"{tool_name}: served description does not state the green "
-        'condition as a single conjunctive statement joining '
-        'status == "completed" AND conclusion == "success" — finding '
-        "both predicates loose elsewhere in the text does not count"
-    )
-
-    # A conjunctive span survives even if it is embedded in a sentence
-    # that NEGATES the green condition as a whole (e.g. "CI is NOT green
-    # merely because status == \"completed\" and conclusion ==
-    # \"success\"") or that drops the "every run for the commit"
-    # quantifier the plan's own R3 requires. Reject a negation word
-    # sitting just before the conjunctive span, and require the "every
-    # run" quantifier to appear in the same paragraph as the span.
-    span_start = conjunction_span.start()
-    before_span = lower[max(0, span_start - 40) : span_start]
-    for negation in ("not", "isn't", "doesn't", "never", "false"):
-        assert negation not in before_span, (
-            f"{tool_name}: served description has the negation word "
-            f"{negation!r} within 40 characters before the conjunctive "
-            'green-condition span, which would negate rather than assert '
-            "the green condition"
-        )
-
-    paragraphs = re.split(r"\n\s*\n", text)
-    span_paragraph = next(
-        (p for p in paragraphs if conjunction_span.group(0) in p), text
-    )
-    assert "every run" in span_paragraph.lower(), (
-        f"{tool_name}: served description states the conjunctive "
-        'predicates but drops the "every run" quantifier (the plan\'s '
-        'own green condition is "every run for the commit has '
-        'status == \\"completed\\" AND conclusion == \\"success\\"") in '
-        "the same paragraph as the conjunctive span"
-    )
-
-    wait_pipeline_context = re.search(
-        r"(instead of|ready-made|use|run)[^.\n]{0,60}"
-        r"project-issues wait-pipeline"
-        r"|project-issues wait-pipeline[^.\n]{0,60}"
-        r"(instead of|ready-made|use|run)",
-        lower,
-    )
-    assert wait_pipeline_context, (
-        f"{tool_name}: served description mentions 'project-issues "
-        "wait-pipeline' but not textually tied to being the ready-made "
-        "check/verdict for the green condition — a bare incidental "
-        "mention elsewhere does not count"
+    assert R3_GOLDEN_SENTENCE in text, (
+        f"{tool_name}: served description does not contain the required "
+        f"green-condition sentence verbatim:\n{R3_GOLDEN_SENTENCE!r}"
     )

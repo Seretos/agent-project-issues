@@ -310,39 +310,39 @@ its branch, its reviews or its pipeline.
 
 Where the signal is, per provider:
 
-- **GitHub** — `mergeable_state`, from `get_pr` or from `merge_pr`'s
+- **GitHub** — "mergeable_state", from `get_pr` or from `merge_pr`'s
   light response.
-- **GitLab** — `detailed_merge_status`. Do not branch on `mergeable`:
-  it is `null` for every value except `mergeable`.
-- **Azure DevOps** — only `merge_pr`'s `error` text. `mergeable_state`
-  is permanently `null` on Azure DevOps; re-fetching with `get_pr` never
+- **GitLab** — "detailed_merge_status". Do not branch on "mergeable":
+  it is "null" for every value except "mergeable".
+- **Azure DevOps** — only `merge_pr`'s `error` text. "mergeable_state"
+  is permanently "null" on Azure DevOps; re-fetching with `get_pr` never
   fills it, so do not wait or poll for it.
 
-| cause | GitHub `mergeable_state` | GitLab `detailed_merge_status` | Azure DevOps `merge_pr` error text |
+| cause | GitHub "mergeable_state" | GitLab "detailed_merge_status" | Azure DevOps `merge_pr` error text |
 |---|---|---|---|
-| conflict | `dirty` | `conflict` | `merge has conflicts` |
-| behind the base branch | `behind` | `need_rebase` | — |
-| gate open: CI running or failing | `blocked`, `unstable` | `ci_must_pass`, `ci_still_running` | `merge rejected by branch policy` |
-| gate open: review missing | `blocked` | `not_approved`, `discussions_not_resolved` | `merge rejected by branch policy` |
-| gate open: draft | `draft` | `draft_status` | not verified |
-| not computed yet | `unknown` | `unchecked`, `checking`, `preparing` | `merge in progress` |
+| conflict | "dirty" | "conflict" | `merge has conflicts` |
+| behind the base branch | "behind" | "need_rebase" | — |
+| gate open: CI running or failing | "blocked", "unstable" | "ci_must_pass", "ci_still_running" | `merge rejected by branch policy` |
+| gate open: review missing | "blocked" | "not_approved", "discussions_not_resolved" | `merge rejected by branch policy` |
+| gate open: draft | "draft" | "draft_status" | not verified |
+| not computed yet | "unknown" | "unchecked", "checking", "preparing" | `merge in progress` |
 
-GitHub `unstable` and `has_hooks` are open gates, not a mergeable
+GitHub "unstable" and "has_hooks" are open gates, not a mergeable
 state. GitHub may still accept the merge; if the merge fails, classify
-it by the gate row. Other gates (GitHub `has_hooks`, the remaining
+it by the gate row. Other gates (GitHub "has_hooks", the remaining
 GitLab values, Azure DevOps `merge failed`) and a PR that is no longer
 open are listed only in `get_pr`'s merge-state table.
 
 Resolve the values that do not name one cause:
 
-- **GitHub `blocked`** means CI or review is blocking; the value alone
+- **GitHub "blocked"** means CI or review is blocking; the value alone
   does not say which, and both can be. Check `list_pipeline_runs` for
   the PR's head commit and `get_pr`'s review data before you decide.
 - **Azure DevOps `merge rejected by branch policy`** means a CI policy
   or a review policy is failing. This plugin gives no finer signal;
   report it as a CI-or-review policy block, not as one of the two.
-- **Not computed yet** (`unknown`; GitLab `unchecked`, `checking`,
-  `preparing`; Azure DevOps `merge in progress`) means the provider has
+- **Not computed yet** ("unknown"; GitLab "unchecked", "checking",
+  "preparing"; Azure DevOps `merge in progress`) means the provider has
   not settled. Re-fetch with `get_pr` a moment later instead of acting
   on it.
 - **Draft** does not settle by waiting: the PR must be marked ready for
@@ -529,8 +529,8 @@ will resolve itself.
   item on merge — `#<n>` only links there; call `update_ticket` after
   `merge_pr`. Likewise, assuming any provider closes the ticket when the
   PR merged into a base other than the default branch.
-- Polling `get_pr` for an Azure DevOps `mergeable_state`, or reading
-  GitHub `blocked` as a single cause — see "Pull requests: why a merge
+- Polling `get_pr` for an Azure DevOps "mergeable_state", or reading
+  GitHub "blocked" as a single cause — see "Pull requests: why a merge
   is blocked".
 - Treating a write error as evidence of a race with another concurrent
   call instead of reading what the provider actually said.

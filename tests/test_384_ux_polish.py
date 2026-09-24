@@ -41,6 +41,7 @@ from tests.test_307_ticket_templates import (
     _register_tools_with,
     _template_content_response,
 )
+from tests.test_366_tool_doc_gaps import _NEGATION_RE, _assert_not_negated
 
 
 # ===========================================================================
@@ -365,11 +366,14 @@ def _empty_query_bullet(doc: str) -> str:
     return doc[start:end]
 
 
-def test_search_projects_doc_empty_query_mentions_limit() -> None:
-    """Driving test for R3. RED today: the empty-query bullet mentions
-    `limit` only as a reason to prefer `search_projects` over
-    `list_projects` ('a bounded `limit` over a large set', 'no `limit`') —
-    never as a cap tied to the empty-query enumeration itself.
+def _check_empty_query_limit_claim(bullet: str, default_limit) -> None:
+    """Shared checker for R3's empty-query limit claim (test-critic round 4
+    F1), extracted so the exact same logic can be exercised against the
+    real docstring bullet (`test_search_projects_doc_empty_query_mentions_
+    limit`) AND against a plausible-but-wrong NEGATED bullet
+    (`test_empty_query_limit_check_rejects_negated_claim`) — proving the
+    checker discriminates a correct claim from its negation rather than
+    just detecting token presence. Raises AssertionError on any violation.
 
     A bare substring check for 'limit'/'10'/'truncated' would already pass
     today, since 'limit' is already present for an unrelated reason
@@ -378,27 +382,81 @@ def test_search_projects_doc_empty_query_mentions_limit() -> None:
     (e.g. 'results are never truncated'). So this asserts the specific
     combination the plan requires instead: the cap explicitly tied to the
     REAL default (introspected from `search_projects`'s own signature,
-    never hardcoded — test-critic round 3, tautology::F1: a hardcoded
-    '10' would keep passing or start failing for the wrong reason if the
-    signature's default ever changed), plus the `truncated: true` result
-    marker documented for the over-limit case — neither of which appears
-    anywhere in the bullet today."""
-    tool = _search_projects_tool()
-    bullet = _empty_query_bullet(tool.__doc__ or "")
-    default_limit = inspect.signature(tool).parameters["limit"].default
+    never hardcoded — test-critic round 3, tautology::F1), plus the
+    `truncated: true` result marker documented for the over-limit case.
 
-    assert re.search(
+    Test-critic round 4 F1: neither check on its own proves the prose
+    actually ASSERTS the (non-negated) claim — a bullet reading "not capped
+    by limit (default 10); truncated: true is never set" would satisfy
+    both the regex and the substring check. Guarded the same way #366
+    guards its own docstring-claim checks (`_assert_not_negated`, reused
+    from `tests.test_366_tool_doc_gaps`): 'capped' must not be preceded by
+    a negation word, and 'truncated: true' must not be immediately
+    followed by one either — the negation in the critique's own
+    `surviving_implementation` example sits AFTER the phrase ('truncated:
+    true is never set'), negating the verb that follows it rather than a
+    word before it, so it needs its own trailing check rather than
+    `_assert_not_negated`'s preceding-window one."""
+    match = re.search(
         rf"capped by `?limit`?[^.]*default\s*(?:of\s*)?{default_limit}\b",
         bullet, re.IGNORECASE,
-    ), (
+    )
+    assert match, (
         "expected the empty-query enumeration's cap explicitly tied to "
         f"`limit` with the real default ({default_limit}) read from the "
         f"tool's own signature; got bullet: {bullet!r}"
     )
-    assert "truncated: true" in bullet, (
+    _assert_not_negated(bullet, match.start(), what="'capped' (limit cap claim)")
+
+    truncated_idx = bullet.find("truncated: true")
+    assert truncated_idx != -1, (
         "expected the `truncated: true` result marker documented for an "
         f"over-limit empty query; got bullet: {bullet!r}"
     )
+    claim_end = truncated_idx + len("truncated: true")
+    trailing = bullet[claim_end: claim_end + 30]
+    assert not _NEGATION_RE.search(trailing), (
+        f"'truncated: true' must not be immediately followed by a negation "
+        f"word (never/not/no/isn't/doesn't/do not/don't) that reverses "
+        f"the claim: {bullet[truncated_idx: claim_end + 30]!r}"
+    )
+
+
+def test_search_projects_doc_empty_query_mentions_limit() -> None:
+    """Driving test for R3. RED today: the empty-query bullet mentions
+    `limit` only as a reason to prefer `search_projects` over
+    `list_projects` ('a bounded `limit` over a large set', 'no `limit`') —
+    never as a cap tied to the empty-query enumeration itself, and does
+    not contain `truncated: true` at all.
+
+    Checking logic lives in `_check_empty_query_limit_claim` (test-critic
+    round 4 F1) so it can also be exercised against a plausible-but-wrong
+    negated bullet (`test_empty_query_limit_check_rejects_negated_claim`)."""
+    tool = _search_projects_tool()
+    bullet = _empty_query_bullet(tool.__doc__ or "")
+    default_limit = inspect.signature(tool).parameters["limit"].default
+    _check_empty_query_limit_claim(bullet, default_limit)
+
+
+def test_empty_query_limit_check_rejects_negated_claim() -> None:
+    """Negative case for test-critic round 4 F1: proves
+    `_check_empty_query_limit_claim` rejects a paraphrase that negates the
+    'capped by limit' and 'truncated: true' claims THEMSELVES, using
+    exactly the plausible-wrong example quoted in the round-4 critique JSON
+    (tautology::F1's `surviving_implementation` field): 'The empty-query
+    enumeration is not capped by limit (default 10); truncated: true is
+    never set' matches both the `capped by limit ... default 10` regex and
+    the `truncated: true` substring, so without a negation guard tied to
+    each claim word/phrase itself this would have passed. This test
+    validates the checker's discrimination, not the requirement directly —
+    the checker still needs the real docstring's GREEN run (via the
+    driving test above) to ground the requirement."""
+    plausible_wrong = (
+        "The empty-query enumeration is not capped by limit (default 10); "
+        "truncated: true is never set."
+    )
+    with pytest.raises(AssertionError):
+        _check_empty_query_limit_claim(plausible_wrong, 10)
 
 
 def test_search_projects_doc_no_longer_claims_returns_all_projects() -> None:
@@ -410,7 +468,21 @@ def test_search_projects_doc_no_longer_claims_returns_all_projects() -> None:
     phrasings ('returns/lists/enumerates all/every project(s)') rather than
     one exact spelling, so dropping just the `**` asterisks or rewording to
     e.g. 'lists every project' cannot silently pass (test-critic round 2,
-    tautology::F2)."""
+    tautology::F2).
+
+    Test-critic round 4 F1 also named this test as potentially vulnerable
+    to a negated-claim bypass. Checked: this test only asserts an ABSENCE
+    (the contradictory 'returns all projects' phrase and its synonyms must
+    NOT appear) — it never requires presence of a positive claim, so there
+    is no claim word here for a preceding/trailing negation to flip into a
+    false pass. The round-4 `surviving_implementation` example ('not
+    capped by limit (default 10); truncated: true is never set') does not
+    contain a 'returns/lists/enumerates all/every project(s)' substring, so
+    this test's absence-only assertions correctly hold for it too — that
+    is expected and harmless, because this test was never the one meant to
+    catch that example; `test_empty_query_limit_check_rejects_negated_
+    claim` above is. Already implicitly covered; no negation guard added
+    here."""
     doc = _search_projects_doc()
     bullet = _empty_query_bullet(doc)
     normalized = re.sub(r"[*`]", "", bullet).lower()

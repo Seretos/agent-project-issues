@@ -192,6 +192,25 @@ def _pulls_tools() -> dict[str, Callable]:
     return stub.tools
 
 
+# Search term each provider key is expected to appear under in prose —
+# `_PROVIDERS`' key is "azuredevops", but the docstrings (like the rest of
+# this file's style, see test_359) write it out as "Azure DevOps".
+_PROVIDER_DOC_TERMS = {"github": "github", "gitlab": "gitlab", "azuredevops": "azure"}
+
+# The single source of truth for "which providers have no verified limit,
+# so the helper is a no-op for them". Used BOTH to parametrize the
+# behavioural no-op tests below (R1's
+# test_create_pr_unverified_provider_limit_is_a_no_op and R2's
+# test_update_pr_unverified_provider_limit_is_a_no_op) AND, in R3, as the
+# expected value the docstring's own "not validated" prose must exactly
+# match — so a docstring that claims the wrong set of unvalidated
+# providers (too many, too few, or wrongly including "github") fails
+# against the very same set that is actually proven unenforced by
+# running real requests through the tool layer, not against a second,
+# independently-typed literal that could silently drift from it.
+_UNVERIFIED_PROVIDERS = ("gitlab", "azuredevops")
+
+
 # ---------- R1: create_pr -------------------------------------------------------
 
 
@@ -268,7 +287,7 @@ def test_create_pr_longer_custom_ai_generated_label_moves_boundary(monkeypatch):
     assert provider.create_calls == []
 
 
-@pytest.mark.parametrize("provider_name", ["gitlab", "azuredevops"])
+@pytest.mark.parametrize("provider_name", _UNVERIFIED_PROVIDERS)
 def test_create_pr_unverified_provider_limit_is_a_no_op(monkeypatch, provider_name):
     """Additional coverage: GitLab / Azure DevOps have no verified limit
     in the table, so even a very long body is forwarded, unrefused."""
@@ -463,7 +482,7 @@ def test_update_pr_body_none_with_title_change_never_refused(monkeypatch):
     assert provider.update_calls == [None]
 
 
-@pytest.mark.parametrize("provider_name", ["gitlab", "azuredevops"])
+@pytest.mark.parametrize("provider_name", _UNVERIFIED_PROVIDERS)
 def test_update_pr_unverified_provider_limit_is_a_no_op(monkeypatch, provider_name):
     """Additional coverage, mirroring R1's
     `test_create_pr_unverified_provider_limit_is_a_no_op` but through
@@ -493,16 +512,28 @@ def test_update_pr_unverified_provider_limit_is_a_no_op(monkeypatch, provider_na
 # ---------- R3: docstrings state the limits -------------------------------------
 
 
-# Search term each provider key is expected to appear under in prose —
-# `_PROVIDERS`' key is "azuredevops", but the docstrings (like the rest of
-# this file's style, see test_359) write it out as "Azure DevOps".
-_PROVIDER_DOC_TERMS = {"github": "github", "gitlab": "gitlab", "azuredevops": "azure"}
+def _extract_unvalidated_providers(doc: str) -> set[str]:
+    """The SET of provider keys (from `_PROVIDER_DOC_TERMS`'s vocabulary —
+    github/gitlab/azuredevops) that `doc`'s prose states are "not
+    validated", found by checking, independently for EVERY known
+    provider token, whether that token sits within a short span of "not
+    validated" in either order (mirrors `_extract_github_limit`'s
+    either-order search).
 
-# The unverified providers are pinned here, not derived from any
-# production constant — this matches the product decision already baked
-# into R1's `test_create_pr_unverified_provider_limit_is_a_no_op`
-# parametrization (gitlab/azuredevops have no verified limit).
-_UNVERIFIED_PROVIDERS = ("gitlab", "azuredevops")
+    This does not pre-decide which providers are unvalidated: nothing
+    here hard-codes "gitlab and azure are the answer". A docstring that
+    omits a provider, invents an extra one, or wrongly claims "github"
+    itself is not validated all change the returned set, and the caller
+    compares it against `_UNVERIFIED_PROVIDERS` — the same tuple that
+    parametrizes the behavioural no-op tests — so a docstring claim and
+    the actually-proven-unenforced set can never silently diverge.
+    """
+    found: set[str] = set()
+    for provider, term in _PROVIDER_DOC_TERMS.items():
+        pattern = rf"{term}[^.]{{0,200}}not validated|not validated[^.]{{0,200}}{term}"
+        if re.search(pattern, doc, re.I | re.S):
+            found.add(provider)
+    return found
 
 
 def _extract_github_limit(doc: str) -> int:
@@ -566,12 +597,30 @@ def test_pr_docstrings_state_body_limits(monkeypatch):
     for name in ("create_pr", "update_pr"):
         doc = tools[name].__doc__ or ""
         limits[name] = _extract_github_limit(doc)
-        for provider in _UNVERIFIED_PROVIDERS:
-            term = _PROVIDER_DOC_TERMS[provider]
-            assert re.search(
-                rf"{term}[^.]{{0,200}}not validated|not validated[^.]{{0,200}}{term}",
-                doc, re.I | re.S,
-            ), f"{name}: docstring doesn't say {provider} isn't validated:\n{doc}"
+
+        # Round 5 fix: don't just regex-match a fixed, pre-decided pair
+        # ("gitlab"/"azure" appear near "not validated" somewhere) — that
+        # passes for ANY docstring containing the phrase, whatever the
+        # helper actually does. Instead extract the SET of providers the
+        # docstring's prose claims are unvalidated, and require it to be
+        # EXACTLY `_UNVERIFIED_PROVIDERS` — the same tuple that
+        # parametrizes `test_create_pr_unverified_provider_limit_is_a_no_op`
+        # / `test_update_pr_unverified_provider_limit_is_a_no_op`, which
+        # prove behaviourally (real calls through the tool layer, fake
+        # provider recording what was actually sent) that gitlab/
+        # azuredevops bodies are forwarded unenforced. Equality — not
+        # subset/superset — catches a docstring that omits one of them,
+        # adds an extra provider, or wrongly claims "github" itself is
+        # not validated (which would silently defeat R1/R2's enforcement
+        # claim).
+        unvalidated = _extract_unvalidated_providers(doc)
+        assert unvalidated == set(_UNVERIFIED_PROVIDERS), (
+            f"{name}: docstring claims {sorted(unvalidated)} providers are "
+            f"not validated; expected exactly {sorted(_UNVERIFIED_PROVIDERS)} "
+            "— the same set proven behaviourally unenforced by "
+            "test_create_pr_unverified_provider_limit_is_a_no_op / "
+            f"test_update_pr_unverified_provider_limit_is_a_no_op:\n{doc}"
+        )
 
     assert limits["create_pr"] == limits["update_pr"], (
         "create_pr and update_pr docstrings disagree on the github limit: "

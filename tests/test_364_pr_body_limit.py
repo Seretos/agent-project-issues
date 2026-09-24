@@ -311,6 +311,86 @@ def test_update_pr_same_body_without_ai_generated_label_uses_modified_flavour(
     assert provider.update_calls == [body]
 
 
+def test_update_pr_custom_ai_generated_label_present_uses_generated_flavour(monkeypatch):
+    """Additional coverage for R2, closing a tautology gap: the project
+    uses a *custom* `auto_labels.ai_generated` value (not the default
+    'ai-generated' string), and the fake PR's labels are built from that
+    same custom value — never the literal default. The generated flavour
+    (measured under the custom marker set) is over the limit; the
+    modified flavour is at the limit. An implementation that hard-codes
+    the literal 'ai-generated' string instead of reading
+    `project.auto_labels.ai_generated` would look for 'ai-generated' in
+    these labels, not find it, wrongly conclude the modified flavour
+    applies, and let the over-limit write through unrefused — failing the
+    assertions below. Only an implementation that actually reads
+    `project.auto_labels.ai_generated` and finds it present passes."""
+    # Same length as the default "ai-generated" (12 chars), so the
+    # generated/modified prefix-length delta matches the driving test's
+    # (1 char) and the same 65537/65536 straddle applies. Only the text
+    # differs from the default, which is the point of this case.
+    custom_generated_label = "custom-label"
+    project = _project(
+        "github",
+        auto_labels={"ai_generated": custom_generated_label, "ai_modified": "ai-modified"},
+    )
+    marker_set = markers_mod.MarkerSet(custom_generated_label, "ai-modified")
+    provider = _RecordingProvider(labels=[custom_generated_label])
+    tools = _make_tools(monkeypatch, project, provider)
+
+    body = _body_of_flavour_length(65537, will_be_ai_generated=True, marker_set=marker_set)
+    assert len(
+        markers_mod.apply_body_marker(body, will_be_ai_generated=False, markers=marker_set)
+    ) == 65536, "fixture must straddle the boundary under the custom marker set"
+
+    out = tools["update_pr"](project_id="acme", pr_id="7", body=body)
+
+    assert "error" in out, out
+    assert "github" in out["error"]
+    assert "65536" in out["error"]
+    assert provider.get_pr_calls == 1
+    assert provider.update_calls == []
+
+
+def test_update_pr_custom_ai_generated_label_absent_uses_modified_flavour_despite_default_literal(
+    monkeypatch,
+):
+    """Additional coverage for R2, closing the other half of the same
+    tautology gap: the project again uses a *custom*
+    `auto_labels.ai_generated` value, but the fake PR's labels instead
+    carry the literal default string 'ai-generated' — which is NOT the
+    project's configured value, so it must NOT be read as "generated".
+    The modified flavour (at the limit) is what actually applies here;
+    the generated flavour is over. Both a hard-coded-'ai-generated'
+    implementation (finds the literal present -> wrongly picks the
+    generated/over flavour) and an "any label present" implementation
+    (labels is non-empty -> wrongly picks the generated/over flavour)
+    would refuse this write and fail the assertions below. Only an
+    implementation that checks membership of the actual
+    `project.auto_labels.ai_generated` value (absent here) concludes the
+    modified flavour applies and lets the at-limit write through."""
+    # Same length as the default "ai-generated" (12 chars) — see the
+    # sibling test above for why the length is held constant.
+    custom_generated_label = "custom-label"
+    project = _project(
+        "github",
+        auto_labels={"ai_generated": custom_generated_label, "ai_modified": "ai-modified"},
+    )
+    marker_set = markers_mod.MarkerSet(custom_generated_label, "ai-modified")
+    provider = _RecordingProvider(labels=["ai-generated"])
+    tools = _make_tools(monkeypatch, project, provider)
+
+    body = _body_of_flavour_length(65537, will_be_ai_generated=True, marker_set=marker_set)
+    assert len(
+        markers_mod.apply_body_marker(body, will_be_ai_generated=False, markers=marker_set)
+    ) == 65536, "fixture must straddle the boundary under the custom marker set"
+
+    out = tools["update_pr"](project_id="acme", pr_id="7", body=body)
+
+    assert "error" not in out, out
+    assert provider.get_pr_calls == 1
+    assert provider.update_calls == [body]
+
+
 def test_update_pr_over_limit_in_both_flavours_refused_without_read(monkeypatch):
     """Additional coverage: both flavours are over the limit, so the
     helper can refuse without needing to read the PR's current labels."""
@@ -375,10 +455,10 @@ def test_pr_docstrings_state_body_limits():
     tools = _pulls_tools()
     for name in ("create_pr", "update_pr"):
         doc = tools[name].__doc__ or ""
-        assert "65536" in doc, f"{name}: docstring missing '65536':\n{doc}"
-        assert re.search(r"\bgithub\b", doc, re.I), (
-            f"{name}: docstring's 65536 limit not attributed to GitHub:\n{doc}"
-        )
+        assert re.search(
+            r"github[^.]{0,200}65536|65536[^.]{0,200}github",
+            doc, re.I | re.S,
+        ), f"{name}: docstring's 65536 limit not attributed to GitHub:\n{doc}"
         assert re.search(
             r"gitlab[^.]{0,200}not validated|not validated[^.]{0,200}gitlab",
             doc, re.I | re.S,

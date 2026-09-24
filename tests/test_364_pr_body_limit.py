@@ -15,17 +15,26 @@ an opaque provider error.
   Both flavours fitting or both being over decide the outcome without a
   read; only when the flavours straddle the boundary does the helper
   call `get_pr` to learn which one applies.
-- R3: `create_pr` and `update_pr`'s docstrings state GitHub's 65536-char
-  limit and say GitLab / Azure DevOps are not validated.
+- R3: `create_pr` and `update_pr`'s docstrings state each verified
+  provider's limit and say every unverified provider is not validated.
+  R3's test cross-checks the docstrings against the actual runtime
+  constant `_PR_BODY_MAX_CHARS` (not a hard-coded `"65536"` literal), so
+  it fails if the documented number ever drifts from what the code
+  enforces (test-critic round 2 finding: a bare string-presence check on
+  docs proves nothing about what's actually enforced).
 
 Harness mirrors `tests/test_314_write_response_light.py`: a `_StubMCP` +
 monkeypatched `_providers.load_projects` + `_PROVIDERS[...]` substitution,
 with a recording fake provider standing in for the real one.
 
-Expected RED reason for all three driving tests: there is no pre-check
-yet on the current code, so the fake provider is called (and no
-`{"error": ...}` is returned) where the test expects a refusal — for R3,
-neither docstring contains "65536" yet.
+Expected RED reason:
+- R1/R2: there is no pre-check yet on the current code, so the fake
+  provider is called (and no `{"error": ...}` is returned) where the test
+  expects a refusal.
+- R3: `_PR_BODY_MAX_CHARS` does not exist yet in `_providers.py` —
+  importing it raises `ImportError`, a valid RED for a not-yet-written
+  constant (mirrors the `_with_auth_hint` ImportError-RED pattern in
+  `tests/test_266_error_tone_actionability.py`).
 """
 from __future__ import annotations
 
@@ -448,22 +457,58 @@ def test_update_pr_body_none_with_title_change_never_refused(monkeypatch):
 # ---------- R3: docstrings state the limits -------------------------------------
 
 
+# Search term each provider key is expected to appear under in prose —
+# `_PROVIDERS`' key is "azuredevops", but the docstrings (like the rest of
+# this file's style, see test_359) write it out as "Azure DevOps".
+_PROVIDER_DOC_TERMS = {"github": "github", "gitlab": "gitlab", "azuredevops": "azure"}
+
+
 def test_pr_docstrings_state_body_limits():
     """Driving test for R3: both `create_pr` and `update_pr`'s docstrings
-    name GitHub's 65536-char limit and say GitLab / Azure DevOps are not
-    validated."""
+    state each verified provider's limit and say every unverified
+    provider is not validated — checked against the actual runtime
+    constant `_PR_BODY_MAX_CHARS`, not a hard-coded literal.
+
+    A regex over prose can never prove the documented number is the
+    number actually enforced: a docstring could contain the right tokens
+    near each other while the code enforces something else (or nothing).
+    Importing `_PR_BODY_MAX_CHARS` and asserting against its real value
+    closes that gap — this test fails if the docstring's stated number
+    ever drifts from what the code enforces, not just if the prose is
+    missing.
+
+    RED today: `_PR_BODY_MAX_CHARS` does not exist yet in `_providers.py`
+    (production code isn't written in this tests-only phase), so the
+    import below raises `ImportError`.
+    """
+    from project_issues_plugin.tools._providers import _PR_BODY_MAX_CHARS
+
+    verified = dict(_PR_BODY_MAX_CHARS)
+    unverified = [p for p in providers_mod._PROVIDERS if p not in verified]
+    assert verified, (
+        "expected _PR_BODY_MAX_CHARS to hold at least one verified "
+        f"provider limit; got {_PR_BODY_MAX_CHARS!r}"
+    )
+    assert unverified, (
+        "expected at least one provider with no verified limit; "
+        f"_PR_BODY_MAX_CHARS covers all of {list(providers_mod._PROVIDERS)}"
+    )
+
     tools = _pulls_tools()
     for name in ("create_pr", "update_pr"):
         doc = tools[name].__doc__ or ""
-        assert re.search(
-            r"github[^.]{0,200}65536|65536[^.]{0,200}github",
-            doc, re.I | re.S,
-        ), f"{name}: docstring's 65536 limit not attributed to GitHub:\n{doc}"
-        assert re.search(
-            r"gitlab[^.]{0,200}not validated|not validated[^.]{0,200}gitlab",
-            doc, re.I | re.S,
-        ), f"{name}: docstring doesn't say GitLab isn't validated:\n{doc}"
-        assert re.search(
-            r"azure[^.]{0,200}not validated|not validated[^.]{0,200}azure",
-            doc, re.I | re.S,
-        ), f"{name}: docstring doesn't say Azure DevOps isn't validated:\n{doc}"
+        for provider, limit in verified.items():
+            term = _PROVIDER_DOC_TERMS[provider]
+            assert re.search(
+                rf"{term}[^.]{{0,200}}{limit}|{limit}[^.]{{0,200}}{term}",
+                doc, re.I | re.S,
+            ), (
+                f"{name}: docstring's {limit}-char limit not attributed to "
+                f"{provider} (runtime value from _PR_BODY_MAX_CHARS):\n{doc}"
+            )
+        for provider in unverified:
+            term = _PROVIDER_DOC_TERMS[provider]
+            assert re.search(
+                rf"{term}[^.]{{0,200}}not validated|not validated[^.]{{0,200}}{term}",
+                doc, re.I | re.S,
+            ), f"{name}: docstring doesn't say {provider} isn't validated:\n{doc}"

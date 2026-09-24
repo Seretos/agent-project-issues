@@ -321,7 +321,15 @@ def test_update_pr_draft_note_states_prefix_stripped_title_before_cliff():
     well before the ~2000-char client truncation cliff."""
     doc = _norm(_served_tools()["update_pr"].description or "")
     start = doc.index("`draft` toggles")
-    window = doc[start : start + 700]
+    # Bound the window to the actual draft paragraph (ending where the
+    # next paragraph, "Not all-or-nothing on every provider", begins)
+    # rather than a fixed char count — a fixed 700-char slice would run
+    # well past this ~400-char paragraph and into unrelated prose, where
+    # a coincidental "stripped" or "`draft` field" could satisfy the
+    # assertions below without the draft paragraph itself being correct
+    # (test-critic finding tautology::F1).
+    end = doc.index("Not all-or-nothing", start)
+    window = doc[start:end]
     assert "GitLab" in window
     assert "`Draft: `" in window
     assert "stripped" in window
@@ -418,6 +426,89 @@ def test_gitlab_update_pr_draft_uses_title_prefix(monkeypatch: pytest.MonkeyPatc
         f"have the `Draft: ` prefix stripped; got {pr.title!r}"
     )
     assert pr.draft is True, (
+        f"lib-python-projects {version}: expected `draft` to be read from "
+        f"the response's `draft` field; got {pr.draft!r}"
+    )
+
+
+def test_gitlab_update_pr_draft_false_removes_title_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """R2 additional coverage (remove direction): the docstring's wording
+    is "GitLab adds/removes a `Draft: ` title prefix" — the sibling test
+    above only drives `draft=True` (the add direction). This drives
+    `draft=False` against an already-`Draft: `-prefixed title and proves
+    the REAL pinned `GitLabProvider.update_pr` strips the prefix rather
+    than leaving it or writing a native `draft` key (plan-critic finding
+    misread::F2: the "removes" half of the shipped wording had no
+    behavioural evidence on the pin)."""
+    version = importlib.metadata.version("lib-python-projects")
+    project = ProjectConfig(id="acme", provider="gitlab", path="group/proj")
+
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith(
+            "/merge_requests/1"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "iid": 1,
+                    "title": "Draft: T",
+                    "draft": True,
+                    "state": "opened",
+                    "labels": [],
+                    "source_branch": "feat",
+                    "target_branch": "main",
+                    "description": "",
+                },
+            )
+        if request.method == "PUT" and request.url.path.endswith(
+            "/merge_requests/1"
+        ):
+            payload = json.loads(request.content)
+            captured["payload"] = payload
+            return httpx.Response(
+                200,
+                json={
+                    "iid": 1,
+                    "title": payload.get("title", "Draft: T"),
+                    "draft": False,
+                    "state": "opened",
+                    "labels": [],
+                    "source_branch": "feat",
+                    "target_branch": "main",
+                    "description": "",
+                },
+            )
+        raise AssertionError(f"unexpected GitLab request: {request.method} {request.url}")
+
+    def fake_client(project: ProjectConfig, token: str | None) -> httpx.Client:
+        return httpx.Client(
+            base_url="https://gitlab.example.com/api/v4",
+            transport=httpx.MockTransport(handler),
+        )
+
+    monkeypatch.setattr(gitlab_provider, "_client", fake_client)
+
+    pr = GitLabProvider().update_pr(project, "tok", "1", draft=False)
+
+    assert captured["payload"]["title"] == "T", (
+        f"lib-python-projects {version}: expected GitLab update_pr to "
+        f"strip the 'Draft: ' title prefix when draft=False; got "
+        f"{captured['payload']!r}"
+    )
+    assert "draft" not in captured["payload"], (
+        f"lib-python-projects {version}: expected no native `draft` key in "
+        f"the PUT payload on the remove direction either; got "
+        f"{captured['payload']!r}"
+    )
+    assert pr.title == "T", (
+        f"lib-python-projects {version}: expected the returned title to "
+        f"stay prefix-free; got {pr.title!r}"
+    )
+    assert pr.draft is False, (
         f"lib-python-projects {version}: expected `draft` to be read from "
         f"the response's `draft` field; got {pr.draft!r}"
     )

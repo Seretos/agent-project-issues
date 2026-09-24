@@ -579,6 +579,14 @@ def register(mcp: FastMCP) -> None:
 
         Default `response="light"`; pass `response="full"` for the full pull request.
 
+        `draft` toggles the PR's draft state. `True` flips a ready PR
+        into draft; `False` marks a draft as ready for review. Passing
+        `None` (default) leaves the state untouched. GitHub uses
+        GraphQL mutations; GitLab adds/removes a `Draft: ` title
+        prefix, but the returned `title` is prefix-stripped, so read
+        the state from the `draft` field, never from `title`; Azure
+        DevOps sets it in the same PATCH as title/body.
+
         Not all-or-nothing on every provider — the failure behavior
         depends on which one you're talking to. On GitHub, a bad
         `labels_add` name is rejected up front, before the PATCH that
@@ -604,12 +612,6 @@ def register(mcp: FastMCP) -> None:
         `status` accepts `"open"` (reopen) or `"closed"` (close without
         merging). To merge a PR call `merge_pr` — passing
         `status="merged"` is rejected.
-
-        `draft` toggles the PR's draft state. `True` flips a ready PR
-        into draft; `False` marks a draft as ready for review. Passing
-        `None` (default) leaves the state untouched. GitHub uses
-        GraphQL mutations behind the scenes; GitLab manipulates the
-        title prefix (`Draft: `).
 
         Passing `base` to re-target the PR onto a different branch
         changes the PR's diff out from under any inline comments already
@@ -750,7 +752,7 @@ def register(mcp: FastMCP) -> None:
         pr_id: str,
         body: str,
         path: Annotated[str | None, Field(description="New-thread mode: file path in the diff (e.g. 'src/foo.py'); list_pr_files enumerates the valid paths. Set together with line and commit_sha. Leave unset in reply mode.")] = None,
-        line: Annotated[int | None, Field(description="New-thread mode: absolute file line number (1-based), NOT a diff-hunk position. The line must be a line that appears in the PR's diff — a line outside every changed hunk is rejected by the provider. Call list_pr_files first to discover valid targets: each line_ranges entry gives start..end inclusive on one side. Set together with path and commit_sha. Leave unset in reply mode.")] = None,
+        line: Annotated[int | None, Field(description="New-thread mode: absolute file line number (1-based), NOT a diff-hunk position. The line must be a line that appears in the PR's diff — a line outside every changed hunk is rejected by the provider. Call list_pr_files first to discover valid targets: each line_ranges entry gives start..end inclusive on one side. Set together with path and commit_sha. Leave unset in reply mode. (Azure DevOps: line_ranges is null, supports_line_ranges false — no ranges to pick from)")] = None,
         side: Literal["LEFT", "RIGHT"] = "RIGHT",
         commit_sha: Annotated[str | None, Field(description="New-thread mode: the commit SHA the comment is anchored to. Set together with path and line. Leave unset in reply mode.")] = None,
         in_reply_to: Annotated[str | None, Field(description="Reply mode: opaque discussion id from get_pr review_comments — pass back verbatim, do not parse or construct. Shape varies by provider (GitHub: numeric string; GitLab: 40-char SHA; Azure DevOps: short numeric). Leave path/line/commit_sha unset.")] = None,
@@ -773,6 +775,11 @@ def register(mcp: FastMCP) -> None:
             value of a fresh `add_pr_review_comment` new-thread call);
             the identifier is opaque and provider-specific — pass it
             back verbatim without parsing or constructing it.
+
+        On Azure DevOps `list_pr_files` returns `line_ranges: null` and
+        `supports_line_ranges: false` (file-level rows only); it
+        confirms valid `path`s but cannot enumerate valid `line`s
+        there.
 
         `side` is `"RIGHT"` (default) for the post-change side of the
         diff or `"LEFT"` for the pre-change side. GitLab ignores it and
@@ -842,79 +849,47 @@ def register(mcp: FastMCP) -> None:
         """Submit a review on a pull request.
 
         `state` is one of:
-          - `"approve"`         — approve the PR (a body is optional;
-            on GitLab it's posted as a separate note so the rationale
-            is captured). Self-approval policy diverges by provider:
-            GitHub hard-blocks approving your own PR — the error
-            message contains GitHub's underlying text `Can not approve
-            your own pull request`, wrapped as `GitHub 422: ...` with
-            `(GitHub platform restriction; use another account)`
-            appended (not a bare passthrough) — while GitLab allows
-            self-approval outright. Generic approve-then-merge logic
-            must be prepared to handle/tolerate the GitHub error.
-          - `"request_changes"` — request changes (a body is required;
-            on GitLab this also issues a best-effort `unapprove`).
-            GitHub applies the identical self-review block described
-            in the `approve` bullet above — the error message contains
-            GitHub's underlying text `Can not request changes on your
-            own pull request`, wrapped the same way as `approve`'s
-            error (`GitHub 422: ...` with `(GitHub platform
-            restriction; use another account)` appended). GitLab
-            permits self-review here too, as with `approve`. See the
-            `approve` bullet above for the full mechanics.
-          - `"comment"`         — leave a review-level comment without
-            changing approval state (a body is required).
+          - `"approve"` — approve the PR (optional body; GitLab: a
+            separate note). GitHub blocks self-approval — error `Can
+            not approve your own pull request`, wrapped `GitHub 422:
+            ...` (`GitHub platform restriction`) — GitLab allows
+            self-approval; approve-then-merge logic tolerates the
+            GitHub error.
+          - `"request_changes"` — request changes (body required;
+            GitLab: best-effort `unapprove`). Same GitHub block as
+            `approve`: `Can not request changes on your own pull
+            request` (`GitHub 422: ...`, `GitHub platform
+            restriction`); GitLab permits it.
+          - `"comment"` — leave a review-level comment without
+            changing approval state (body required).
 
-        Azure DevOps note: Azure natively supports 5 reviewer votes, but
-        this tool only exposes 3. The mapping is `"approve"` →
-        `approved` (+10), `"request_changes"` → `rejected` (-10),
-        `"comment"` → `no vote` (0). Azure's other two native votes,
-        `approve_with_suggestions` (+5) and `wait_for_author` (-5), are
-        normalized away and cannot be set through this tool — passing
-        either as `state` returns `{"error": "..."}`.
+        Azure: 5 votes, 3 exposed. `"approve"`→approved (+10),
+        `"request_changes"`→rejected (-10) — both update `reviewers`.
+        `"comment"`→no vote (0) and does not touch `reviewers` — only
+        a transient `requested_reviewers` entry; treat a review as
+        recorded from `reviewers`, not `requested_reviewers`. The
+        other two — `approve_with_suggestions` (+5), `wait_for_author`
+        (-5) — are normalized away; either returns `{"error": "..."}`.
 
-        Azure DevOps reviewer side effect: `"approve"` and
-        `"request_changes"` add or update the reviewing user in the PR's
-        `reviewers` collection with their scored vote (+10 / -10). A
-        `"comment"` (vote 0) does not create a scored `reviewers` entry
-        — Azure surfaces the commenter only as a transient
-        `requested_reviewers` entry instead. Treat a review as recorded
-        from `reviewers`, not `requested_reviewers`.
+        Azure DevOps self-review: no platform-level block; this call
+        has no self-review handling either. `"approve"`/
+        `"request_changes"` on your own PR succeed, recorded as a
+        normal vote in `reviewers`, unlike GitHub's 422. A policy
+        ("Prohibit the most recent pusher from approving their own
+        changes") blocks the required-reviewer gate —
+        `merge_pr` raises `"rejectedByPolicy"`, not from this call.
 
-        Azure DevOps self-review: Azure applies no platform-level
-        self-review block, and this call itself has no self-review
-        handling either. Both `"approve"` and `"request_changes"` on
-        your own PR succeed here and are recorded as a normal vote
-        (+10 / -10) in `reviewers`, unlike GitHub, which rejects both
-        with a 422. A repository or branch policy can still matter
-        later: with "Prohibit the most recent pusher from approving
-        their own changes" enabled, that recorded self-vote will not
-        satisfy the required-reviewer/approval gate — the rejection
-        surfaces at PR completion/merge time (`merge_pr` raises when
-        `mergeStatus` is `"rejectedByPolicy"`), not from this call.
-        So a policy-blocked self-review is not visible as an error
-        here; check for it at merge time instead.
+        `commit_sha`, when set, pins the review to a GitHub commit
+        (`commit_id`). GitLab ignores `commit_sha` — the returned
+        review has `commit_sha: null`.
 
-        `commit_sha`, when set, pins the review to a specific commit on
-        GitHub (`commit_id`). GitLab cannot pin a review to a commit: it
-        ignores `commit_sha` and the returned review always has
-        `commit_sha: null` regardless of what you pass. Only set it for
-        GitHub commit-pinning — it has no effect on GitLab, so don't read
-        the response `commit_sha` there as confirmation (it is only
-        present with `response="full"`).
+        Default `response="light"`: `id`, `url`, `submitted_at`;
+        `response="full"`: full review.
 
-        Default `response="light"` returns `id`, `url` and `submitted_at`;
-        pass `response="full"` for the full review.
-
-        The review body is marker-prefixed automatically — callers
-        should NOT prepend `#ai-generated` themselves. Requires the
-        project's `pulls.modify` permission.
-
-        On Azure DevOps, `pulls.modify` is what authorises casting the
-        reviewer vote described above: reviewing is treated as
-        modifying the PR; no separate review flag exists, so casting a
-        vote via this tool is gated the same way as `update_pr` and
-        `add_pr_comment`.
+        Body is marker-prefixed — do NOT prepend `#ai-generated`.
+        Requires the project's `pulls.modify` permission — also
+        authorising the Azure vote above; reviewing is treated as
+        modifying the PR; no separate review flag exists.
         """
         if state not in ("approve", "request_changes", "comment"):
             return {

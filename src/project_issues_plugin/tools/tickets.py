@@ -22,6 +22,7 @@ from lib_python_projects.providers.base import TicketFilters
 from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.github import GitHubError
 from lib_python_projects.providers.gitlab import GitLabError
+from project_issues_plugin.tools import _label_board
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
@@ -400,9 +401,26 @@ def register(mcp: FastMCP) -> None:
             `projects.yml`. Call `list_board_columns(project_id)` first
             to discover the valid logical column names for a project.
             Supported on GitHub (Projects v2) and Azure DevOps (Azure
-            Boards); GitLab has no board concept and raises an explicit
-            "not supported" error rather than silently ignoring it. On
-            GitHub, a `column` filter takes a dedicated resolution path
+            Boards) via a live board binding, and on every provider
+            (including GitLab) when the project's `board` block has
+            `columns` but no `binding` — "label mode", tracked through
+            issue labels instead of a live board (see below). A
+            project with neither a binding nor label-mode columns
+            raises an explicit "not supported" error rather than
+            silently ignoring the filter.
+
+            Label mode overrides `status`/`states` entirely: a label
+            can't tell "first column" from "closed column" on its own,
+            only the ticket's native open/closed state can. The first
+            configured column excludes every catalogue label, a middle
+            column requires its label, and the configured
+            `closed_column` maps to `status="closed"` with no label
+            condition. `list_board_columns` reports each column's
+            resolved `label` (`null` for the first/closed columns) and
+            `source: "labels"` in this mode.
+
+            On GitHub with a live board binding, a `column` filter
+            takes a dedicated resolution path
             (a single Projects-v2 GraphQL query) instead of the REST
             `/issues` endpoint — `labels`/`not_labels`/`assignee`/
             `states`/`status` are still applied, just client-side.
@@ -472,28 +490,29 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)   # optional — public repos work without
-            tickets, has_more = provider.list_tickets(
-                project, token,
-                TicketFilters(
-                    status=status,
-                    labels=labels or [],
-                    assignee=assignee,
-                    search=search,
-                    limit=limit,
-                    not_labels=not_labels or [],
-                    author=author,
-                    created_after=created_after,
-                    created_before=created_before,
-                    updated_after=updated_after,
-                    updated_before=updated_before,
-                    sort_by=sort_by,
-                    sort_order=sort_order,
-                    states=states or [],
-                    area_path=area_path,
-                    area_path_recursive=area_path_recursive,
-                    board_column=column,
-                ),
+            ticket_filters = TicketFilters(
+                status=status,
+                labels=labels or [],
+                assignee=assignee,
+                search=search,
+                limit=limit,
+                not_labels=not_labels or [],
+                author=author,
+                created_after=created_after,
+                created_before=created_before,
+                updated_after=updated_after,
+                updated_before=updated_before,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                states=states or [],
+                area_path=area_path,
+                area_path_recursive=area_path_recursive,
+                board_column=column,
             )
+            board = _label_board.label_board(project)
+            if board is not None:
+                ticket_filters = _label_board.rewrite_filters(board, ticket_filters)
+            tickets, has_more = provider.list_tickets(project, token, ticket_filters)
             rows = [asdict(t) for t in tickets]
             rows = apply_body_knobs(
                 rows, omit_body=omit_body, body_max_chars=body_max_chars,
@@ -716,7 +735,18 @@ def register(mcp: FastMCP) -> None:
                 "Pass this key explicitly to choose a different column, or "
                 "set off_board=True to skip the board entirely. Azure DevOps "
                 "and GitLab are unaffected by this default; for them None or "
-                "{} remains a plain no-op."
+                "{} remains a plain no-op. "
+                "Label mode (#365): on a project whose 'board' block has "
+                "'columns' but no 'binding' (any provider, including "
+                "GitLab), the 'Status' key instead selects a logical "
+                "column tracked through issue labels — 'Status' is "
+                "removed before the rest of custom_fields (if any) is "
+                "forwarded to the provider. A middle column adds its "
+                "label to 'labels'; the configured closed column sets "
+                "'status' to the provider's terminal_completed hint "
+                "(unless 'status' was already passed) instead of adding "
+                "a label. See list_board_columns' 'source: \"labels\"' "
+                "rows for each column's resolved label."
             ))
         ] = None,
         off_board: Annotated[
@@ -845,13 +875,46 @@ def register(mcp: FastMCP) -> None:
                 ):
                     effective_title = f"{chosen.title_prefix}{effective_title}"
 
+            # Label mode (#365): a board with `columns` but no live
+            # `binding` tracks columns via issue labels. Pop the
+            # "Status" key off a copy of `custom_fields` before the
+            # existing (binding-only) `_default_board_custom_fields`
+            # runs — it no-ops for a label-mode board anyway (no
+            # `github-projects-v2` binding to resolve), so the popped
+            # copy passes through it unchanged.
+            board = _label_board.label_board(project)
+            effective_status = status
+            label_mode_custom_fields = custom_fields
+            if board is not None:
+                cf = dict(custom_fields or {})
+                target_col = cf.pop("Status", None)
+                label_mode_custom_fields = cf or None
+                if target_col is not None:
+                    _label_board.require_column(board, target_col)
+                    is_closed_target = (
+                        board.closed_column is not None
+                        and target_col == board.closed_column
+                    )
+                    if is_closed_target:
+                        if effective_status is None:
+                            statuses = provider.list_statuses(project, token)
+                            effective_status = statuses.hints.get(
+                                "terminal_completed"
+                            )
+                    else:
+                        target_label = _label_board.column_label(board, target_col)
+                        if target_label is not None:
+                            effective_labels = list(
+                                dict.fromkeys([*effective_labels, target_label])
+                            )
+
             effective_custom_fields, board_warning = _default_board_custom_fields(
-                project, provider, token, custom_fields, off_board,
+                project, provider, token, label_mode_custom_fields, off_board,
             )
             try:
                 ticket = provider.create_ticket(
                     project, token, effective_title, body, effective_labels,
-                    assignees or [], status=status,
+                    assignees or [], status=effective_status,
                     custom_fields=effective_custom_fields,
                 )
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
@@ -1048,12 +1111,31 @@ def register(mcp: FastMCP) -> None:
         `updated_at` may still reflect pre-cascade, stale values — they are
         not guaranteed to include the cascade's effect. Re-call
         `get_ticket(..., include_custom_fields=True)` afterward for
-        guaranteed-fresh status. On GitLab the parameter is still unsupported: it is
-        silently dropped when other standard fields are present; a
+        guaranteed-fresh status. On GitLab, a raw (non-label-mode) board
+        write via this parameter is still unsupported: it is silently
+        dropped when other standard fields are present; a
         `custom_fields`-only call on GitLab returns a descriptive error
         rather than silently mutating nothing of what was asked. Passing
         `None` or an empty dict `{}` means "no custom fields" and is treated
         as though the argument were absent.
+
+        Label mode (#365): on a project whose `board` block has
+        `columns` but no `binding` (any provider, including GitLab),
+        `{"Status": <logical column>}` instead moves the ticket between
+        label-tracked columns — one `update_ticket` call regardless of
+        provider. `"Status"` is removed before the rest of
+        `custom_fields` (if any) is forwarded. Moving to a middle
+        column adds its label and removes any other catalogue label
+        the ticket currently carries; moving to the first column only
+        removes; moving to the configured closed column removes every
+        catalogue label and sets `status` to the provider's
+        `terminal_completed` hint; moving out of a closed native state
+        sets `hints.default_open` — an explicit `status` argument always
+        wins over either derived value. A move that changes nothing
+        (already in the target column, no other field supplied) makes
+        no provider call and returns the ticket as fetched. See
+        `list_board_columns`' `source: "labels"` rows for each column's
+        resolved label.
         """
         # Reject empty calls explicitly (ticket #48 finding 4 / #49 finding 4).
         # `labels_add=[]` etc. are treated as "no action" — only non-empty
@@ -1114,6 +1196,22 @@ def register(mcp: FastMCP) -> None:
                 if refusal is not None:
                     return refusal
 
+            # Label mode (#365): a board with `columns` but no live
+            # `binding` tracks columns via issue labels. Pop the
+            # "Status" key off a copy of `custom_fields` up front, so
+            # the "not supported" refusal below (and the eventual
+            # provider call) see only whatever's left of custom_fields
+            # after the label-mode key is consumed — never the raw
+            # "Status" key, which every provider's real update_ticket
+            # (GitLab included) knows nothing about.
+            board = _label_board.label_board(project)
+            target_col = None
+            label_mode_custom_fields = custom_fields
+            if board is not None and custom_fields and "Status" in custom_fields:
+                cf = dict(custom_fields)
+                target_col = cf.pop("Status")
+                label_mode_custom_fields = cf or None
+
             cf_supported = "custom_fields" in inspect.signature(
                 provider.update_ticket
             ).parameters
@@ -1121,7 +1219,7 @@ def register(mcp: FastMCP) -> None:
                 title is not None, body is not None, status is not None,
                 labels_add, labels_remove, assignees_add, assignees_remove,
             ])
-            if custom_fields and not cf_supported and not has_other_fields:
+            if label_mode_custom_fields and not cf_supported and not has_other_fields:
                 return {
                     "error": (
                         f"custom_fields on update_ticket is not supported by the "
@@ -1130,13 +1228,89 @@ def register(mcp: FastMCP) -> None:
                         "(title/body/status/labels/assignees) or omit custom_fields."
                     )
                 }
+
+            final_status = status
+            final_labels_add = labels_add
+            final_labels_remove = labels_remove
+            if target_col is not None:
+                _label_board.require_column(board, target_col)
+                fetched_ticket, _, _, _ = provider.get_ticket(
+                    project, token, normalized_id, include_relations=False,
+                )
+                # Only actually needed for a closed-column move (its
+                # terminal_completed hint) or a reopen out of a closed
+                # native state (its default_open hint) — but always
+                # read, per the same "no hardcoded state names" reasoning
+                # `_default_board_custom_fields` already follows.
+                statuses = provider.list_statuses(project, token)
+                hints = statuses.hints if statuses is not None else {}
+                current_labels = set(fetched_ticket.labels)
+                catalogue_labels = set(_label_board.catalogue(board))
+                target_label = _label_board.column_label(board, target_col)
+
+                label_add_set: set[str] = set()
+                label_remove_set: set[str] = set()
+                if target_label is not None and target_label not in current_labels:
+                    label_add_set.add(target_label)
+                for lbl in current_labels & catalogue_labels:
+                    if lbl != target_label:
+                        label_remove_set.add(lbl)
+
+                is_closed_target = (
+                    board.closed_column is not None
+                    and target_col == board.closed_column
+                )
+                if is_closed_target:
+                    if final_status is None:
+                        final_status = hints.get("terminal_completed")
+                else:
+                    terminal_values = hints.get("terminal") or []
+                    if (
+                        fetched_ticket.status in terminal_values
+                        and final_status is None
+                    ):
+                        final_status = hints.get("default_open")
+
+                final_labels_add = list(
+                    dict.fromkeys([*(labels_add or []), *label_add_set])
+                )
+                final_labels_remove = list(
+                    dict.fromkeys([*(labels_remove or []), *label_remove_set])
+                )
+
+                # GitHub: create a missing catalogue label before the
+                # write that would otherwise 404 attaching it — strictly
+                # ahead of the provider.update_ticket call below.
+                if (
+                    project.provider == "github"
+                    and target_label is not None
+                    and target_label in label_add_set
+                ):
+                    _label_board.ensure_label(provider, project, token, target_label)
+
+                no_change = (
+                    not final_labels_add and not final_labels_remove
+                    and final_status is None
+                    and title is None and body is None
+                    and not assignees_add and not assignees_remove
+                    and not label_mode_custom_fields
+                )
+                if no_change:
+                    row = asdict(fetched_ticket)
+                    if response == "light":
+                        row = pick_light(row, TICKET_LIGHT_KEYS)
+                    result = {"project_id": project.id, "ticket": row}
+                    if template_warning:
+                        result["template_warning"] = template_warning
+                    return result
+
             kwargs: dict[str, Any] = dict(
-                title=title, body=body, status=status,
-                labels_add=labels_add, labels_remove=labels_remove,
+                title=title, body=body, status=final_status,
+                labels_add=final_labels_add, labels_remove=final_labels_remove,
                 assignees_add=assignees_add, assignees_remove=assignees_remove,
             )
-            if custom_fields and cf_supported:
-                kwargs["custom_fields"] = custom_fields
+            if label_mode_custom_fields and cf_supported:
+                kwargs["custom_fields"] = label_mode_custom_fields
             try:
                 ticket = provider.update_ticket(project, token, normalized_id, **kwargs)
             except (GitHubError, GitLabError, AzureDevOpsError) as exc:
@@ -1162,9 +1336,11 @@ def register(mcp: FastMCP) -> None:
                     exc, project_id=project.id, kind="ticket",
                     ident=normalized_id,
                 )
-                exc = _rewrap_label_404(exc, labels_add=labels_add)
+                exc = _rewrap_label_404(exc, labels_add=final_labels_add)
                 exc = _rewrap_422_assignee(exc, assignees_add=assignees_add)
-                raise _rewrap_azure_unknown_field(exc, custom_fields=custom_fields)
+                raise _rewrap_azure_unknown_field(
+                    exc, custom_fields=label_mode_custom_fields,
+                )
             row = asdict(ticket)
             if response == "light":
                 row = pick_light(row, TICKET_LIGHT_KEYS)
@@ -1394,20 +1570,36 @@ def register(mcp: FastMCP) -> None:
         ```
 
         Supported on GitHub (`github-projects-v2` binding) and Azure
-        DevOps (`azure-boards` binding). GitLab has no board concept and
-        always returns `"columns": []` — a stable fact about the
-        provider, not an error, mirroring `list_custom_fields`.
+        DevOps (`azure-boards` binding) via a live board, and on every
+        provider (including GitLab) in **label mode**: when the
+        project's `board` block has `columns` but no `binding`, columns
+        are tracked through issue labels instead of a live board.
+        Without either a binding or label-mode columns, GitLab returns
+        `"columns": []` — a stable fact about the provider, not an
+        error, mirroring `list_custom_fields`.
 
-        On GitHub, the returned `native` name is also the *value* to
-        write to move a card between columns — the write key is the
-        Projects-v2 field name (conventionally `"Status"`). Call
-        `create_ticket`/`update_ticket` with
+        Label-mode rows carry two extra keys: `"label"` (the catalogue
+        label representing this column, `None` for the first configured
+        column and for the configured `closed_column` — neither carries
+        a status label) and `"source": "labels"` (absent on a
+        live-board row). `native`/`option_id`/`states`/`is_split` are
+        still present for shape-compatibility (`native` equals
+        `logical`, `option_id=""`, `states=[]`, `is_split=False`) but
+        carry no live-board meaning. `column`/`custom_fields={"Status":
+        ...}` accept the logical column name the same way in either
+        mode; see `list_tickets`' and `update_ticket`'s docstrings for
+        the label-mode write/filter contract.
+
+        On GitHub with a live board binding, the returned `native` name
+        is also the *value* to write to move a card between columns —
+        the write key is the Projects-v2 field name (conventionally
+        `"Status"`). Call `create_ticket`/`update_ticket` with
         `custom_fields={"Status": <native>}` to set it; see those tools'
         docstrings for the full contract.
 
         Unlike `list_custom_fields`, a **missing or misconfigured**
-        `board` block on a provider that does support boards is NOT
-        silently empty — it raises a descriptive error (no `board`
+        `board` block on a provider that does support a live board is
+        NOT silently empty — it raises a descriptive error (no `board`
         configured; wrong binding `kind`; missing required binding
         fields; or a configured logical column that doesn't resolve to
         a live column/option on the board). Fix the `projects.yml`
@@ -1420,9 +1612,28 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             provider = _provider_for(project)
             token = resolve_token(project)
+            board = _label_board.label_board(project)
+            if board is not None:
+                return {
+                    "project_id": project.id,
+                    "provider": project.provider,
+                    "columns": [
+                        {
+                            "logical": col,
+                            "native": col,
+                            "option_id": "",
+                            "states": [],
+                            "is_split": False,
+                            "label": _label_board.column_label(board, col),
+                            "source": "labels",
+                        }
+                        for col in board.columns
+                    ],
+                }
             if not hasattr(provider, "list_board_columns"):
-                # e.g. GitLab — no board concept at all (stable fact,
-                # not an error), mirroring list_custom_fields' fields=[].
+                # e.g. GitLab with no board block at all — no board
+                # concept whatsoever (stable fact, not an error),
+                # mirroring list_custom_fields' fields=[].
                 return {
                     "project_id": project.id,
                     "provider": project.provider,
@@ -1456,7 +1667,12 @@ def register(mcp: FastMCP) -> None:
         Supported on GitHub (`github-projects-v2` binding, adds an
         option to the `board.binding.status_field` single-select field)
         and Azure DevOps (`azure-boards` binding, adds a column to the
-        bound team's board). GitLab has no board concept and returns an
+        bound team's board) via a live board, and on every provider
+        (including GitLab) in **label mode**: when the project's
+        `board` block has `columns` but no `binding`, this ensures the
+        target column's catalogue label exists (GitHub only — see
+        below) rather than touching a live board at all. Without either
+        a binding or label-mode columns, GitLab returns an
         `{"error": ...}` payload noting the provider is unsupported —
         mirroring `list_board_columns`' GitLab handling, but as an error
         here rather than an empty list, since there is no board to
@@ -1474,10 +1690,37 @@ def register(mcp: FastMCP) -> None:
         `BoardColumnSpec` (`logical`, `native`, `option_id`, `states`,
         `is_split`) for the live column — whether it was just created or
         already present.
+
+        Label-mode response instead carries `"source": "labels"` and
+        `"label"` (the column's catalogue label, or `None` for the
+        first/closed columns, which carry no label). `"created"` is
+        only ever `True` on GitHub — the one provider with a label
+        catalogue to pre-create against; GitLab creates a label the
+        first time it's applied, and Azure tags are freeform, so
+        `"created"` is always `False` there.
         """
         def go() -> dict:
             project = _resolve(project_id)
             provider = _provider_for(project)
+            board = _label_board.label_board(project)
+            if board is not None:
+                _require_board_manage(project)
+                token = _require_token(project)
+                _label_board.require_column(board, column_name)
+                label = _label_board.column_label(board, column_name)
+                created = False
+                if label is not None:
+                    created = _label_board.ensure_label(
+                        provider, project, token, label,
+                    )
+                return {
+                    "project_id": project.id,
+                    "provider": project.provider,
+                    "column_name": column_name,
+                    "created": created,
+                    "label": label,
+                    "source": "labels",
+                }
             # Intentionally ahead of the permission/token gates below — not a
             # gate bypass. Provider identity is already public (list_projects
             # returns it ungated) and GitLab's lack of board support is

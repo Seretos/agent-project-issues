@@ -200,7 +200,44 @@ Board columns are a two-step operation, not a single write:
 `ensure_board_column` can idempotently create a missing column, but it is
 gated on the project's `board.manage` permission — it is not part of the
 normal move-a-card flow and will fail with a permission error unless the
-project has explicitly opted in. However, on GitLab the call reports the provider as unsupported before any permission check, since GitLab has no board concept to manage in the first place.
+project has explicitly opted in. However, on GitLab the call reports the provider as unsupported before any permission check, since GitLab has no board concept to manage in the first place. That "no board concept" refusal is specific to a GitLab project with no `board` block at all — a GitLab project in label mode (see below) supports `ensure_board_column` like every other provider.
+
+### Label mode: no live board binding
+
+A project whose `board` block has `columns` but no `binding` — GitLab
+(no board concept), or GitHub without a Projects-v2 binding — still gets
+working board calls, on every provider, tracked entirely through issue
+labels instead of a live board:
+
+- `list_board_columns` returns one row per configured column, each
+  carrying `"source": "labels"` and `"label"` (the catalogue label for
+  that column, null for the first configured column and for the
+  configured `closed_column` — neither carries a status label; a ticket
+  with none of the other columns' labels reads as being in the first
+  one).
+- `list_tickets(column=...)` / `list_tickets_across_projects(column=...)`
+  filter by that label — the first column excludes every other column's
+  label, a middle column requires its own label, and the closed column
+  filters on the ticket's native closed state instead (a label can't
+  distinguish "first column" from "closed column" on its own). This
+  overrides any `status`/`states` you also pass.
+- `create_ticket`/`update_ticket` accept `custom_fields={"Status": "<
+  logical column>"}` exactly as in the live-board flow — the native
+  Projects-v2 write path is provider-specific, but this label-mode key
+  is not: it works identically on GitHub, GitLab, and Azure DevOps.
+  Moving a ticket to a middle column adds its label (creating it first
+  on GitHub if missing) and removes any other catalogue label the
+  ticket carries; moving to the closed column removes every catalogue
+  label and closes the ticket instead.
+- `ensure_board_column` pre-creates a column's catalogue label — but
+  only does real work on GitHub (`"created": true/false`); GitLab
+  creates a label the first time it's applied and Azure tags are
+  freeform, so both always report `"created": false`.
+
+Without a `label_map` entry, a column's label is derived from its name:
+lowercased, whitespace collapsed to a single `-`, prefixed `status:` —
+e.g. `"In Progress"` -> `"status:in-progress"`. Set `label_map` in
+`projects.yml` to use a different label name for a column.
 
 ## Custom fields and board write keys
 

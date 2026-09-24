@@ -25,6 +25,7 @@ from lib_python_projects.providers.azuredevops import AzureDevOpsError
 from lib_python_projects.providers.base import ProviderError, TicketFilters
 from lib_python_projects.providers.github import GitHubError
 from lib_python_projects.providers.gitlab import GitLabError
+from project_issues_plugin.tools import _label_board
 from project_issues_plugin.tools._providers import (
     _AZUREDEVOPS_AUTH_HINT,
     _GITHUB_AUTH_HINT,
@@ -105,11 +106,16 @@ def register(mcp: FastMCP) -> None:
 
         `column` carries the same semantics as `list_tickets`' `column`
         filter — a logical board column, discovered per-project via
-        `list_board_columns`. Since it's a single value applied to every
-        project in the batch, mix providers/boards in one call only when
-        the same logical column name is meaningful across all of them;
-        GitLab projects in the batch fail that entry with a per-project
-        "not supported" error (not a top-level exception).
+        `list_board_columns`, including label mode (a `board` block
+        with `columns` but no `binding`, tracked through issue labels —
+        see `list_tickets`' docstring for the full contract). Since
+        it's a single value applied to every project in the batch, mix
+        providers/boards in one call only when the same logical column
+        name is meaningful across all of them; a project with neither a
+        live board binding nor label-mode columns fails that entry with
+        a per-project "not supported" error (not a top-level exception),
+        and an unknown column name against a label-mode board fails
+        that entry naming the project's configured columns.
 
         Default `limit_per_project` is `10` — the fan-out shape
         multiplies the body-row cost, so this is the conservative
@@ -187,7 +193,11 @@ def register(mcp: FastMCP) -> None:
                 project = _resolve_local(pid, all_projects)
                 provider = _provider_for(project)
                 token = resolve_token(project)
-                tickets, _has_more = provider.list_tickets(project, token, filters)
+                project_filters = filters
+                board = _label_board.label_board(project)
+                if board is not None:
+                    project_filters = _label_board.rewrite_filters(board, filters)
+                tickets, _has_more = provider.list_tickets(project, token, project_filters)
                 ticket_dicts = [asdict(t) for t in tickets]
                 ticket_dicts = apply_body_knobs(
                     ticket_dicts,

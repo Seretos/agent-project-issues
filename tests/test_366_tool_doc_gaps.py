@@ -145,19 +145,65 @@ def test_get_ticket_ac_paragraph_names_body_fallback() -> None:
     (tools/tickets.py:524-529) names Azure DevOps and GitHub/GitLab, but
     only says acceptance_criteria sits "alongside `body`" -- it never tells
     an agent to read AC from `body` on GitHub/GitLab instead. GREEN once
-    the paragraph gains that hint (plan #361 Approach)."""
+    the paragraph gains that hint (plan #361 Approach).
+
+    Tightened per test-critic round-1 F1: the original version only checked
+    that 'Azure DevOps', 'GitHub/GitLab' and 'from `body`' each appeared
+    SOMEWHERE in the paragraph -- two of those three already hold today, and
+    a paragraph reading "never read AC from `body`" (without ever calling
+    Azure DevOps the sole populating provider or GitHub/GitLab structurally
+    empty) would have passed all three. Now each substring must sit in the
+    specific clause it is supposed to qualify: 'only' next to 'Azure DevOps',
+    'empty' next to 'GitHub/GitLab', and the 'from `body`' hint both tied to
+    the GitHub/GitLab mention and NOT negated by a preceding 'never'/'not'/
+    'don't'/'avoid'."""
     doc = _ticket_tools["get_ticket"].__doc__ or ""
     paragraph = _ac_paragraph(doc)
 
-    assert "from `body`" in paragraph, (
-        f"expected a 'from `body`' hint telling agents where to read AC on "
-        f"GitHub/GitLab in the acceptance_criteria paragraph:\n{paragraph}"
-    )
     assert "Azure DevOps" in paragraph, (
         f"expected 'Azure DevOps' in the acceptance_criteria paragraph:\n{paragraph}"
     )
     assert "GitHub/GitLab" in paragraph, (
         f"expected 'GitHub/GitLab' in the acceptance_criteria paragraph:\n{paragraph}"
+    )
+
+    # Azure DevOps must be named as the SOLE populating provider -- "only"
+    # (or equivalent) tied to the Azure DevOps mention, not floating free.
+    azure_idx = paragraph.index("Azure DevOps")
+    azure_window = paragraph[max(0, azure_idx - 60): azure_idx + 60]
+    assert "only" in azure_window, (
+        f"'Azure DevOps' must be tied to 'only populates ...' language "
+        f"naming it the sole populating provider, not just mentioned in "
+        f"passing:\n{azure_window}"
+    )
+
+    # GitHub/GitLab must be described as structurally empty, tied to the
+    # GitHub/GitLab mention itself.
+    ghgl_idx = paragraph.index("GitHub/GitLab")
+    ghgl_window = paragraph[max(0, ghgl_idx - 60): ghgl_idx + 80]
+    assert "empty" in ghgl_window, (
+        f"'GitHub/GitLab' must be tied to 'empty' language describing the "
+        f"structurally-empty field, not just mentioned in passing:"
+        f"\n{ghgl_window}"
+    )
+
+    # The 'from `body`' hint must be an affirmative instruction (not negated
+    # by a preceding 'never'/'not'/'don't'/'avoid') and must sit close to
+    # the GitHub/GitLab mention it applies to.
+    body_match = re.search(r"from `body`", paragraph)
+    assert body_match is not None, (
+        f"expected a 'from `body`' hint telling agents where to read AC on "
+        f"GitHub/GitLab in the acceptance_criteria paragraph:\n{paragraph}"
+    )
+    preceding = paragraph[max(0, body_match.start() - 20): body_match.start()].lower()
+    assert not re.search(r"\b(never|not|don't|do not|avoid)\b", preceding), (
+        f"the 'from `body`' hint must be an affirmative instruction, not "
+        f"negated by a preceding 'never'/'not'/'don't'/'avoid':\n{paragraph}"
+    )
+    assert abs(body_match.start() - ghgl_idx) <= 150, (
+        f"the 'from `body`' hint must be tied to the GitHub/GitLab mention "
+        f"(within ~150 chars), not floating free of it in the paragraph:"
+        f"\n{paragraph}"
     )
 
 
@@ -183,27 +229,78 @@ def test_get_ticket_ac_paragraph_stays_within_284_length_cap() -> None:
 # ===========================================================================
 
 
+def _recipe_paragraph(doc: str) -> str:
+    target = next(
+        (p for p in _paragraphs(doc) if "no single-project lookup tool" in p), None,
+    )
+    assert target is not None, (
+        f"no 'Resolving one project by repo path' recipe paragraph found in "
+        f"search_projects's docstring:\n{doc}"
+    )
+    return target
+
+
 def test_search_projects_documents_full_recipe() -> None:
     """Driving test (R2, search_projects half). RED today: none of these
     substrings exist yet in search_projects's docstring -- there is no
-    "Resolving one project" recipe paragraph at all."""
-    doc = _project_tools["search_projects"].__doc__ or ""
+    "Resolving one project" recipe paragraph at all.
 
-    assert "no single-project lookup tool" in doc, (
-        f"search_projects docstring must say there is no single-project "
-        f"lookup tool:\n{doc}"
+    Tightened per test-critic round-1 F2/F6: the original version checked
+    each substring ('no single-project lookup tool', the exact call text,
+    'fields=\"full\"', 'exact') anywhere in the WHOLE docstring, disconnected
+    from each other -- search_projects' pre-existing text already contains
+    'exact' (several times, re: match_confidence/case-sensitivity, unrelated
+    to this recipe) and 'fields=\"full\"' (in the pre-existing Token-cheap
+    knob bullet), so those two assertions were pre-satisfied and the 'exact'
+    check proved nothing about a `path` comparison. Now every assertion is
+    scoped to the single new recipe paragraph (anchored via
+    `_recipe_paragraph`, which itself doesn't exist yet -- RED), the steps
+    must appear in order, and 'exact' must sit within ~40 chars of a `path`
+    mention inside that paragraph specifically."""
+    doc = _project_tools["search_projects"].__doc__ or ""
+    paragraph = _recipe_paragraph(doc)
+
+    no_lookup_idx = paragraph.index("no single-project lookup tool")
+
+    call_idx = paragraph.find('search_projects(query="<owner/repo>", limit=5)')
+    assert call_idx != -1, (
+        f"recipe paragraph must name the exact recommended call for "
+        f"resolving one project by repo path:\n{paragraph}"
     )
-    assert 'search_projects(query="<owner/repo>", limit=5)' in doc, (
-        f"search_projects docstring must name the exact recommended call "
-        f"for resolving one project by repo path:\n{doc}"
+    assert no_lookup_idx < call_idx, (
+        f"'no single-project lookup tool' framing must come before the "
+        f"recommended call in the recipe paragraph:\n{paragraph}"
     )
-    assert 'fields="full"' in doc, (
-        f'search_projects docstring must say to pass fields="full" for the '
-        f"resolution recipe (the `light` shape has no `path`):\n{doc}"
+
+    fields_idx = paragraph.find('fields="full"')
+    assert fields_idx != -1, (
+        f'recipe paragraph must say to pass fields="full" for the '
+        f"resolution recipe (the `light` shape has no `path`):\n{paragraph}"
     )
-    assert "exact" in doc, (
-        f"search_projects docstring must describe an exact `path` "
-        f"comparison as part of the recipe:\n{doc}"
+    assert fields_idx > call_idx, (
+        f'fields="full" must follow the recommended call in the recipe '
+        f"paragraph:\n{paragraph}"
+    )
+
+    # "exact" must be tied to a `path` comparison inside the recipe
+    # paragraph, not merely present anywhere in the docstring.
+    tail = paragraph[fields_idx:]
+    path_matches = list(re.finditer(r"\bpath\b", tail))
+    assert path_matches, (
+        f"recipe paragraph must mention comparing the match's `path` after "
+        f'fields="full":\n{paragraph}'
+    )
+    exact_matches = list(re.finditer(r"\bexact\w*\b", tail))
+    assert exact_matches, (
+        f"recipe paragraph must describe an EXACT path comparison:\n{paragraph}"
+    )
+    closest_gap = min(
+        abs(em.start() - pm.start()) for em in exact_matches for pm in path_matches
+    )
+    assert closest_gap <= 40, (
+        f"'exact' must sit close to the `path` comparison it qualifies "
+        f"(within ~40 chars), not float free in the recipe paragraph:"
+        f"\n{paragraph}"
     )
 
 
@@ -224,6 +321,14 @@ def test_list_projects_documents_case_rule_and_cross_reference() -> None:
         f"case-sensitive on every tool taking it:\n{doc}"
     )
     idx = doc.index("case-sensitive")
+    # Guard against a negated claim ("... is NOT case-sensitive ...")
+    # satisfying the substring check (test-critic F2): the words
+    # immediately before "case-sensitive" must not negate it.
+    prefix = doc[max(0, idx - 15): idx].lower()
+    assert "not " not in prefix, (
+        f"'case-sensitive' must not be negated by a preceding 'not' right "
+        f"before the case-sensitivity rule:\n{doc[max(0, idx - 60): idx + 60]}"
+    )
     window = doc[max(0, idx - 200): idx + 200]
     assert "verbatim" in window, (
         f"expected 'pass it verbatim' near the case-sensitivity rule "
@@ -330,7 +435,22 @@ def test_list_tickets_documents_unknown_labels() -> None:
     all in list_tickets's docstring. GREEN once the section exists AND ties
     the verified/not-verified marking to the right providers in the right
     clause (see the module docstring's untestable::F2 note for why this
-    doesn't just check the four tokens appear somewhere)."""
+    doesn't just check the four tokens appear somewhere).
+
+    Tightened per test-critic round-1 F3/F5:
+      - F5: `re.search(r"verified live", ...)` also matches inside "not
+        verified live" -- a clause marking GitHub itself "not verified
+        live" would satisfy the old "within 60 chars of GitHub" check. The
+        'verified live' search below now uses a negative lookbehind so it
+        can only match a BARE 'verified live', never the tail of 'not
+        verified live'.
+      - F3: the old assertions only checked token order/proximity, never
+        the actual claimed BEHAVIOUR -- a docstring saying "not_labels with
+        an unknown label raises an error" (instead of "excludes nothing")
+        would have passed every assertion. Now the not_labels clause must
+        state the excludes-nothing/unfiltered behaviour and must NOT claim
+        the call raises/errors; the labels clause must state its
+        matches-nothing/empty-result claim explicitly."""
     doc = _ticket_tools["list_tickets"].__doc__ or ""
     section = _unknown_labels_section(doc)
 
@@ -358,9 +478,13 @@ def test_list_tickets_documents_unknown_labels() -> None:
             f"{token} missing from the not_labels clause:\n{not_labels_clause}"
         )
     gh_idx = not_labels_clause.index("GitHub")
-    verified_match = re.search(r"verified live", not_labels_clause)
+    # F5 fix: negative lookbehind so this can only match a BARE "verified
+    # live", never the tail of "not verified live" (which the old bare
+    # `r"verified live"` pattern would happily match).
+    verified_match = re.search(r"(?<!not )verified live", not_labels_clause)
     assert verified_match is not None, (
-        f"expected 'verified live' in the not_labels clause:\n{not_labels_clause}"
+        f"expected a bare 'verified live' (distinct from 'not verified "
+        f"live') in the not_labels clause:\n{not_labels_clause}"
     )
     assert abs(verified_match.start() - gh_idx) <= 60, (
         f"'verified live' must be tied to GitHub (within 60 chars) in the "
@@ -382,12 +506,33 @@ def test_list_tickets_documents_unknown_labels() -> None:
         f"qualifies:\n{not_labels_clause}"
     )
 
-    # -- labels clause: inferred/not verified live on all three providers --
+    # F3 fix: tie the actual claimed BEHAVIOUR (not just the verification
+    # marker) to the not_labels clause -- a clause saying "raises an error"
+    # instead of "excludes nothing" must not pass.
+    assert "excludes nothing" in not_labels_clause or "unfiltered" in not_labels_clause, (
+        f"not_labels clause must state the behavioural claim itself -- an "
+        f"unknown label excludes nothing / leaves the list unfiltered -- "
+        f"not just mark providers verified/not-verified without saying "
+        f"what the actual result is:\n{not_labels_clause}"
+    )
+    assert not re.search(r"\b(raises?|error)\b", not_labels_clause, re.IGNORECASE), (
+        f"not_labels clause must not claim an unknown label raises/errors "
+        f"-- the documented behaviour is silent no-op filtering:"
+        f"\n{not_labels_clause}"
+    )
+
+    # -- labels clause: inferred/not verified live on all three providers,
+    # AND the actual matches-nothing/empty-result claim (F3) --
     assert "not verified" in labels_clause or "inferred" in labels_clause, (
         f"labels clause must mark the unknown-label-matches-nothing result "
         f"as inferred/not verified live on all three providers (labels-side "
         f"behaviour was never verified live even on GitHub, per the plan's "
         f"#363 Approach):\n{labels_clause}"
+    )
+    assert "matches no ticket" in labels_clause or "empty" in labels_clause, (
+        f"labels clause must state the actual behavioural claim -- an "
+        f"unknown label matches no ticket / returns an empty result -- not "
+        f"just the inferred/not-verified marker on its own:\n{labels_clause}"
     )
 
 
@@ -427,9 +572,15 @@ def test_github_not_labels_sends_dash_label_qualifier(
     monkeypatch.setattr(github_provider, "_client", fake_client)
     project = ProjectConfig(id="acme", provider="github", path="acme/backend")
 
-    tickets, _has_more = GitHubProvider().list_tickets(project, "tok", _ticket_filters_any())
+    _tickets, _has_more = GitHubProvider().list_tickets(project, "tok", _ticket_filters_any())
 
-    assert tickets == []
+    # F7 fix: the real evidence is what was SENT to the provider, not the
+    # mocked-empty response echoed back -- a provider that short-circuits
+    # without ever calling out would trivially satisfy a bare `== []` check.
+    assert "request" in captured, (
+        "list_tickets must actually issue the /search/issues request "
+        "carrying the unknown label, not short-circuit before sending it"
+    )
     query = captured["request"].url.params["q"]
     assert "-label:no-such-label" in query, query
 
@@ -459,9 +610,13 @@ def test_gitlab_not_labels_sends_not_labels_param(
     monkeypatch.setattr(gitlab_provider, "_client", fake_client)
     project = ProjectConfig(id="acme", provider="gitlab", path="group/proj")
 
-    tickets, _has_more = GitLabProvider().list_tickets(project, "tok", _ticket_filters_any())
+    _tickets, _has_more = GitLabProvider().list_tickets(project, "tok", _ticket_filters_any())
 
-    assert tickets == []
+    # F7 fix: assert on what was SENT, not the mocked-empty response.
+    assert "request" in captured, (
+        "list_tickets must actually issue the /issues request carrying the "
+        "unknown label, not short-circuit before sending it"
+    )
     assert captured["request"].url.params["not[labels]"] == "no-such-label"
 
 
@@ -492,9 +647,15 @@ def test_azure_not_labels_sends_not_contains_wiql_clause(
     monkeypatch.setattr(azuredevops_provider, "_client", fake_client)
     project = ProjectConfig(id="acme", provider="azuredevops", path="org/project/repo")
 
-    tickets, has_more = AzureDevOpsProvider().list_tickets(project, "tok", _ticket_filters_any())
+    _tickets, _has_more = AzureDevOpsProvider().list_tickets(
+        project, "tok", _ticket_filters_any(),
+    )
 
-    assert tickets == []
-    assert has_more is False
+    # F7 fix: assert on what was SENT (the WIQL body), not the mocked-empty
+    # response.
+    assert "body" in captured, (
+        "list_tickets must actually issue the WIQL POST carrying the "
+        "unknown label, not short-circuit before sending it"
+    )
     wiql = captured["body"]["query"]
     assert "[System.Tags] NOT CONTAINS 'no-such-label'" in wiql, wiql

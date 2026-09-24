@@ -71,7 +71,14 @@ def _entry(name: str) -> str:
 
 
 def _tag_from_url(entry: str) -> str:
-    return entry.rsplit("@", 1)[-1].strip()
+    # Test-critic round-1 F4: pull the tag from the PARSED PEP 508 direct-
+    # reference URL (`Requirement(entry).url`), not from a raw split of the
+    # whole dependency-line text -- this survives reformatting of the
+    # `name @ url` entry itself (extra whitespace, a future extras marker,
+    # etc.) that a blind `entry.rsplit("@", 1)` would be sensitive to.
+    url = Requirement(entry).url or ""
+    assert url, f"{entry!r} has no direct-reference URL to pull a tag from"
+    return url.rsplit("@", 1)[-1].strip()
 
 
 def _declared_tag(name: str) -> str:

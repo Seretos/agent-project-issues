@@ -591,14 +591,17 @@ def register(mcp: FastMCP) -> None:
         without loading or scoring any projects.
 
         **Query behavior:**
-          - Empty or whitespace-only query returns **all** projects
-            (alphabetical by id), each with `score: 0` and
-            `match_confidence: null`. Use this to enumerate without a
-            separate `list_projects` call — though for a plain unranked
-            dump of every project, `list_projects` (non-paginated, no
-            `limit`) is the simpler choice. Reach for `search_projects`
-            when you want relevance ranking or a bounded `limit` over a
-            large set.
+          - Empty or whitespace-only query enumerates projects (alphabetical
+            by id), each with `score: 0` and `match_confidence: null`, but
+            this enumeration is still capped by `limit` just like any other
+            query (default 10) — it is not an unranked dump of every
+            project. With more projects than `limit`, you get the first
+            `limit` alphabetically, plus `truncated: true`, `total` (the
+            real project count), and a `hint` pointing at `list_projects`.
+            Pass a larger `limit`, or use `list_projects` (non-paginated, no
+            `limit`) to see every project in one call. Reach for
+            `search_projects` when you want relevance ranking or a bounded
+            `limit` over a large set.
           - Non-empty query → fuzzy match by id / description / path,
             sorted by relevance descending.
 

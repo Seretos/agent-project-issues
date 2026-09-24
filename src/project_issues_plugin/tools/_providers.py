@@ -747,16 +747,32 @@ _AZUREDEVOPS_AUTH_HINT = (
     f"{_AUTH_HINT_DIAGNOSTIC_TAIL}"
 )
 
+# #384: a provider 5xx (500-599) is frequently transient, unlike a 401/403/429,
+# so it gets its own hint independent of the caller-supplied `hint` (which is
+# only ever the provider-specific auth-scope text for 401). Same "one status
+# branch in the one shared helper" placement as the 401 case, so both
+# `_safe`'s three provider branches and `bulk._error_message` get it for free.
+_TRANSIENT_5XX_HINT = (
+    "provider-side server error, often transient; retrying the same call "
+    "may succeed (for a create, first check the item was not already created)"
+)
+
 
 def _with_auth_hint(exc, hint: str) -> str:
-    """Return `str(exc)` unchanged unless `exc.status == 401`, in which case
-    append `hint` after an em-dash separator, exactly once."""
+    """Return `str(exc)` unchanged unless `exc.status` is 401 (append `hint`)
+    or in the 500-599 range (append `_TRANSIENT_5XX_HINT`), joined to the
+    message after an em-dash separator, exactly once."""
     message = str(exc)
-    if getattr(exc, "status", None) != 401:
-        return message
-    if hint in message:
-        return message
-    return f"{message} — {hint}"
+    status = getattr(exc, "status", None)
+    if status == 401:
+        if hint in message:
+            return message
+        return f"{message} — {hint}"
+    if status is not None and 500 <= status <= 599:
+        if _TRANSIENT_5XX_HINT in message:
+            return message
+        return f"{message} — {_TRANSIENT_5XX_HINT}"
+    return message
 
 
 def _safe(call):

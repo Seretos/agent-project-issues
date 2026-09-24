@@ -378,8 +378,65 @@ def test_partial_normalization_claim_holds() -> None:
 # ---------- R3 (Q3): green condition + wait-pipeline pointer ------------------
 
 
+def _assert_green_run_grounding() -> None:
+    """Mapper-grounded facts the R3 green-condition claim rests on (round 6
+    test-critic finding): unlike R2's `test_partial_normalization_claim_holds`,
+    this test previously checked only the served docstring text and never
+    confirmed against the real pinned-lib mappers that a genuinely green run
+    of EACH provider actually maps to `status == "completed"` and
+    `conclusion == "success"`. These assertions close that gap and are
+    expected to PASS today (they test real mapper behaviour, independent of
+    the new docstring); only the served-text assertions below them are
+    expected RED.
+    """
+    github_run = _map_run(
+        {
+            "id": 100, "status": "completed", "conclusion": "success",
+            "head_branch": "main", "head_sha": "deadbeef", "event": "push",
+            "html_url": "https://github.com/acme/backend/actions/runs/100",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T01:00:00Z", "run_attempt": 1,
+        }
+    )
+    assert github_run.status == "completed"
+    assert github_run.conclusion == "success"
+
+    gitlab_run = _map_pipeline_run(
+        {
+            "id": 101, "ref": "main", "sha": "deadbeef", "source": "push",
+            "status": "success",
+            "web_url": "https://gitlab.com/acme/backend/-/pipelines/101",
+            "created_at": "2024-01-01T00:00:00Z",
+            "finished_at": "2024-01-01T01:00:00Z",
+        }
+    )
+    assert gitlab_run.status == "completed"
+    assert gitlab_run.conclusion == "success"
+
+    azure_run = _map_build_run(
+        {
+            "id": 102, "definition": {"name": "CI"},
+            "sourceBranch": "refs/heads/main", "sourceVersion": "deadbeef",
+            "reason": "individualCI", "status": "completed",
+            "result": "succeeded",
+            "queueTime": "2024-01-01T00:00:00Z",
+            "finishTime": "2024-01-01T01:00:00Z",
+        },
+        _azure_project(),
+    )
+    assert azure_run.status == "completed"
+    assert azure_run.conclusion == "success"
+
+
 @pytest.mark.parametrize("tool_name", TOOL_NAMES)
 def test_green_condition_served(tool_name: str) -> None:
+    # Round 6 (test-critic finding): ground the claim against the real
+    # per-provider mappers BEFORE checking the served text, the same way R2
+    # is already grounded. A wrong `wait-pipeline` predicate paired with a
+    # plausible-sounding sentence can no longer coincidentally pass this
+    # test, since these mapper assertions independently need to hold too.
+    _assert_green_run_grounding()
+
     # Rounds 1-3's regex/proximity/negation-window heuristics were each
     # beaten by a more elaborate adversarial docstring that passed the
     # checks while still denying the green condition or dropping the

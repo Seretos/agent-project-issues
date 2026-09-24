@@ -90,7 +90,8 @@ miss or get wrong.
   parameters and response shapes are documented in the tool schemas — don't
   ask the user for information the schema marks optional. This skill instead
   carries the non-obvious operational facts and cross-tool sequencing schemas
-  alone don't convey: the pipeline drill-down chain, label rename semantics,
+  alone don't convey: the pipeline drill-down chain, what green means for
+  a commit, label rename semantics,
   relation direction, how each provider closes a ticket on PR merge, how
   to classify why a PR merge is blocked, and board write keys.
 - **Write ops return a light response by default.** `create_ticket`,
@@ -394,6 +395,29 @@ GitLab has no structured CI annotations — `annotations` on a GitLab
 failing job is always empty. `log_excerpt` is the only failure context
 available there; don't wait for annotations that will never appear.
 
+### Reading a run's `status` and `conclusion`
+
+A commit is CI-green when every run for that commit has status
+"completed" and conclusion "success". This condition is the same on
+GitHub, GitLab and Azure DevOps. A commit with a run still in progress,
+or with any run whose conclusion is anything other than "success", is
+not green, even if no run failed.
+
+The run vocabulary is only partly normalized. The status "completed"
+and the conclusion "success" are shared by all three providers. Every
+other conclusion keeps its provider's own spelling (for example, GitLab
+reports "canceled" with one "l"), so never test one provider's runs
+against another provider's conclusion strings.
+
+The complete per-provider list of `status` and `conclusion` values is
+the run-vocabulary table in the `list_pipeline_runs` and
+`get_pipeline_run` tool descriptions. This section only summarises it;
+if the two ever differ, the tool descriptions are authoritative.
+
+To wait for a verdict, use `wait-pipeline` (see "Waiting for CI"
+below): it checks exactly this condition, and exit 0 means the commit is
+green. Do not re-implement the check from `list_pipeline_runs` output.
+
 `list_pipeline_runs` also accepts `workflow` / `event` / `since`
 filters that combine with any addressing argument — they are filters,
 not a sixth addressing mode. `workflow` matches by name (a bare name
@@ -446,12 +470,15 @@ It prints one JSON object on stdout; diagnostics go to stderr.
 
 Exit codes, one per line:
 
-- 0 - green: every run succeeded.
+- 0 - green: the commit meets the green condition in "Reading a run's
+  `status` and `conclusion`".
 - 1 - at least one run failed (drill down with `get_pipeline_run`).
 - 2 - timeout: runs were still pending when `--timeout` elapsed.
 - 3 - no run exists for the commit.
 - 4 - config, provider or usage error (message on stderr, empty stdout).
-- 5 - no verdict: runs ended cancelled, timed_out or skipped.
+- 5 - no verdict: runs ended cancelled, timed_out or skipped (GitHub
+  spellings; the full no-verdict set per provider is in the
+  run-vocabulary table).
 
 Where the binary lives: it ships in the installed plugin directory as
 `bin/project-issues` (a Linux binary) next to `bin/project-issues.exe`
@@ -537,6 +564,9 @@ will resolve itself.
 - Constructing or guessing a `job_id` instead of reading it from a
   failing job's entry in `get_pipeline_run`'s failure block.
 - Passing `run_id` as a bare integer instead of a quoted string.
+- Comparing one provider's conclusion strings against another
+  provider's runs, or calling a commit green because no run failed —
+  see "Reading a run's `status` and `conclusion`".
 - Treating GitHub/GitLab's empty `list_custom_fields` result as an
   error or a reason to retry — it's a stable fact about those
   providers.

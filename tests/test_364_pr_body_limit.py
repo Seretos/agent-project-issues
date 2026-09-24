@@ -15,22 +15,23 @@ an opaque provider error.
   Both flavours fitting or both being over decide the outcome without a
   read; only when the flavours straddle the boundary does the helper
   call `get_pr` to learn which one applies.
-- R3: `create_pr` and `update_pr`'s docstrings state each verified
-  provider's limit and say every unverified provider is not validated.
-  R3's test (round 4) trusts no intermediary at all — not even the
-  `_PR_BODY_MAX_CHARS` runtime constant, which could be defined and never
-  read while `65536` is hard-coded elsewhere in the helper. Instead it
-  extracts the GitHub limit number straight out of the docstring PROSE
-  with a regex, then drives that EXTRACTED number (never a hard-coded
-  `65536` literal, never an imported constant) through the real tool
-  layer exactly as R1/R2 do: a body at the extracted length goes through
-  unchanged, one character over is refused. If the docstring's stated
-  number is wrong, the boundary built from it will observably misbehave
-  either way — too low and the "at the limit" body gets wrongly refused,
-  too high and the "one over" body wrongly goes through. If the constant
-  is defined but never wired into the actual check, the same boundary
-  test fails regardless of what the constant equals. There is no trusted
-  intermediary between documented prose and observed behaviour.
+- R3 (generation 2 replan): `create_pr` and `update_pr`'s docstrings are
+  RENDERED from the same `_PR_BODY_MAX_CHARS` table the enforcement
+  helper reads — via `_render_pr_body_limit_doc()` / a
+  `_with_pr_body_limit_doc` decorator applied at `register()` time —
+  never hand-written prose that could drift from the runtime check.
+  `test_limit_doc_and_enforcement_follow_same_table` proves this by
+  swapping the table for a synthetic one (`{"gitlab": 100}`) via
+  `monkeypatch.setattr` and re-registering the tools on a fresh stub:
+  both docstrings must then show gitlab's swapped limit and say
+  github/azuredevops are "not validated" now that they dropped out of
+  the table, AND the enforcement itself must follow the SAME swapped
+  table (a gitlab body at 100 chars passes, at 101 is refused with
+  nothing sent, and a large github body — now outside the table —
+  passes unenforced). A hard-coded paragraph, or a renderer/helper
+  reading a different table than the one actually swapped in, fails
+  this test either way — there is no trusted intermediary between
+  documented prose, enforcement, and observed behaviour.
 
 Harness mirrors `tests/test_314_write_response_light.py`: a `_StubMCP` +
 monkeypatched `_providers.load_projects` + `_PROVIDERS[...]` substitution,
@@ -40,14 +41,14 @@ Expected RED reason:
 - R1/R2: there is no pre-check yet on the current code, so the fake
   provider is called (and no `{"error": ...}` is returned) where the test
   expects a refusal.
-- R3: the docstrings don't have a "Body size limit" paragraph yet, so
-  `_extract_github_limit` finds no number near "github" and fails with a
-  clear, informative `AssertionError` naming what it looked for and the
-  docstring it searched — not a crash, and not an import error.
+- R3: `_PR_BODY_MAX_CHARS` does not exist anywhere in `_providers.py`
+  yet (no production code for this ticket has landed at all), so
+  `monkeypatch.setattr(providers_mod, "_PR_BODY_MAX_CHARS", {"gitlab":
+  100})` fails immediately with a clear `AttributeError` naming the
+  missing attribute — not a confusing crash further into the test body.
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Callable
 
 import pytest
@@ -192,22 +193,14 @@ def _pulls_tools() -> dict[str, Callable]:
     return stub.tools
 
 
-# Search term each provider key is expected to appear under in prose —
-# `_PROVIDERS`' key is "azuredevops", but the docstrings (like the rest of
-# this file's style, see test_359) write it out as "Azure DevOps".
-_PROVIDER_DOC_TERMS = {"github": "github", "gitlab": "gitlab", "azuredevops": "azure"}
-
-# The single source of truth for "which providers have no verified limit,
-# so the helper is a no-op for them". Used BOTH to parametrize the
-# behavioural no-op tests below (R1's
+# The single source of truth for "which providers have no verified limit
+# in the REAL (unmodified) `_PR_BODY_MAX_CHARS` table, so the helper is a
+# no-op for them". Parametrizes the behavioural no-op tests below (R1's
 # test_create_pr_unverified_provider_limit_is_a_no_op and R2's
-# test_update_pr_unverified_provider_limit_is_a_no_op) AND, in R3, as the
-# expected value the docstring's own "not validated" prose must exactly
-# match — so a docstring that claims the wrong set of unvalidated
-# providers (too many, too few, or wrongly including "github") fails
-# against the very same set that is actually proven unenforced by
-# running real requests through the tool layer, not against a second,
-# independently-typed literal that could silently drift from it.
+# test_update_pr_unverified_provider_limit_is_a_no_op). Not used by R3
+# (generation 2) — R3 swaps the table itself, so which providers count
+# as "unverified" changes with it; see
+# test_limit_doc_and_enforcement_follow_same_table.
 _UNVERIFIED_PROVIDERS = ("gitlab", "azuredevops")
 
 
@@ -509,168 +502,146 @@ def test_update_pr_unverified_provider_limit_is_a_no_op(monkeypatch, provider_na
     assert provider.update_calls == [body]
 
 
-# ---------- R3: docstrings state the limits -------------------------------------
+# ---------- R3: docs and enforcement share one table (generation 2) -------------
 
 
-def _extract_unvalidated_providers(doc: str) -> set[str]:
-    """The SET of provider keys (from `_PROVIDER_DOC_TERMS`'s vocabulary —
-    github/gitlab/azuredevops) that `doc`'s prose states are "not
-    validated", found by checking, independently for EVERY known
-    provider token, whether that token sits within a short span of "not
-    validated" in either order (mirrors `_extract_github_limit`'s
-    either-order search).
+def test_limit_doc_and_enforcement_follow_same_table(monkeypatch):
+    """Driving test for R3 (generation 2 replan): `create_pr` /
+    `update_pr`'s "Body size limit" docstring paragraph is RENDERED from
+    the same `_PR_BODY_MAX_CHARS` table the enforcement helper reads
+    (`_render_pr_body_limit_doc()`, applied at `register()` time via a
+    `_with_pr_body_limit_doc` decorator mirroring `pipelines.py`'s
+    `_with_run_vocabulary`) — never hand-written prose that could drift
+    from the runtime check.
 
-    This does not pre-decide which providers are unvalidated: nothing
-    here hard-codes "gitlab and azure are the answer". A docstring that
-    omits a provider, invents an extra one, or wrongly claims "github"
-    itself is not validated all change the returned set, and the caller
-    compares it against `_UNVERIFIED_PROVIDERS` — the same tuple that
-    parametrizes the behavioural no-op tests — so a docstring claim and
-    the actually-proven-unenforced set can never silently diverge.
+    Proof: swap `_PR_BODY_MAX_CHARS` for a synthetic table
+    (`{"gitlab": 100}`, deliberately NOT the real table) and re-register
+    the tools on a fresh stub so the decorator re-renders against the
+    swapped table. Both the docstrings AND the enforcement must follow
+    that swap together:
+      - both docstrings state gitlab's new 100-char limit and say
+        github/azuredevops are "not validated" now that they dropped out
+        of the table (they were the *enforced* one before the swap);
+      - a gitlab body whose marker-applied length is 101 is refused with
+        nothing sent to the provider;
+      - the same body at exactly 100 chars passes, forwarded unchanged;
+      - a large (200_000-char) github body — no longer in the swapped
+        table — passes completely unenforced.
+    A hard-coded paragraph fails the docstring assertions (it can't know
+    about "gitlab: 100"); a renderer/helper that reads a different table
+    than the one actually swapped in fails the behavioural assertions
+    either way. There is no trusted intermediary between documented
+    prose, enforcement, and observed behaviour.
+
+    RED today: `_PR_BODY_MAX_CHARS` does not exist anywhere in
+    `_providers.py` yet — no production code for ticket #364 has landed
+    in this generation at all — so `monkeypatch.setattr(providers_mod,
+    "_PR_BODY_MAX_CHARS", {"gitlab": 100})` fails immediately with a
+    clear `AttributeError` naming the missing attribute, before any
+    docstring or boundary-body assertion even runs.
     """
-    found: set[str] = set()
-    for provider, term in _PROVIDER_DOC_TERMS.items():
-        pattern = rf"{term}[^.]{{0,200}}not validated|not validated[^.]{{0,200}}{term}"
-        if re.search(pattern, doc, re.I | re.S):
-            found.add(provider)
-    return found
+    monkeypatch.setattr(providers_mod, "_PR_BODY_MAX_CHARS", {"gitlab": 100})
 
-
-def _extract_github_limit(doc: str) -> int:
-    """The integer character-limit number written near "github" in
-    `doc`, however the prose orders the two ("GitHub: 65536 characters"
-    or "65536 characters ... GitHub"). Requires 4+ digits so a small,
-    unrelated number near an incidental "GitHub" mention elsewhere in the
-    docstring (e.g. the existing "...GitHub rejects the create with a
-    422..." sentence) can never be mistaken for the limit — a real
-    character limit is always a large number.
-
-    Fails with a clear, informative `AssertionError` naming what it
-    looked for and the docstring it searched when no such number is
-    present, rather than crashing uninformatively (e.g. `None.group(1)`).
-    This is the point of R3 round 4: the docstring's prose is the ONLY
-    source for this number in this test — never an imported production
-    constant.
-    """
-    m = re.search(r"github[^.]{0,200}?(\d{4,})", doc, re.I | re.S)
-    if m is None:
-        m = re.search(r"(\d{4,})[^.]{0,200}?github", doc, re.I | re.S)
-    assert m is not None, (
-        "expected the docstring to state a numeric character limit "
-        f"(4+ digits) near 'github', found none. Docstring:\n{doc}"
-    )
-    return int(m.group(1))
-
-
-def test_pr_docstrings_state_body_limits(monkeypatch):
-    """Driving test for R3 (round 4): both `create_pr` and `update_pr`'s
-    docstrings state the GitHub limit and say GitLab/Azure DevOps are not
-    validated — and the GitHub limit is proven correct BEHAVIORALLY, not
-    just cross-checked against a constant.
-
-    No production constant is imported anywhere in this test. The GitHub
-    limit is extracted from each docstring's own prose with
-    `_extract_github_limit`, and that EXTRACTED number (never a
-    hard-coded `65536` literal) is then used to build the same kind of
-    boundary bodies R1/R2 build from the literal, driven through the real
-    tool layer + recording fake provider: at the extracted number the
-    write goes through unchanged; at extracted+1 it is refused. This
-    closes the round-3 gap for real — a wrong documented number makes its
-    own boundary test fail (the enforcement won't actually apply where
-    the docstring claims it does), and a `_PR_BODY_MAX_CHARS` that is
-    defined but never wired into the real check fails the same way,
-    regardless of what the constant equals.
-
-    update_pr is covered too (not just create_pr): with no `ai-generated`
-    label on the PR, the "modified" marker flavour governs (see R2 for
-    the full flavour-selection matrix — this test only needs ONE flavour
-    to tie the docstring number to update_pr's call site; the flavour-
-    selection logic itself is R2's job, not this one's).
-
-    RED today: the docstrings have no "Body size limit" paragraph yet, so
-    `_extract_github_limit` raises a clear `AssertionError` before any
-    boundary body is even built — the "no pre-check exists yet" reason,
-    surfaced informatively rather than as a crash.
-    """
+    # Re-register on a fresh stub so `_with_pr_body_limit_doc` re-renders
+    # each tool's docstring against the swapped table.
     tools = _pulls_tools()
-    limits: dict[str, int] = {}
+
     for name in ("create_pr", "update_pr"):
         doc = tools[name].__doc__ or ""
-        limits[name] = _extract_github_limit(doc)
-
-        # Round 5 fix: don't just regex-match a fixed, pre-decided pair
-        # ("gitlab"/"azure" appear near "not validated" somewhere) — that
-        # passes for ANY docstring containing the phrase, whatever the
-        # helper actually does. Instead extract the SET of providers the
-        # docstring's prose claims are unvalidated, and require it to be
-        # EXACTLY `_UNVERIFIED_PROVIDERS` — the same tuple that
-        # parametrizes `test_create_pr_unverified_provider_limit_is_a_no_op`
-        # / `test_update_pr_unverified_provider_limit_is_a_no_op`, which
-        # prove behaviourally (real calls through the tool layer, fake
-        # provider recording what was actually sent) that gitlab/
-        # azuredevops bodies are forwarded unenforced. Equality — not
-        # subset/superset — catches a docstring that omits one of them,
-        # adds an extra provider, or wrongly claims "github" itself is
-        # not validated (which would silently defeat R1/R2's enforcement
-        # claim).
-        unvalidated = _extract_unvalidated_providers(doc)
-        assert unvalidated == set(_UNVERIFIED_PROVIDERS), (
-            f"{name}: docstring claims {sorted(unvalidated)} providers are "
-            f"not validated; expected exactly {sorted(_UNVERIFIED_PROVIDERS)} "
-            "— the same set proven behaviourally unenforced by "
-            "test_create_pr_unverified_provider_limit_is_a_no_op / "
-            f"test_update_pr_unverified_provider_limit_is_a_no_op:\n{doc}"
+        assert "gitlab" in doc.lower() and "100" in doc, (
+            f"{name}: expected the docstring to state gitlab's swapped "
+            f"limit (100 characters) once _PR_BODY_MAX_CHARS is "
+            f"{{'gitlab': 100}}:\n{doc}"
+        )
+        assert (
+            "github" in doc.lower() and "not validated" in doc.lower()
+        ), (
+            f"{name}: expected the docstring to say github is not "
+            f"validated now that it dropped out of the swapped table:\n{doc}"
+        )
+        assert (
+            "azure" in doc.lower()
+            and doc.lower().count("not validated") >= 2
+        ), (
+            f"{name}: expected the docstring to say azuredevops is not "
+            f"validated too (two 'not validated' providers: github and "
+            f"azuredevops):\n{doc}"
+        )
+        # Proves `_with_pr_body_limit_doc` is applied to BOTH tools, and
+        # that it appends the renderer's own live output verbatim rather
+        # than a separately hand-typed paragraph that merely happens to
+        # look similar.
+        assert providers_mod._render_pr_body_limit_doc() in doc, (
+            f"{name}: docstring does not contain "
+            "_render_pr_body_limit_doc()'s current output verbatim — a "
+            f"hand-written paragraph would silently drift from the "
+            f"table:\n{doc}"
         )
 
-    assert limits["create_pr"] == limits["update_pr"], (
-        "create_pr and update_pr docstrings disagree on the github limit: "
-        f"{limits}"
-    )
-    github_limit = limits["create_pr"]
+    # ---- enforcement follows the SAME swapped table --------------------
 
-    # ---- create_pr: boundary built from the EXTRACTED number alone ----
-    cp_project = _project("github")
-    cp_provider = _RecordingProvider()
-    cp_tools = _make_tools(monkeypatch, cp_project, cp_provider)
+    gitlab_project = _project("gitlab")
+    gitlab_provider = _RecordingProvider()
+    gitlab_tools = _make_tools(monkeypatch, gitlab_project, gitlab_provider)
 
-    at_limit = _body_of_flavour_length(github_limit, will_be_ai_generated=True)
-    out = cp_tools["create_pr"](
+    at_limit = _body_of_flavour_length(100, will_be_ai_generated=True)
+    out = gitlab_tools["create_pr"](
         project_id="acme", title="t", body=at_limit, head="feature/x", base="main",
     )
     assert "error" not in out, (
-        f"docstring says {github_limit} is within the github limit, but "
-        f"create_pr refused a body of exactly that (extracted) length: {out}"
+        f"swapped table says gitlab's limit is 100, but a body of "
+        f"exactly that length was refused: {out}"
     )
-    assert cp_provider.create_calls == [at_limit]
+    assert gitlab_provider.create_calls == [at_limit]
 
-    over_limit = _body_of_flavour_length(github_limit + 1, will_be_ai_generated=True)
-    out = cp_tools["create_pr"](
+    over_limit = _body_of_flavour_length(101, will_be_ai_generated=True)
+    out = gitlab_tools["create_pr"](
         project_id="acme", title="t", body=over_limit, head="feature/x", base="main",
     )
     assert "error" in out, (
-        f"docstring says {github_limit} is the github limit, but create_pr "
-        f"accepted a body one character over that (extracted) length: {out}"
+        f"swapped table says gitlab's limit is 100, but a 101-char body "
+        f"was accepted: {out}"
     )
-    assert cp_provider.create_calls == [at_limit]  # no second entry appended
+    assert "gitlab" in out["error"]
+    assert "100" in out["error"]
+    assert gitlab_provider.create_calls == [at_limit]  # no second entry appended
 
-    # ---- update_pr: the applied-flavour case, no ai-generated label so
-    # the "modified" flavour governs ----
-    up_project = _project("github")
-    up_provider = _RecordingProvider(labels=[])
-    up_tools = _make_tools(monkeypatch, up_project, up_provider)
+    # A provider that dropped OUT of the swapped table (github) is a
+    # complete no-op, even for a body far larger than the old real limit.
+    github_project = _project("github")
+    github_provider = _RecordingProvider()
+    github_tools = _make_tools(monkeypatch, github_project, github_provider)
 
-    at_limit2 = _body_of_flavour_length(github_limit, will_be_ai_generated=False)
-    out = up_tools["update_pr"](project_id="acme", pr_id="7", body=at_limit2)
+    huge_body = "x" * 200_000
+    out = github_tools["create_pr"](
+        project_id="acme", title="t", body=huge_body, head="feature/x", base="main",
+    )
     assert "error" not in out, (
-        f"docstring says {github_limit} is within the github limit, but "
-        f"update_pr refused a body of exactly that (extracted) length: {out}"
+        f"github dropped out of the swapped table ({{'gitlab': 100}}), "
+        f"so it must be unenforced, but the call was refused: {out}"
     )
-    assert up_provider.update_calls == [at_limit2]
+    assert github_provider.create_calls == [huge_body]
 
-    over_limit2 = _body_of_flavour_length(github_limit + 1, will_be_ai_generated=False)
-    out = up_tools["update_pr"](project_id="acme", pr_id="7", body=over_limit2)
-    assert "error" in out, (
-        f"docstring says {github_limit} is the github limit, but update_pr "
-        f"accepted a body one character over that (extracted) length: {out}"
-    )
-    assert up_provider.update_calls == [at_limit2]  # no second entry appended
+
+def test_pr_docstrings_contain_rendered_limit_doc_with_real_table():
+    """Additional coverage for R3: with the REAL (unmodified)
+    `_PR_BODY_MAX_CHARS` table — not the synthetic swap the driving test
+    above uses — both `create_pr` and `update_pr`'s docstrings still
+    contain `_render_pr_body_limit_doc()`'s live output verbatim. This is
+    the plan's edge case proving the decorator is wired to both tools
+    under normal, non-test conditions; the swapped-table driving test
+    above already proves the NUMBERS themselves track the table (R1
+    proves the real 65536 number is correct).
+
+    RED today: `_render_pr_body_limit_doc` does not exist in
+    `_providers.py` yet, so this fails with a clear `AttributeError`
+    before any docstring is even inspected.
+    """
+    tools = _pulls_tools()
+    rendered = providers_mod._render_pr_body_limit_doc()
+    for name in ("create_pr", "update_pr"):
+        doc = tools[name].__doc__ or ""
+        assert rendered in doc, (
+            f"{name}: docstring does not contain the real table's "
+            f"rendered 'Body size limit' paragraph verbatim:\n{doc}"
+        )

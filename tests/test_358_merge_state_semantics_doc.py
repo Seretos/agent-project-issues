@@ -151,18 +151,104 @@ EXPECTED_MEANINGS = (
 
 # ---------- R1: table exists and covers the neutral meanings -----------------
 
+# Per-row expected content, grounded in the plan's literal table — so a
+# table with the right nine labels but a wrong, blank, or garbage
+# provider cell fails, not just a table missing a label (test-critic
+# F1: a bare label-presence check "would pass even with wrong or empty
+# provider cells").
+EXPECTED_GITHUB_CELL_TOKENS: dict[str, frozenset[str]] = {
+    "mergeable": frozenset({"clean"}),
+    "not computed yet": frozenset({"unknown"}),
+    "conflict": frozenset({"dirty"}),
+    "behind": frozenset({"behind"}),
+    "gate open: CI running/failing": frozenset({"blocked", "unstable"}),
+    "gate open: review missing": frozenset({"blocked"}),
+    "gate open: draft": frozenset({"draft"}),
+    "gate open: other": frozenset({"has_hooks"}),
+    "not open": frozenset(),
+}
+
+EXPECTED_GITLAB_CELL_TOKENS: dict[str, frozenset[str]] = {
+    "mergeable": frozenset({"mergeable"}),
+    "not computed yet": frozenset({"unchecked", "checking", "preparing"}),
+    "conflict": frozenset({"conflict"}),
+    "behind": frozenset({"need_rebase"}),
+    "gate open: CI running/failing": frozenset({"ci_must_pass", "ci_still_running"}),
+    "gate open: review missing": frozenset({"not_approved", "discussions_not_resolved"}),
+    "gate open: draft": frozenset({"draft_status"}),
+    "gate open: other": frozenset({
+        "blocked_status", "broken_status", "commits_status",
+        "jira_association_missing", "not_mergeable",
+    }),
+    "not open": frozenset({"not_open"}),
+}
+
+# Azure's cell is not always backticked — "(merge succeeds)", "not
+# verified", "already merged" and "—" are prose notes, not literal
+# `merge_pr` error fragments (only 5 of the 9 rows carry a real
+# backticked fragment). Compared as plain text with backticks stripped.
+EXPECTED_AZURE_CELL_TEXT: dict[str, str] = {
+    "mergeable": "(merge succeeds)",
+    "not computed yet": "merge in progress",
+    "conflict": "merge has conflicts",
+    "behind": "—",
+    "gate open: CI running/failing": "merge rejected by branch policy",
+    "gate open: review missing": "merge rejected by branch policy",
+    "gate open: draft": "not verified",
+    "gate open: other": "merge failed",
+    "not open": "already merged",
+}
+
+
+def _azure_cell_text(row: str, col: int) -> str:
+    """Return a table row's Azure cell as plain text, backticks and
+    surrounding whitespace stripped — works for both backticked literal
+    fragments (e.g. "`merge failed`") and prose cells (e.g.
+    "(merge succeeds)")."""
+    return _row_cells(row)[col].strip().strip("`").strip()
+
 
 def test_get_pr_has_merge_state_table() -> None:
     """Driving test for R1: `get_pr`'s description carries the
-    provider-neutral merge-state table with all nine labelled rows."""
+    provider-neutral merge-state table with all nine labelled rows, AND
+    each row's GitHub/GitLab/Azure cells hold the documented values —
+    not merely the right label over an empty or wrong cell."""
     description = _served_descriptions()["get_pr"]
-    _header_row(description)
+    header = _header_row(description)
+    github_col = _column_index(header, "github")
+    gitlab_col = _column_index(header, "gitlab")
+    azure_col = _column_index(header, "azure")
     rows = _meaning_rows(description)
+
     missing = [m for m in EXPECTED_MEANINGS if m not in rows]
     assert not missing, (
         f"merge-state table is missing meaning row(s) {missing} in "
         f"get_pr's description:\n{description}"
     )
+
+    for meaning in EXPECTED_MEANINGS:
+        row = rows[meaning]
+
+        github_tokens = _cell_tokens(row, github_col)
+        assert github_tokens == EXPECTED_GITHUB_CELL_TOKENS[meaning], (
+            f"row {meaning!r}: GitHub cell tokens {github_tokens} != "
+            f"expected {EXPECTED_GITHUB_CELL_TOKENS[meaning]} in get_pr's "
+            f"description:\n{description}"
+        )
+
+        gitlab_tokens = _cell_tokens(row, gitlab_col)
+        assert gitlab_tokens == EXPECTED_GITLAB_CELL_TOKENS[meaning], (
+            f"row {meaning!r}: GitLab cell tokens {gitlab_tokens} != "
+            f"expected {EXPECTED_GITLAB_CELL_TOKENS[meaning]} in get_pr's "
+            f"description:\n{description}"
+        )
+
+        azure_text = _azure_cell_text(row, azure_col)
+        assert azure_text == EXPECTED_AZURE_CELL_TEXT[meaning], (
+            f"row {meaning!r}: Azure cell text {azure_text!r} != expected "
+            f"{EXPECTED_AZURE_CELL_TEXT[meaning]!r} in get_pr's "
+            f"description:\n{description}"
+        )
 
 
 # ---------- R2: GitHub row placement + GitLab column grounding ---------------
@@ -236,13 +322,55 @@ def test_github_gate_open_values_never_in_mergeable_row() -> None:
         )
 
 
+# The ticket's reference classification (plan lines 20-30) for every
+# GitLab `detailed_merge_status` token — used to check row *placement*
+# directly, independent of `gitlab._map_mergeable` (test-critic F4:
+# `_map_mergeable` returns `None` for every non-`mergeable` value, so it
+# cannot by itself tell `conflict` in the conflict row apart from
+# `conflict` misplaced in the `behind` row — it only grounds the
+# mergeable/not-mergeable boundary, checked separately below).
+GITLAB_EXPECTED_ROWS: dict[str, str] = {
+    "mergeable": "mergeable",
+    "unchecked": "not computed yet",
+    "checking": "not computed yet",
+    "preparing": "not computed yet",
+    "conflict": "conflict",
+    "need_rebase": "behind",
+    "ci_must_pass": "gate open: CI running/failing",
+    "ci_still_running": "gate open: CI running/failing",
+    "not_approved": "gate open: review missing",
+    "discussions_not_resolved": "gate open: review missing",
+    "draft_status": "gate open: draft",
+    "blocked_status": "gate open: other",
+    "broken_status": "gate open: other",
+    "commits_status": "gate open: other",
+    "jira_association_missing": "gate open: other",
+    "not_mergeable": "gate open: other",
+    "not_open": "not open",
+}
+
+
+def _gitlab_value_row(rows: dict[str, str], col: int, token: str) -> str | None:
+    """Return the single Meaning-row label whose GitLab column contains
+    `token`, or None if it appears in no row."""
+    for meaning, row in rows.items():
+        if token in _cell_tokens(row, col):
+            return meaning
+    return None
+
+
 def test_gitlab_column_partitions_enum_and_matches_mapper() -> None:
     """Driving test for R2: the GitLab column is an exact partition of
     the `detailed_merge_status` enum sentence (which must include
-    `not_approved`), and the real `gitlab._map_mergeable` returns `True`
-    for the `mergeable` row's tokens, `None` for every other documented
-    token — backing note (b) ("GitLab `mergeable` is `null` for every
-    value except `mergeable`") against the real mapper, not an assumption.
+    `not_approved` — test-critic F5), each token sits in the row the
+    ticket's reference table names for it (test-critic F4, e.g.
+    `conflict` must sit in the `conflict` row, never in `behind`), and
+    the real `gitlab._map_mergeable` returns `True` for the `mergeable`
+    row's tokens, `None` for every other documented token — backing
+    note (b) ("GitLab `mergeable` is `null` for every value except
+    `mergeable`") against the real mapper. `_map_mergeable` only grounds
+    that mergeable/not-mergeable boundary; the reference-table check
+    above is what grounds placement among the eight non-mergeable rows.
     """
     description = _served_descriptions()["get_pr"]
     header = _header_row(description)
@@ -250,6 +378,10 @@ def test_gitlab_column_partitions_enum_and_matches_mapper() -> None:
     rows = _meaning_rows(description)
 
     enum_tokens = _gitlab_enum_tokens(description)
+    assert "not_approved" in enum_tokens, (
+        "GitLab `detailed_merge_status` enum sentence is missing "
+        f"'not_approved' (the ticket names it as missing today):\n{description}"
+    )
 
     seen: dict[str, str] = {}
     table_tokens: set[str] = set()
@@ -268,6 +400,14 @@ def test_gitlab_column_partitions_enum_and_matches_mapper() -> None:
         f"GitLab column tokens {table_tokens} do not match the enum "
         f"sentence tokens {enum_tokens} parsed from the same description"
     )
+
+    for token, expected_meaning in GITLAB_EXPECTED_ROWS.items():
+        actual_meaning = _gitlab_value_row(rows, col, token)
+        assert actual_meaning == expected_meaning, (
+            f"GitLab value {token!r} sits in row {actual_meaning!r}, "
+            f"expected {expected_meaning!r} per the ticket's reference "
+            f"table, in get_pr's description:\n{description}"
+        )
 
     mergeable_row = rows.get("mergeable")
     assert mergeable_row is not None, "no 'mergeable' row in get_pr's description"
@@ -375,15 +515,35 @@ def test_azure_error_text_matches_table(
 ) -> None:
     """Driving test for R3: drive the real pinned-lib
     `AzureDevOpsProvider.merge_pr` per outcome; the raised error's text
-    must contain a backticked fragment from the documented row's Azure
-    cell — grounded against real provider behaviour, never a hand-copied
-    string. `rejectedByPolicy` must satisfy BOTH gate-open rows, since
-    Azure's single error text can't distinguish a CI block from a review
-    block (see plan note (c))."""
+    must contain the documented row's Azure fragment, grounded against
+    real provider behaviour, never a hand-copied string. Also checks
+    every OTHER row's fragment is absent from that same error text
+    (test-critic F3: a substring-only check can't tell a specific
+    fragment from a generic one that happens to be a substring of every
+    error — e.g. every cell holding `merge`, or every cell listing all
+    five fragments, would satisfy a same-row-only check). `rejectedByPolicy`
+    must satisfy BOTH gate-open rows, since Azure's single error text
+    can't distinguish a CI block from a review block (see plan note (c));
+    those two rows are expected to share one fragment, so the
+    cross-row check exempts fragments shared with an expected row."""
     description = _served_descriptions()["get_pr"]
     header = _header_row(description)
     col = _column_index(header, "azure")
     rows = _meaning_rows(description)
+
+    # `_azure_cell_text` returns None-worthy "—" placeholders (rows with
+    # no real classifier fragment, e.g. `behind`) as themselves; filter
+    # those out below since "—" also occurs as a prose em-dash separator
+    # inside several real error messages (e.g. "merge has conflicts —
+    # resolve before retrying") and must never be treated as a fragment.
+    fragment_by_meaning: dict[str, str | None] = {
+        meaning: (
+            None
+            if (text := _azure_cell_text(row, col)) in ("", "—")
+            else text
+        )
+        for meaning, row in rows.items()
+    }
 
     provider = _azure_provider(monkeypatch, get_payload)
     project = _azure_project()
@@ -393,38 +553,71 @@ def test_azure_error_text_matches_table(
     error_text = str(excinfo.value)
 
     for meaning in expected_meanings:
-        row = rows.get(meaning)
-        assert row is not None, (
+        assert meaning in rows, (
             f"{case_id}: expected meaning row {meaning!r} missing from "
             f"get_pr's description:\n{description}"
         )
-        fragments = _cell_tokens(row, col)
-        assert fragments, f"{case_id}: no backticked Azure fragment for row {meaning!r}"
-        assert any(fragment in error_text for fragment in fragments), (
-            f"{case_id}: error text {error_text!r} does not contain any "
-            f"documented Azure fragment {fragments} for meaning {meaning!r}"
+        fragment = fragment_by_meaning.get(meaning)
+        assert fragment, (
+            f"{case_id}: no real Azure classifier fragment documented for "
+            f"row {meaning!r} in get_pr's description:\n{description}"
+        )
+        assert fragment in error_text, (
+            f"{case_id}: error text {error_text!r} does not contain the "
+            f"documented Azure fragment {fragment!r} for meaning {meaning!r}"
+        )
+
+    for other_meaning, other_fragment in fragment_by_meaning.items():
+        if other_meaning in expected_meanings or not other_fragment:
+            continue
+        assert other_fragment not in error_text, (
+            f"{case_id}: error text {error_text!r} unexpectedly also "
+            f"contains row {other_meaning!r}'s Azure fragment "
+            f"{other_fragment!r} — a documented fragment must uniquely "
+            f"identify its own row(s), not merely appear somewhere in "
+            f"the text (e.g. a generic fragment shared by every row)"
         )
 
 
-def test_merge_pr_points_to_table() -> None:
-    """Additional coverage for R3: `merge_pr`'s description names
-    `get_pr` (the cross-reference the plan asks for) and lists all four
-    Azure DevOps error-text fragments a caller needs to classify a failed
-    merge without re-deriving them from the lib source."""
-    description = _served_descriptions()["merge_pr"]
-    assert "get_pr" in description, (
-        f"merge_pr's description does not reference get_pr's merge-state "
-        f"table:\n{description}"
+def _cross_reference_paragraph(description: str) -> str:
+    """Return the paragraph in a description that cross-references
+    `get_pr`'s merge-state table — i.e. a paragraph mentioning both
+    `get_pr` and the phrase "merge-state table" together, not merely a
+    paragraph that happens to mention `get_pr` for an unrelated reason
+    (test-critic F2: `merge_pr`'s existing "Returns" paragraph already
+    says "without a follow-up `get_pr`", which a bare
+    'get_pr' in description check would wrongly accept as the
+    cross-reference)."""
+    for paragraph in description.split("\n\n"):
+        if "get_pr" in paragraph and "merge-state table" in paragraph:
+            return paragraph
+    raise AssertionError(
+        "no paragraph cross-references get_pr's merge-state table "
+        f"(a paragraph containing both 'get_pr' and 'merge-state table' "
+        f"is required):\n{description}"
     )
+
+
+def test_merge_pr_points_to_table() -> None:
+    """Additional coverage for R3: `merge_pr`'s description carries one
+    coherent cross-reference sentence/paragraph — naming `get_pr`'s
+    merge-state table specifically, not just the word `get_pr` and the
+    four Azure phrases scattered anywhere in the docstring — and that
+    same paragraph lists all four Azure DevOps error-text fragments a
+    caller needs to classify a failed merge without re-deriving them
+    from the lib source."""
+    description = _served_descriptions()["merge_pr"]
+    paragraph = _cross_reference_paragraph(description)
     for fragment in (
         "merge has conflicts",
         "merge rejected by branch policy",
         "merge failed",
         "merge in progress",
     ):
-        assert fragment in description, (
-            f"merge_pr's description is missing Azure fragment {fragment!r}:"
-            f"\n{description}"
+        assert fragment in paragraph, (
+            f"merge_pr's get_pr/merge-state-table cross-reference "
+            f"paragraph is missing Azure fragment {fragment!r}:"
+            f"\n{paragraph}"
         )
 
 

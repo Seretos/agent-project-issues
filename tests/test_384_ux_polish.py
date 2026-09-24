@@ -285,8 +285,10 @@ def test_499_and_statusless_exception_get_no_hint() -> None:
             return self._message
 
     out_499 = _with_auth_hint(_FakeExcWithStatus(499, "weird status"), "some hint")
-    assert out_499 == "weird status"
-    assert "retry" not in out_499
+    assert out_499 == "weird status", (
+        "expected 499 (just outside 500-599) to get no hint appended at "
+        f"all, i.e. the bare message; got: {out_499!r}"
+    )
 
     out_no_status = _with_auth_hint(RuntimeError("boom"), "some hint")
     assert out_no_status == "boom"
@@ -353,12 +355,71 @@ def test_search_projects_doc_empty_query_mentions_limit() -> None:
 def test_search_projects_doc_no_longer_claims_returns_all_projects() -> None:
     """Additional edge-case coverage: the plan explicitly fixes the
     contradictory 'returns **all** projects' phrasing (it does not, once
-    capped by `limit`). RED today: the bullet contains this exact
-    phrase."""
+    capped by `limit`). RED today: the bullet contains this exact phrase.
+
+    Normalizes markdown emphasis markers and matches a family of synonymous
+    phrasings ('returns/lists/enumerates all/every project(s)') rather than
+    one exact spelling, so dropping just the `**` asterisks or rewording to
+    e.g. 'lists every project' cannot silently pass (test-critic round 2,
+    tautology::F2)."""
     doc = _search_projects_doc()
     bullet = _empty_query_bullet(doc)
+    normalized = re.sub(r"[*`]", "", bullet).lower()
 
-    assert not re.search(r"returns \*\*all\*\* projects", bullet), (
-        f"expected the contradictory 'returns **all** projects' phrasing to "
-        f"be gone; got bullet: {bullet!r}"
+    assert not re.search(r"\b(returns|lists?|enumerates)\s+all\s+projects\b", normalized), (
+        f"expected the contradictory 'returns all projects' phrasing to be "
+        f"gone (even without markdown emphasis); got bullet: {bullet!r}"
+    )
+    assert not re.search(r"\b(returns|lists?|enumerates)\s+every\s+projects?\b", normalized), (
+        f"expected no 'returns/lists every project(s)' synonym for the "
+        f"contradictory claim either; got bullet: {bullet!r}"
+    )
+
+
+def test_search_projects_empty_query_actually_caps_at_default_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behavioural grounding for R3 (test-critic round 2, tautology::F1).
+    Every other R3 test checks literal DOCSTRING TEXT; none of them prove
+    the claim the docstring makes -- that an empty query really is capped
+    at the default `limit` of 10 and reports `truncated: true` -- is
+    actually true at runtime. This test closes that gap the way #366 did
+    for its own docstring-vs-runtime gap (see
+    tests/test_366_tool_doc_gaps.py::
+    test_acceptance_criteria_is_empty_on_github_and_gitlab_providers): it
+    exercises the real `search_projects` tool (not a docstring read) with
+    12 fake projects -- more than the default `limit` -- and an empty
+    query, and asserts the real returned values.
+
+    Per the ticket, the runtime capping/truncation behaviour is already
+    correct today; only the docstring was wrong. So unlike the driving
+    test above, this one is expected to already be GREEN against the
+    unfixed code -- it grounds the docstring-text assertions in runtime
+    truth rather than adding a second RED requirement. See the change
+    report for confirmation this passes pre-fix."""
+    from lib_python_projects import ProjectConfig, ProjectsLoadResult
+
+    projects = [
+        ProjectConfig(id=f"proj{i:02d}", provider="github", path=f"org/proj{i:02d}")
+        for i in range(12)
+    ]
+
+    def fake_load_projects(*_args, **_kwargs):
+        return ProjectsLoadResult(projects=projects, state="ok", search_root="/tmp")
+
+    monkeypatch.setattr(project_tools, "load_projects", fake_load_projects)
+    stub = _StubMCP()
+    project_tools.register(stub)
+
+    result = stub.tools["search_projects"](query="")
+
+    assert "error" not in result, result
+    assert len(result["matches"]) == 10, (
+        f"expected the default limit (10) to cap the empty-query "
+        f"enumeration; got {len(result['matches'])} matches"
+    )
+    assert result["total"] == 12
+    assert result["truncated"] is True
+    assert "list_projects" in (result["hint"] or ""), (
+        f"expected a hint pointing at list_projects; got: {result['hint']!r}"
     )

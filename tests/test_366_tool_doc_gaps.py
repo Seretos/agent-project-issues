@@ -140,26 +140,22 @@ def _ac_paragraph(doc: str) -> str:
     return target
 
 
-def test_get_ticket_ac_paragraph_names_body_fallback() -> None:
-    """Driving test (R1). RED today: the current paragraph
-    (tools/tickets.py:524-529) names Azure DevOps and GitHub/GitLab, but
-    only says acceptance_criteria sits "alongside `body`" -- it never tells
-    an agent to read AC from `body` on GitHub/GitLab instead. GREEN once
-    the paragraph gains that hint (plan #361 Approach).
+def _check_ac_paragraph_documents_body_fallback(paragraph: str) -> None:
+    """Shared checker for R1 (test-critic round-2 F1), extracted from the
+    driving test so the exact same logic can be exercised against a
+    plausible-but-wrong negative case
+    (`test_ac_paragraph_check_rejects_separate_from_body_phrasing`) and not
+    just against the real served paragraph. Raises AssertionError (via
+    plain `assert`) on any violation.
 
-    Tightened per test-critic round-1 F1: the original version only checked
-    that 'Azure DevOps', 'GitHub/GitLab' and 'from `body`' each appeared
-    SOMEWHERE in the paragraph -- two of those three already hold today, and
-    a paragraph reading "never read AC from `body`" (without ever calling
-    Azure DevOps the sole populating provider or GitHub/GitLab structurally
-    empty) would have passed all three. Now each substring must sit in the
-    specific clause it is supposed to qualify: 'only' next to 'Azure DevOps',
-    'empty' next to 'GitHub/GitLab', and the 'from `body`' hint both tied to
-    the GitHub/GitLab mention and NOT negated by a preceding 'never'/'not'/
-    'don't'/'avoid'."""
-    doc = _ticket_tools["get_ticket"].__doc__ or ""
-    paragraph = _ac_paragraph(doc)
-
+    Requires: (a) 'Azure DevOps' tied to 'only' (sole populating provider),
+    (b) 'GitHub/GitLab' tied to 'empty' (structurally empty field), and (c)
+    an AFFIRMATIVE instruction -- carrying a 'read'/'consult'/'see' verb --
+    to read AC from `body` there. Test-critic round-2 F2: (c) must reject
+    phrasing that only notes AC sits apart from `body` ('separate from
+    `body`' / 'distinct from `body`' / 'kept ... from `body`') without ever
+    instructing an agent to read it there -- the literal substring 'from
+    `body`' is necessary but not sufficient."""
     assert "Azure DevOps" in paragraph, (
         f"expected 'Azure DevOps' in the acceptance_criteria paragraph:\n{paragraph}"
     )
@@ -206,6 +202,70 @@ def test_get_ticket_ac_paragraph_names_body_fallback() -> None:
         f"\n{paragraph}"
     )
 
+    # Test-critic round-2 F2 fix: "from `body`" must carry an actual
+    # instruction verb near it, and phrasing that only notes AC's distance
+    # from `body` ("separate"/"distinct"/"kept ... from `body`") must be
+    # rejected even though it contains the literal substring.
+    instruction_window = paragraph[
+        max(0, body_match.start() - 40): body_match.start() + 40
+    ]
+    assert re.search(r"\b(read|consult|see)\b", instruction_window, re.IGNORECASE), (
+        f"the 'from `body`' hint must carry an actual instruction verb "
+        f"('read'/'consult'/'see') near it, not just note AC's relationship "
+        f"to `body`:\n{instruction_window}"
+    )
+    apart_from_body = re.search(
+        r"\b(separate|distinct|apart)\b[^.]{0,30}from `body`"
+        r"|\bkept\b[^.]{0,30}from `body`",
+        paragraph,
+        re.IGNORECASE,
+    )
+    assert apart_from_body is None, (
+        f"'separate from `body`' / 'distinct from `body`' / 'kept ... from "
+        f"`body`' phrasing notes distance, not an instruction to read AC "
+        f"from `body`, and must be rejected:\n{paragraph}"
+    )
+
+
+def test_get_ticket_ac_paragraph_names_body_fallback() -> None:
+    """Driving test (R1). RED today: the current paragraph
+    (tools/tickets.py:524-529) names Azure DevOps and GitHub/GitLab, but
+    only says acceptance_criteria sits "alongside `body`" -- it never tells
+    an agent to read AC from `body` on GitHub/GitLab instead. GREEN once
+    the paragraph gains that hint (plan #361 Approach).
+
+    Tightened per test-critic round-1 F1 and round-2 F1/F2: the checking
+    logic now lives in `_check_ac_paragraph_documents_body_fallback` so it
+    can also be exercised against a plausible-but-wrong negative case
+    (`test_ac_paragraph_check_rejects_separate_from_body_phrasing`), proving
+    it discriminates correct phrasing from wrong phrasing rather than just
+    checking token presence/position."""
+    doc = _ticket_tools["get_ticket"].__doc__ or ""
+    paragraph = _ac_paragraph(doc)
+    _check_ac_paragraph_documents_body_fallback(paragraph)
+
+
+def test_ac_paragraph_check_rejects_separate_from_body_phrasing() -> None:
+    """Negative case for test-critic round-2 F1/F2: proves
+    `_check_ac_paragraph_documents_body_fallback` actually discriminates
+    correct from plausible-wrong phrasing, addressing the round-2 critique's
+    concern that "any docstring containing the checked tokens in the
+    checked positions, whatever it actually tells the reader" would satisfy
+    a token/position-only check. Uses the exact plausible-wrong example
+    quoted in the round-2 critique JSON (tautology::F2's `what` field): a
+    paragraph naming Azure DevOps as sole populator ('only'), GitHub/GitLab
+    as structurally 'empty', and containing the literal substring 'from
+    `body`' -- so it would have satisfied every ROUND-1 assertion -- but
+    which never instructs an agent to read AC from `body`; it only says AC
+    is "kept separate from `body`". The tightened checker must still reject
+    it."""
+    plausible_wrong = (
+        "populated only on Azure DevOps ..., kept separate from `body`; "
+        "structurally empty on GitHub/GitLab"
+    )
+    with pytest.raises(AssertionError):
+        _check_ac_paragraph_documents_body_fallback(plausible_wrong)
+
 
 def test_get_ticket_ac_paragraph_stays_within_284_length_cap() -> None:
     """Additional edge-case coverage (already enforced by
@@ -240,10 +300,12 @@ def _recipe_paragraph(doc: str) -> str:
     return target
 
 
-def test_search_projects_documents_full_recipe() -> None:
-    """Driving test (R2, search_projects half). RED today: none of these
-    substrings exist yet in search_projects's docstring -- there is no
-    "Resolving one project" recipe paragraph at all.
+def _check_recipe_paragraph(paragraph: str) -> None:
+    """Shared checker for R2's search_projects half (test-critic round-2
+    F1), extracted from the driving test so the exact same logic can be
+    exercised against a plausible-but-wrong negative case
+    (`test_recipe_paragraph_check_rejects_untied_exact`). Raises
+    AssertionError on any violation.
 
     Tightened per test-critic round-1 F2/F6: the original version checked
     each substring ('no single-project lookup tool', the exact call text,
@@ -253,13 +315,9 @@ def test_search_projects_documents_full_recipe() -> None:
     to this recipe) and 'fields=\"full\"' (in the pre-existing Token-cheap
     knob bullet), so those two assertions were pre-satisfied and the 'exact'
     check proved nothing about a `path` comparison. Now every assertion is
-    scoped to the single new recipe paragraph (anchored via
-    `_recipe_paragraph`, which itself doesn't exist yet -- RED), the steps
-    must appear in order, and 'exact' must sit within ~40 chars of a `path`
-    mention inside that paragraph specifically."""
-    doc = _project_tools["search_projects"].__doc__ or ""
-    paragraph = _recipe_paragraph(doc)
-
+    scoped to the single new recipe paragraph, the steps must appear in
+    order, and 'exact' must sit within ~40 chars of a `path` mention inside
+    that paragraph specifically."""
     no_lookup_idx = paragraph.index("no single-project lookup tool")
 
     call_idx = paragraph.find('search_projects(query="<owner/repo>", limit=5)')
@@ -304,18 +362,55 @@ def test_search_projects_documents_full_recipe() -> None:
     )
 
 
-def test_list_projects_documents_case_rule_and_cross_reference() -> None:
-    """Driving test (R2, list_projects half). RED today: `list_projects`
-    never says `project_id` is case-sensitive (only `search_projects`'s
-    pre-existing paragraph documents the case-insensitive/-sensitive
-    asymmetry), and never cross-references the single-project resolution
-    recipe. Deliberately does NOT require the full recipe substrings
-    (`limit=5`, exact `path` comparison, "no single-project lookup tool")
-    here -- per the plan's Approach, `list_projects` only cross-references
-    `search_projects`'s recipe rather than duplicating it (misread::F3 /
-    untestable::F1 from the round-1 plan critique)."""
-    doc = _project_tools["list_projects"].__doc__ or ""
+def test_search_projects_documents_full_recipe() -> None:
+    """Driving test (R2, search_projects half). RED today: none of these
+    substrings exist yet in search_projects's docstring -- there is no
+    "Resolving one project" recipe paragraph at all.
 
+    Checking logic lives in `_check_recipe_paragraph` (test-critic round-2
+    F1) so it can also be exercised against a plausible-but-wrong negative
+    case (`test_recipe_paragraph_check_rejects_untied_exact`)."""
+    doc = _project_tools["search_projects"].__doc__ or ""
+    paragraph = _recipe_paragraph(doc)
+    _check_recipe_paragraph(paragraph)
+
+
+def test_recipe_paragraph_check_rejects_untied_exact() -> None:
+    """Negative case for test-critic round-2 F1: proves
+    `_check_recipe_paragraph` discriminates a paragraph that contains every
+    required token, in the required order, from one where "exact" never
+    actually qualifies the `path` comparison -- it qualifies matching the
+    query text instead, with `path` mentioned only in a distant, unrelated
+    aside about display. A naive presence/order-only check would pass this;
+    the proximity check must still reject it."""
+    plausible_wrong = (
+        "there is no single-project lookup tool; call "
+        'search_projects(query="<owner/repo>", limit=5) with fields="full" '
+        "for richer output, then match the query text exactly against what "
+        "you sent -- the fuzzy matcher can otherwise return more than one "
+        "candidate. the returned path field is only shown for display "
+        "purposes, not for comparison; pass that match's id verbatim."
+    )
+    with pytest.raises(AssertionError):
+        _check_recipe_paragraph(plausible_wrong)
+
+
+def _check_case_rule_and_cross_reference(doc: str) -> None:
+    """Shared checker for R2's list_projects half (test-critic round-2 F1),
+    extracted from the driving test so the exact same logic can be
+    exercised against a plausible-but-wrong negative case
+    (`test_case_rule_check_rejects_recipe_pointing_elsewhere`). Raises
+    AssertionError on any violation.
+
+    `project_id` must be documented as case-sensitive (not negated) with
+    'pass it verbatim' nearby, and the docstring must cross-reference the
+    single-project resolution recipe by name (pointing at search_projects,
+    not just any 'resolve a single ...' sentence). Deliberately does NOT
+    require the full recipe substrings (`limit=5`, exact `path` comparison,
+    "no single-project lookup tool") here -- per the plan's Approach,
+    `list_projects` only cross-references `search_projects`'s recipe rather
+    than duplicating it (misread::F3 / untestable::F1 from the round-1 plan
+    critique)."""
     assert "case-sensitive" in doc, (
         f"list_projects docstring must state that `project_id` is "
         f"case-sensitive on every tool taking it:\n{doc}"
@@ -348,6 +443,38 @@ def test_list_projects_documents_case_rule_and_cross_reference() -> None:
     )
 
 
+def test_list_projects_documents_case_rule_and_cross_reference() -> None:
+    """Driving test (R2, list_projects half). RED today: `list_projects`
+    never says `project_id` is case-sensitive (only `search_projects`'s
+    pre-existing paragraph documents the case-insensitive/-sensitive
+    asymmetry), and never cross-references the single-project resolution
+    recipe.
+
+    Checking logic lives in `_check_case_rule_and_cross_reference`
+    (test-critic round-2 F1) so it can also be exercised against a
+    plausible-but-wrong negative case
+    (`test_case_rule_check_rejects_recipe_pointing_elsewhere`)."""
+    doc = _project_tools["list_projects"].__doc__ or ""
+    _check_case_rule_and_cross_reference(doc)
+
+
+def test_case_rule_check_rejects_recipe_pointing_elsewhere() -> None:
+    """Negative case for test-critic round-2 F1: proves
+    `_check_case_rule_and_cross_reference` discriminates a docstring that
+    states the case-sensitivity rule correctly but cross-references the
+    resolution recipe to somewhere OTHER than search_projects -- a plausible
+    documentation mistake (pointing agents at the config file directly,
+    which duplicates rather than reuses the recipe) that contains every
+    required token except the one that matters."""
+    plausible_wrong = (
+        "`project_id` is case-sensitive on every tool that takes it; pass "
+        "it verbatim. To resolve a single project by repo path, open the "
+        "project's configuration file directly and read its `path` field."
+    )
+    with pytest.raises(AssertionError):
+        _check_case_rule_and_cross_reference(plausible_wrong)
+
+
 # ---------- Additional edge-case coverage: the recipe actually disambiguates -
 
 
@@ -369,7 +496,11 @@ def _register_projects(monkeypatch, projects) -> dict[str, Callable]:
 
 
 _PREFIX_COLLIDING_PROJECTS = [
-    _project(id_="acme-app", path="acme/app"),
+    # Test-critic round-2 F3: the exact-match project's id is deliberately
+    # mixed-case so an implementation that lowercases (or uppercases) ids
+    # cannot pass the "pass that match's id verbatim" check below just
+    # because the fixture id happened to already be lowercase.
+    _project(id_="Acme-App", path="acme/app"),
     _project(id_="acme-app-legacy", path="acme/app-legacy"),
 ]
 
@@ -382,7 +513,13 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
     exactly -- proving the recipe's "compare `path` exactly" step actually
     disambiguates. Also checked case-insensitively (`"ACME/App"` still
     matches). May already pass today -- this is existing scoring behaviour,
-    not new production code."""
+    not new production code.
+
+    Test-critic round-2 F3: the exact match's id ("Acme-App") is
+    mixed-case, and the assertions below pin it down exactly -- an
+    implementation that lowercases or uppercases ids would now fail
+    here, whereas the original all-lowercase fixture id could not tell the
+    difference."""
     tools = _register_projects(monkeypatch, _PREFIX_COLLIDING_PROJECTS)
 
     result = tools["search_projects"](query="acme/app", limit=5, fields="full")
@@ -394,7 +531,16 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(exact_matches) == 1, (
         f"expected exactly one exact path match for 'acme/app': {result['matches']}"
     )
-    assert exact_matches[0]["id"] == "acme-app"
+    assert exact_matches[0]["id"] == "Acme-App", (
+        f"expected the exact match's id to preserve its declared mixed-case "
+        f"casing verbatim: {exact_matches[0]}"
+    )
+    assert exact_matches[0]["id"] != "acme-app", (
+        f"the recipe must not lowercase the match's id: {exact_matches[0]}"
+    )
+    assert exact_matches[0]["id"] != "ACME-APP", (
+        f"the recipe must not uppercase the match's id: {exact_matches[0]}"
+    )
 
     result_diff_case = tools["search_projects"](
         query="ACME/App", limit=5, fields="full",
@@ -406,6 +552,10 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(diff_case_exact) == 1, (
         f"case-insensitive query 'ACME/App' should still surface the exact "
         f"'acme/app' path match: {result_diff_case['matches']}"
+    )
+    assert diff_case_exact[0]["id"] == "Acme-App", (
+        f"the exact match's id must still preserve its declared mixed-case "
+        f"casing verbatim under a case-insensitive query: {diff_case_exact[0]}"
     )
 
 
@@ -430,12 +580,12 @@ def _unknown_labels_section(doc: str) -> str:
     return norm[start:end]
 
 
-def test_list_tickets_documents_unknown_labels() -> None:
-    """Driving test (R3). RED today: no 'Unknown labels' section exists at
-    all in list_tickets's docstring. GREEN once the section exists AND ties
-    the verified/not-verified marking to the right providers in the right
-    clause (see the module docstring's untestable::F2 note for why this
-    doesn't just check the four tokens appear somewhere).
+def _check_unknown_labels_section(section: str) -> None:
+    """Shared checker for R3 (test-critic round-2 F1), extracted from the
+    driving test so the exact same logic can be exercised against a
+    plausible-but-wrong negative case
+    (`test_unknown_labels_check_rejects_swapped_verification_marking`).
+    Raises AssertionError on any violation.
 
     Tightened per test-critic round-1 F3/F5:
       - F5: `re.search(r"verified live", ...)` also matches inside "not
@@ -451,9 +601,6 @@ def test_list_tickets_documents_unknown_labels() -> None:
         state the excludes-nothing/unfiltered behaviour and must NOT claim
         the call raises/errors; the labels clause must state its
         matches-nothing/empty-result claim explicitly."""
-    doc = _ticket_tools["list_tickets"].__doc__ or ""
-    section = _unknown_labels_section(doc)
-
     assert "not_labels" in section, (
         f"Unknown labels section must mention not_labels:\n{section}"
     )
@@ -534,6 +681,42 @@ def test_list_tickets_documents_unknown_labels() -> None:
         f"unknown label matches no ticket / returns an empty result -- not "
         f"just the inferred/not-verified marker on its own:\n{labels_clause}"
     )
+
+
+def test_list_tickets_documents_unknown_labels() -> None:
+    """Driving test (R3). RED today: no 'Unknown labels' section exists at
+    all in list_tickets's docstring. GREEN once the section exists AND ties
+    the verified/not-verified marking to the right providers in the right
+    clause (see the module docstring's untestable::F2 note for why this
+    doesn't just check the four tokens appear somewhere).
+
+    Checking logic lives in `_check_unknown_labels_section` (test-critic
+    round-2 F1) so it can also be exercised against a plausible-but-wrong
+    negative case
+    (`test_unknown_labels_check_rejects_swapped_verification_marking`)."""
+    doc = _ticket_tools["list_tickets"].__doc__ or ""
+    section = _unknown_labels_section(doc)
+    _check_unknown_labels_section(section)
+
+
+def test_unknown_labels_check_rejects_swapped_verification_marking() -> None:
+    """Negative case for test-critic round-2 F1: proves
+    `_check_unknown_labels_section` discriminates correct verified/
+    not-verified markings from a SWAPPED marking that contains every
+    required token in a plausible arrangement -- GitHub marked 'not
+    verified live' and GitLab/Azure DevOps marked (bare) 'verified live',
+    the reverse of the true claim (checked live only on GitHub) -- plus the
+    right behavioural claims and a list_labels pointer, so a naive
+    presence-only check would pass it."""
+    plausible_wrong = (
+        "Unknown labels: not_labels=[<unknown>] excludes nothing (the list "
+        "stays unfiltered) on GitHub, not verified live there; on GitLab "
+        "and Azure DevOps this is verified live. labels=[<unknown>] "
+        "matches no ticket -> empty result on all three, inferred, not "
+        "verified live. Check spelling with list_labels(project_id)."
+    )
+    with pytest.raises(AssertionError):
+        _check_unknown_labels_section(plausible_wrong)
 
 
 # ---------- Additional edge-case coverage: the lib's query-construction ------

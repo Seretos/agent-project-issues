@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 
 from lib_python_projects import ProjectConfig, load_projects, resolve_token
+from lib_python_projects import markers as _markers
 from lib_python_projects.providers.azuredevops import (
     AzureDevOpsError,
     AzureDevOpsProvider,
@@ -157,6 +158,128 @@ def _require_pulls_merge(project: ProjectConfig) -> None:
             f"(or {_CONFIG_FILENAME_ALT}). This cannot be worked around "
             "from the tools — report it to the user."
         )
+
+
+# --------- PR body size limit (ticket #364) -----------------------------------
+
+
+# Verified provider limits on a PR/MR body's length, measured AFTER the
+# `#ai-generated`/`#ai-modified` attribution marker is applied. Only a
+# provider present in this table is enforced — GitLab and Azure DevOps have
+# no independently verified limit yet (follow-up in the ticket), so
+# `_require_pr_body_within_limit` is a no-op for them: the provider is
+# called and its own error (if any) is returned unchanged.
+#
+# `_render_pr_body_limit_doc` (below) renders `create_pr`/`update_pr`'s
+# "Body size limit" docstring paragraph from this SAME table, so the docs
+# cannot drift from what this table actually enforces.
+_PR_BODY_MAX_CHARS: dict[str, int] = {
+    "github": 65536,
+}
+
+
+def _require_pr_body_within_limit(
+    project: ProjectConfig,
+    body: str | None,
+    is_ai_generated,
+) -> None:
+    """Refuse (raise `ValueError`, translated to `{"error": ...}` by
+    `_safe`) a PR body whose length — measured AFTER
+    `lib_python_projects.markers.apply_body_marker` applies the
+    `#ai-generated`/`#ai-modified` marker — exceeds `project.provider`'s
+    verified limit in `_PR_BODY_MAX_CHARS`.
+
+    No-ops (returns without raising, no provider call of any kind) when:
+      - `body` is `None` (a title/labels-only `update_pr` call), or
+      - `project.provider` has no verified limit in `_PR_BODY_MAX_CHARS`
+        (currently GitLab, Azure DevOps).
+
+    The marker prefix is measured using THIS project's own
+    `auto_labels`-derived `MarkerSet` (`project.auto_labels.ai_generated`
+    / `.ai_modified`), not the library defaults, so a project with a
+    custom marker name gets a correctly-shifted boundary.
+
+    `is_ai_generated` selects which marker flavour actually applies:
+      - `create_pr` always stamps the body `#ai-generated`, so its call
+        site passes the plain `bool` `True` — no read is ever needed.
+      - `update_pr`'s flavour depends on the PR's CURRENT label state
+        (`#ai-generated` if the PR already carries the
+        `auto_labels.ai_generated` label, `#ai-modified` otherwise),
+        which this helper cannot know without a `provider.get_pr(...)`
+        read. Because a read is not a write, it is safe to perform here,
+        but it is only DONE when actually needed: both marker flavours'
+        lengths are computed up front, and if the limit verdict (over /
+        under) agrees for both flavours, the verdict is returned without
+        ever resolving which one applies. Only when the two flavours
+        straddle the limit boundary (one over, one under) does this
+        helper call `is_ai_generated` — a zero-argument callable in that
+        case — to resolve the flavour that actually applies. This keeps
+        `provider.get_pr(...)` off the hot path for the common case
+        where the outcome doesn't depend on it.
+    """
+    if body is None:
+        return
+    limit = _PR_BODY_MAX_CHARS.get(project.provider)
+    if limit is None:
+        return
+    marker_set = _markers.MarkerSet(
+        project.auto_labels.ai_generated, project.auto_labels.ai_modified,
+    )
+    generated_len = len(
+        _markers.apply_body_marker(body, will_be_ai_generated=True, markers=marker_set)
+    )
+    modified_len = len(
+        _markers.apply_body_marker(body, will_be_ai_generated=False, markers=marker_set)
+    )
+    over_generated = generated_len > limit
+    over_modified = modified_len > limit
+    if not over_generated and not over_modified:
+        return
+    if over_generated and over_modified:
+        length = max(generated_len, modified_len)
+    else:
+        will_be_ai_generated = (
+            is_ai_generated() if callable(is_ai_generated) else is_ai_generated
+        )
+        length = generated_len if will_be_ai_generated else modified_len
+        if length <= limit:
+            return
+    raise ValueError(
+        f"PR body is {length} characters after the attribution marker is "
+        f"applied, over {project.provider}'s {limit}-character limit; "
+        "shorten the body and try again."
+    )
+
+
+def _render_pr_body_limit_doc() -> str:
+    """Render `create_pr`/`update_pr`'s "Body size limit" docstring
+    paragraph from `_PR_BODY_MAX_CHARS` and `_PROVIDERS`'s keys — the
+    SAME table `_require_pr_body_within_limit` reads, so the docs cannot
+    silently drift from what is actually enforced.
+
+    One line per provider key in `_PROVIDERS`: a provider present in
+    `_PR_BODY_MAX_CHARS` gets its verified limit stated; every other
+    provider key gets a line saying the limit is not validated by this
+    server and the provider's own error is returned instead.
+
+    Both table lookups happen at call time, so re-rendering after either
+    table is monkeypatched (e.g. in a test, or a future real change)
+    reflects the swap immediately.
+    """
+    lines = []
+    for name in _PROVIDERS:
+        limit = _PR_BODY_MAX_CHARS.get(name)
+        if limit is not None:
+            lines.append(
+                f"- {name}: {limit} characters, counted after the "
+                "attribution marker; refused server-side, nothing sent."
+            )
+        else:
+            lines.append(
+                f"- {name}: not validated by this server; the provider's "
+                "own error is returned."
+            )
+    return "\n".join(lines)
 
 
 # --------- board namespace ----------------------------------------------------
@@ -675,6 +798,9 @@ __all__ = [
     "_require_pulls_create",
     "_require_pulls_modify",
     "_require_pulls_merge",
+    "_PR_BODY_MAX_CHARS",
+    "_require_pr_body_within_limit",
+    "_render_pr_body_limit_doc",
     "_require_board_manage",
     "_require_pipelines_trigger",
     "_normalize_id",

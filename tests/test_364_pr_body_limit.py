@@ -49,6 +49,7 @@ Expected RED reason:
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 import pytest
@@ -548,25 +549,44 @@ def test_limit_doc_and_enforcement_follow_same_table(monkeypatch):
 
     for name in ("create_pr", "update_pr"):
         doc = tools[name].__doc__ or ""
-        assert "gitlab" in doc.lower() and "100" in doc, (
-            f"{name}: expected the docstring to state gitlab's swapped "
-            f"limit (100 characters) once _PR_BODY_MAX_CHARS is "
-            f"{{'gitlab': 100}}:\n{doc}"
+
+        # Each provider gets its OWN line in the rendered paragraph (see
+        # `_render_pr_body_limit_doc`). Anchor every assertion to that
+        # provider's own line — not "somewhere in the docstring" — so a
+        # stale/wrong renderer that merely mentions "100" or "not
+        # validated" in the wrong place (e.g. still attributing the
+        # limit to github, or saying only one of github/azuredevops
+        # dropped out) cannot pass by accident.
+        gitlab_line = re.search(r"^- gitlab:.*$", doc, re.MULTILINE)
+        assert gitlab_line, f"{name}: no 'gitlab' line in docstring:\n{doc}"
+        assert "100" in gitlab_line.group(0), (
+            f"{name}: expected gitlab's OWN line to state the swapped "
+            f"100-char limit once _PR_BODY_MAX_CHARS is {{'gitlab': 100}}, "
+            f"got: {gitlab_line.group(0)!r}"
         )
-        assert (
-            "github" in doc.lower() and "not validated" in doc.lower()
-        ), (
-            f"{name}: expected the docstring to say github is not "
-            f"validated now that it dropped out of the swapped table:\n{doc}"
+        assert "not validated" not in gitlab_line.group(0), (
+            f"{name}: gitlab is IN the swapped table (100 chars), so its "
+            f"own line must not say 'not validated': "
+            f"{gitlab_line.group(0)!r}"
         )
-        assert (
-            "azure" in doc.lower()
-            and doc.lower().count("not validated") >= 2
-        ), (
-            f"{name}: expected the docstring to say azuredevops is not "
-            f"validated too (two 'not validated' providers: github and "
-            f"azuredevops):\n{doc}"
+
+        github_line = re.search(r"^- github:.*$", doc, re.MULTILINE)
+        assert github_line, f"{name}: no 'github' line in docstring:\n{doc}"
+        assert "not validated" in github_line.group(0), (
+            f"{name}: expected github's OWN line to say 'not validated' "
+            f"now that it dropped out of the swapped table, got: "
+            f"{github_line.group(0)!r}"
         )
+
+        azuredevops_line = re.search(r"^- azuredevops:.*$", doc, re.MULTILINE)
+        assert azuredevops_line, (
+            f"{name}: no 'azuredevops' line in docstring:\n{doc}"
+        )
+        assert "not validated" in azuredevops_line.group(0), (
+            f"{name}: expected azuredevops's OWN line to say 'not "
+            f"validated' too, got: {azuredevops_line.group(0)!r}"
+        )
+
         # Proves `_with_pr_body_limit_doc` is applied to BOTH tools, and
         # that it appends the renderer's own live output verbatim rather
         # than a separately hand-typed paragraph that merely happens to

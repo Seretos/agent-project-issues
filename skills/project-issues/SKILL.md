@@ -37,8 +37,9 @@ about access before making the call.
 ## Tool map
 
 Every registered tool, grouped by module — a discovery index. The sections
-below go deep only on pipelines, labels, relations/hierarchy, and custom
-fields/boards, since those are otherwise the easiest capabilities to miss.
+below go deep only on pipelines, labels, relations/hierarchy, closing a
+ticket when its PR merges, and custom fields/boards, since those are
+otherwise the easiest capabilities to miss or get wrong.
 
 - **projects** — `list_projects` list all configured projects;
   `search_projects` fuzzy-match a project by name.
@@ -89,7 +90,8 @@ fields/boards, since those are otherwise the easiest capabilities to miss.
   ask the user for information the schema marks optional. This skill instead
   carries the non-obvious operational facts and cross-tool sequencing schemas
   alone don't convey: the pipeline drill-down chain, label rename semantics,
-  relation direction, and board write keys.
+  relation direction, how each provider closes a ticket on PR merge, and
+  board write keys.
 - **Write ops return a light response by default.** `create_ticket`,
   `update_ticket`, `add_comment`, `update_comment`, `create_pr`, `update_pr`,
   `merge_pr`, `add_relation`, `add_pr_comment`, `add_pr_review_comment` and
@@ -267,6 +269,37 @@ mirrors `get_ticket`'s field of the same name — when true, `children`
 may be incomplete because the underlying timeline had more pages than
 were fetched.
 
+## Pull requests: closing the ticket on merge
+
+Whether merging a PR closes its ticket depends on the provider. The PR
+body is the only place a closing keyword can go, and you write it: pass
+it in `create_pr`'s or `update_pr`'s `body`. The server never adds or
+rewrites these keywords.
+
+| provider | what to put in the PR body | does the merge close ticket `<n>`? | after `merge_pr` succeeds |
+|---|---|---|---|
+| GitHub | a line `Closes #<n>` (or `Fixes #<n>` / `Resolves #<n>`) | yes, but only when the PR merges into the repository's default branch | nothing, if it merged into the default branch |
+| GitLab | a line `Closes #<n>` (or `Fixes #<n>` / `Resolves #<n>`) | yes, but only when the MR merges into the default branch and the project's auto-close setting is on | nothing, if both conditions held |
+| Azure DevOps | `#<n>`, which links work item `<n>` to the PR | no — `#<n>` only links; no keyword closes it | close it yourself: `list_ticket_statuses`, then `update_ticket(status=<the done/closed value it returned>)` |
+
+On Azure DevOps, neither `Closes #<n>` nor `AB#<n>` closes the work
+item through this plugin: `merge_pr` does not complete linked work
+items. `AB#<n>` is the Azure Boards syntax for commits and PRs in
+GitHub-hosted repositories, not for Azure Repos PRs. Write plain
+`#<n>` to link, and close the ticket with `update_ticket` after the
+merge. Take the status value from `list_ticket_statuses`; never
+hardcode a name such as "Done" or "Closed" — it differs by process
+template.
+
+The same `update_ticket` step applies on any provider whenever the merge
+did not close the ticket: the PR's base was not the default branch, or
+GitLab's auto-close setting is off. If you are not sure whether it
+closed, call `get_ticket` and check its status instead of assuming.
+
+The `create_pr` / `update_pr` tool descriptions state the same rules; if
+they ever differ from this section, the tool descriptions are
+authoritative.
+
 ## Pipelines: drill down, don't guess
 
 CI/pipeline triage is a three-tool chain, each step narrowing scope:
@@ -435,6 +468,10 @@ will resolve itself.
 - Assuming blocks or blocked_by exist on GitLab, or relates_to on
   GitHub — they do not; see the matrix under "Relations: direction
   matters".
+- Assuming a `Closes #<n>` or `AB#<n>` line closes an Azure DevOps work
+  item on merge — `#<n>` only links there; call `update_ticket` after
+  `merge_pr`. Likewise, assuming any provider closes the ticket when the
+  PR merged into a base other than the default branch.
 - Treating a write error as evidence of a race with another concurrent
   call instead of reading what the provider actually said.
 - Constructing or guessing a `job_id` instead of reading it from a

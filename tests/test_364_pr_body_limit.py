@@ -17,11 +17,20 @@ an opaque provider error.
   call `get_pr` to learn which one applies.
 - R3: `create_pr` and `update_pr`'s docstrings state each verified
   provider's limit and say every unverified provider is not validated.
-  R3's test cross-checks the docstrings against the actual runtime
-  constant `_PR_BODY_MAX_CHARS` (not a hard-coded `"65536"` literal), so
-  it fails if the documented number ever drifts from what the code
-  enforces (test-critic round 2 finding: a bare string-presence check on
-  docs proves nothing about what's actually enforced).
+  R3's test (round 4) trusts no intermediary at all — not even the
+  `_PR_BODY_MAX_CHARS` runtime constant, which could be defined and never
+  read while `65536` is hard-coded elsewhere in the helper. Instead it
+  extracts the GitHub limit number straight out of the docstring PROSE
+  with a regex, then drives that EXTRACTED number (never a hard-coded
+  `65536` literal, never an imported constant) through the real tool
+  layer exactly as R1/R2 do: a body at the extracted length goes through
+  unchanged, one character over is refused. If the docstring's stated
+  number is wrong, the boundary built from it will observably misbehave
+  either way — too low and the "at the limit" body gets wrongly refused,
+  too high and the "one over" body wrongly goes through. If the constant
+  is defined but never wired into the actual check, the same boundary
+  test fails regardless of what the constant equals. There is no trusted
+  intermediary between documented prose and observed behaviour.
 
 Harness mirrors `tests/test_314_write_response_light.py`: a `_StubMCP` +
 monkeypatched `_providers.load_projects` + `_PROVIDERS[...]` substitution,
@@ -31,10 +40,10 @@ Expected RED reason:
 - R1/R2: there is no pre-check yet on the current code, so the fake
   provider is called (and no `{"error": ...}` is returned) where the test
   expects a refusal.
-- R3: `_PR_BODY_MAX_CHARS` does not exist yet in `_providers.py` —
-  importing it raises `ImportError`, a valid RED for a not-yet-written
-  constant (mirrors the `_with_auth_hint` ImportError-RED pattern in
-  `tests/test_266_error_tone_actionability.py`).
+- R3: the docstrings don't have a "Body size limit" paragraph yet, so
+  `_extract_github_limit` finds no number near "github" and fails with a
+  clear, informative `AssertionError` naming what it looked for and the
+  docstring it searched — not a crash, and not an import error.
 """
 from __future__ import annotations
 
@@ -462,53 +471,130 @@ def test_update_pr_body_none_with_title_change_never_refused(monkeypatch):
 # this file's style, see test_359) write it out as "Azure DevOps".
 _PROVIDER_DOC_TERMS = {"github": "github", "gitlab": "gitlab", "azuredevops": "azure"}
 
+# The unverified providers are pinned here, not derived from any
+# production constant — this matches the product decision already baked
+# into R1's `test_create_pr_unverified_provider_limit_is_a_no_op`
+# parametrization (gitlab/azuredevops have no verified limit).
+_UNVERIFIED_PROVIDERS = ("gitlab", "azuredevops")
 
-def test_pr_docstrings_state_body_limits():
-    """Driving test for R3: both `create_pr` and `update_pr`'s docstrings
-    state each verified provider's limit and say every unverified
-    provider is not validated — checked against the actual runtime
-    constant `_PR_BODY_MAX_CHARS`, not a hard-coded literal.
 
-    A regex over prose can never prove the documented number is the
-    number actually enforced: a docstring could contain the right tokens
-    near each other while the code enforces something else (or nothing).
-    Importing `_PR_BODY_MAX_CHARS` and asserting against its real value
-    closes that gap — this test fails if the docstring's stated number
-    ever drifts from what the code enforces, not just if the prose is
-    missing.
+def _extract_github_limit(doc: str) -> int:
+    """The integer character-limit number written near "github" in
+    `doc`, however the prose orders the two ("GitHub: 65536 characters"
+    or "65536 characters ... GitHub"). Requires 4+ digits so a small,
+    unrelated number near an incidental "GitHub" mention elsewhere in the
+    docstring (e.g. the existing "...GitHub rejects the create with a
+    422..." sentence) can never be mistaken for the limit — a real
+    character limit is always a large number.
 
-    RED today: `_PR_BODY_MAX_CHARS` does not exist yet in `_providers.py`
-    (production code isn't written in this tests-only phase), so the
-    import below raises `ImportError`.
+    Fails with a clear, informative `AssertionError` naming what it
+    looked for and the docstring it searched when no such number is
+    present, rather than crashing uninformatively (e.g. `None.group(1)`).
+    This is the point of R3 round 4: the docstring's prose is the ONLY
+    source for this number in this test — never an imported production
+    constant.
     """
-    from project_issues_plugin.tools._providers import _PR_BODY_MAX_CHARS
-
-    verified = dict(_PR_BODY_MAX_CHARS)
-    unverified = [p for p in providers_mod._PROVIDERS if p not in verified]
-    assert verified, (
-        "expected _PR_BODY_MAX_CHARS to hold at least one verified "
-        f"provider limit; got {_PR_BODY_MAX_CHARS!r}"
+    m = re.search(r"github[^.]{0,200}?(\d{4,})", doc, re.I | re.S)
+    if m is None:
+        m = re.search(r"(\d{4,})[^.]{0,200}?github", doc, re.I | re.S)
+    assert m is not None, (
+        "expected the docstring to state a numeric character limit "
+        f"(4+ digits) near 'github', found none. Docstring:\n{doc}"
     )
-    assert unverified, (
-        "expected at least one provider with no verified limit; "
-        f"_PR_BODY_MAX_CHARS covers all of {list(providers_mod._PROVIDERS)}"
-    )
+    return int(m.group(1))
 
+
+def test_pr_docstrings_state_body_limits(monkeypatch):
+    """Driving test for R3 (round 4): both `create_pr` and `update_pr`'s
+    docstrings state the GitHub limit and say GitLab/Azure DevOps are not
+    validated — and the GitHub limit is proven correct BEHAVIORALLY, not
+    just cross-checked against a constant.
+
+    No production constant is imported anywhere in this test. The GitHub
+    limit is extracted from each docstring's own prose with
+    `_extract_github_limit`, and that EXTRACTED number (never a
+    hard-coded `65536` literal) is then used to build the same kind of
+    boundary bodies R1/R2 build from the literal, driven through the real
+    tool layer + recording fake provider: at the extracted number the
+    write goes through unchanged; at extracted+1 it is refused. This
+    closes the round-3 gap for real — a wrong documented number makes its
+    own boundary test fail (the enforcement won't actually apply where
+    the docstring claims it does), and a `_PR_BODY_MAX_CHARS` that is
+    defined but never wired into the real check fails the same way,
+    regardless of what the constant equals.
+
+    update_pr is covered too (not just create_pr): with no `ai-generated`
+    label on the PR, the "modified" marker flavour governs (see R2 for
+    the full flavour-selection matrix — this test only needs ONE flavour
+    to tie the docstring number to update_pr's call site; the flavour-
+    selection logic itself is R2's job, not this one's).
+
+    RED today: the docstrings have no "Body size limit" paragraph yet, so
+    `_extract_github_limit` raises a clear `AssertionError` before any
+    boundary body is even built — the "no pre-check exists yet" reason,
+    surfaced informatively rather than as a crash.
+    """
     tools = _pulls_tools()
+    limits: dict[str, int] = {}
     for name in ("create_pr", "update_pr"):
         doc = tools[name].__doc__ or ""
-        for provider, limit in verified.items():
-            term = _PROVIDER_DOC_TERMS[provider]
-            assert re.search(
-                rf"{term}[^.]{{0,200}}{limit}|{limit}[^.]{{0,200}}{term}",
-                doc, re.I | re.S,
-            ), (
-                f"{name}: docstring's {limit}-char limit not attributed to "
-                f"{provider} (runtime value from _PR_BODY_MAX_CHARS):\n{doc}"
-            )
-        for provider in unverified:
+        limits[name] = _extract_github_limit(doc)
+        for provider in _UNVERIFIED_PROVIDERS:
             term = _PROVIDER_DOC_TERMS[provider]
             assert re.search(
                 rf"{term}[^.]{{0,200}}not validated|not validated[^.]{{0,200}}{term}",
                 doc, re.I | re.S,
             ), f"{name}: docstring doesn't say {provider} isn't validated:\n{doc}"
+
+    assert limits["create_pr"] == limits["update_pr"], (
+        "create_pr and update_pr docstrings disagree on the github limit: "
+        f"{limits}"
+    )
+    github_limit = limits["create_pr"]
+
+    # ---- create_pr: boundary built from the EXTRACTED number alone ----
+    cp_project = _project("github")
+    cp_provider = _RecordingProvider()
+    cp_tools = _make_tools(monkeypatch, cp_project, cp_provider)
+
+    at_limit = _body_of_flavour_length(github_limit, will_be_ai_generated=True)
+    out = cp_tools["create_pr"](
+        project_id="acme", title="t", body=at_limit, head="feature/x", base="main",
+    )
+    assert "error" not in out, (
+        f"docstring says {github_limit} is within the github limit, but "
+        f"create_pr refused a body of exactly that (extracted) length: {out}"
+    )
+    assert cp_provider.create_calls == [at_limit]
+
+    over_limit = _body_of_flavour_length(github_limit + 1, will_be_ai_generated=True)
+    out = cp_tools["create_pr"](
+        project_id="acme", title="t", body=over_limit, head="feature/x", base="main",
+    )
+    assert "error" in out, (
+        f"docstring says {github_limit} is the github limit, but create_pr "
+        f"accepted a body one character over that (extracted) length: {out}"
+    )
+    assert cp_provider.create_calls == [at_limit]  # no second entry appended
+
+    # ---- update_pr: the applied-flavour case, no ai-generated label so
+    # the "modified" flavour governs ----
+    up_project = _project("github")
+    up_provider = _RecordingProvider(labels=[])
+    up_tools = _make_tools(monkeypatch, up_project, up_provider)
+
+    at_limit2 = _body_of_flavour_length(github_limit, will_be_ai_generated=False)
+    out = up_tools["update_pr"](project_id="acme", pr_id="7", body=at_limit2)
+    assert "error" not in out, (
+        f"docstring says {github_limit} is within the github limit, but "
+        f"update_pr refused a body of exactly that (extracted) length: {out}"
+    )
+    assert up_provider.update_calls == [at_limit2]
+
+    over_limit2 = _body_of_flavour_length(github_limit + 1, will_be_ai_generated=False)
+    out = up_tools["update_pr"](project_id="acme", pr_id="7", body=over_limit2)
+    assert "error" in out, (
+        f"docstring says {github_limit} is the github limit, but update_pr "
+        f"accepted a body one character over that (extracted) length: {out}"
+    )
+    assert up_provider.update_calls == [at_limit2]  # no second entry appended

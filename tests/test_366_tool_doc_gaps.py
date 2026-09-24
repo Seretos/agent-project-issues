@@ -226,15 +226,26 @@ def _check_ac_paragraph_documents_body_fallback(paragraph: str) -> None:
     # The 'from `body`' hint must be an affirmative instruction (not negated
     # by a preceding 'never'/'not'/'don't'/'avoid') and must sit close to
     # the GitHub/GitLab mention it applies to.
+    #
+    # Test-critic round-5 F2: the negation guard used to only look at the 20
+    # chars immediately before "from `body`", but the read/consult/see verb
+    # the instruction-verb check below allows may sit up to 40 chars away
+    # (see `instruction_window` further down) -- a negation word placed just
+    # before THAT verb (e.g. "do not attempt to read acceptance criteria
+    # from `body` there") sits more than 20 but at most 40 chars before "from
+    # `body`", and would have slipped past the old 20-char window. Widened
+    # to the same 40-char span as the verb-proximity check so both checks
+    # see the same text.
     body_match = re.search(r"from `body`", paragraph)
     assert body_match is not None, (
         f"expected a 'from `body`' hint telling agents where to read AC on "
         f"GitHub/GitLab in the acceptance_criteria paragraph:\n{paragraph}"
     )
-    preceding = paragraph[max(0, body_match.start() - 20): body_match.start()].lower()
+    preceding = paragraph[max(0, body_match.start() - 40): body_match.start()].lower()
     assert not re.search(r"\b(never|not|don't|do not|avoid)\b", preceding), (
         f"the 'from `body`' hint must be an affirmative instruction, not "
-        f"negated by a preceding 'never'/'not'/'don't'/'avoid':\n{paragraph}"
+        f"negated by a preceding 'never'/'not'/'don't'/'avoid' within 40 "
+        f"chars of it:\n{paragraph}"
     )
     assert abs(body_match.start() - ghgl_idx) <= 150, (
         f"the 'from `body`' hint must be tied to the GitHub/GitLab mention "
@@ -323,6 +334,32 @@ def test_ac_paragraph_check_rejects_negated_only_and_empty() -> None:
         "acceptance_criteria is not only populated on Azure DevOps "
         "(Microsoft.VSTS.Common.AcceptanceCriteria); it is never empty on "
         "GitHub/GitLab, so read it from `body` there."
+    )
+    with pytest.raises(AssertionError):
+        _check_ac_paragraph_documents_body_fallback(plausible_wrong)
+
+
+def test_ac_paragraph_check_rejects_negation_beyond_old_20_char_window() -> None:
+    """Negative case for test-critic round-5 F2: proves the widened (40-char)
+    negation guard on the 'from `body`' hint catches a negation word that
+    sits more than 20 but at most 40 chars before 'from `body`' -- beyond
+    the old window's reach, but within the read/consult/see verb-proximity
+    window the checker already allowed (`instruction_window` spans the same
+    40 chars). 'never' sits 31 chars before 'from `body`' here (verified:
+    within the old 20-char `preceding` slice it would not appear at all, so
+    the pre-round-5 checker would have missed it and let this paraphrase
+    pass), immediately ahead of the 'read' verb the instruction-verb check
+    requires -- so without the widened window this negated instruction
+    ('never read acceptance criteria from `body`') would have satisfied
+    every other assertion (Azure DevOps tied to 'only', GitHub/GitLab tied
+    to 'empty', an instruction verb near 'from `body`', no 'separate/
+    distinct/kept ... from `body`' phrasing) while telling an agent the
+    opposite of what R1 requires."""
+    plausible_wrong = (
+        "acceptance_criteria is populated only on Azure DevOps "
+        "(Microsoft.VSTS.Common.AcceptanceCriteria); it is structurally "
+        "empty on GitHub/GitLab, so never read acceptance criteria from "
+        "`body` there."
     )
     with pytest.raises(AssertionError):
         _check_ac_paragraph_documents_body_fallback(plausible_wrong)
@@ -795,6 +832,19 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
 
 _LIST_TICKETS_SECTION_END = "Token-cheap knobs:"
 _BARE_LABELS_RE = re.compile(r"(?<!not_)\blabels=")
+# Test-critic round-5 F3: every other bullet in list_tickets's docstring
+# (`assignee`, `author`, `search`, `created_after`/`created_before`, ...)
+# starts with this "- `name`:" marker once whitespace is normalised to
+# single spaces (see the real bullets at tools/tickets.py:409-419, e.g.
+# "- `assignee`: only tickets assigned to this user."). Used below to stop
+# `labels_clause` at the NEXT unrelated bullet instead of running to
+# "Token-cheap knobs:".
+_NEXT_BULLET_RE = re.compile(r"-\s*`\w")
+# Fallback cap if no further bullet marker is found at all (e.g. the
+# Unknown-labels sub-bullet turns out to be the docstring's last bullet
+# before "Token-cheap knobs:") -- generous enough for the labels= clause's
+# own prose, tight enough to keep out anything beyond it.
+_LABELS_CLAUSE_MAX_CHARS = 220
 
 
 def _unknown_labels_section(doc: str) -> str:
@@ -846,7 +896,22 @@ def _check_unknown_labels_section(section: str) -> None:
     not_labels_idx = section.index("not_labels")
     labels_idx = labels_match.start()
     not_labels_clause = section[not_labels_idx:labels_idx]
-    labels_clause = section[labels_idx:]
+
+    # Test-critic round-5 F3: `labels_clause` used to run all the way to
+    # the end of `section` (bounded only by "Token-cheap knobs:" or the end
+    # of the docstring), so the empty-result/verified-live checks below
+    # could be satisfied by text in a later, unrelated list_tickets bullet
+    # (e.g. `assignee`/`author`/`search`) rather than the labels= sub-bullet
+    # itself. Bound it to whichever comes first: the next bullet marker
+    # ("- `name`:") or a fixed character window from `labels_idx` -- so it
+    # covers only the labels= sub-bullet's own text.
+    next_bullet_match = _NEXT_BULLET_RE.search(section, labels_match.end())
+    labels_clause_end = min(
+        next_bullet_match.start() if next_bullet_match else len(section),
+        labels_idx + _LABELS_CLAUSE_MAX_CHARS,
+        len(section),
+    )
+    labels_clause = section[labels_idx:labels_clause_end]
 
     # -- not_labels clause: GitHub verified live, GitLab/Azure DevOps not --
     for token in ("GitHub", "GitLab", "Azure DevOps"):
@@ -995,6 +1060,40 @@ def test_unknown_labels_check_rejects_negated_empty_claim() -> None:
         "result, inferred, not verified live. Check spelling with "
         "list_labels(project_id)."
     )
+    with pytest.raises(AssertionError):
+        _check_unknown_labels_section(plausible_wrong)
+
+
+def test_unknown_labels_check_rejects_empty_claim_from_a_later_bullet() -> None:
+    """Negative case for test-critic round-5 F3: proves the bounded
+    `labels_clause` no longer picks up the empty-result claim word from a
+    LATER, unrelated bullet. Before the fix, `labels_clause` ran unbounded
+    from `labels_idx` to the end of `section` (stopped only by
+    "Token-cheap knobs:"), so the labels= sub-bullet's own text could say
+    only "inferred, not verified live" (no empty-result claim at all) and
+    still pass, as long as some later bullet before "Token-cheap knobs:"
+    happened to contain the word "empty" -- exactly the
+    `surviving_implementation` the round-5 critique names. Here the
+    labels= sub-bullet itself says only "is inferred, not verified live."
+    and a following, unrelated `sort_by` bullet is the one that mentions
+    "empty" -- verified below that with the OLD unbounded slicing this
+    "empty" would have been visible to the labels clause, but the fixed,
+    bounded `labels_clause` (stopping at the next "- `name`:" bullet
+    marker) must not see it, so the checker correctly still rejects this
+    paragraph for lacking its own empty-result claim."""
+    plausible_wrong = (
+        "Unknown labels: not_labels=[<unknown>] excludes nothing (the list "
+        "stays unfiltered) on GitHub, verified live there; on GitLab and "
+        "Azure DevOps this is not verified live, inferred from the query "
+        "the lib builds. labels=[<unknown>] is inferred, not verified "
+        "live. Check spelling with list_labels(project_id). - `sort_by`: "
+        "an empty list means no matches were returned; \"created\" "
+        "(default), \"updated\", or \"comments\"."
+    )
+    # Sanity check on the fixture itself: the word this fix must NOT let
+    # leak in really does sit after a later bullet marker, past where the
+    # labels= sub-bullet's own text ends.
+    assert "empty" in plausible_wrong[plausible_wrong.index("- `sort_by`"):]
     with pytest.raises(AssertionError):
         _check_unknown_labels_section(plausible_wrong)
 

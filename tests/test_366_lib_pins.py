@@ -41,13 +41,11 @@ import re
 import tomllib
 from pathlib import Path
 
-import pytest
 from packaging.requirements import Requirement
 from packaging.version import Version
 
 _CONFIG_FLOOR = Version("0.1.3")
 _PROJECTS_FLOOR = Version("0.3.23")
-_TAG_RE = re.compile(r"v\d+\.\d+\.\d+(?![\w.])")
 _EXACT_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
@@ -148,37 +146,29 @@ def test_projects_pin_meets_366_floor() -> None:
     assert _installed_version("lib-python-projects") >= _PROJECTS_FLOOR
 
 
-@pytest.mark.parametrize("name", ["lib-python-config", "lib-python-projects"])
-def test_pin_comment_names_366_floor_tag(name: str) -> None:
-    """Driving test (symmetric for both libs): the comment block above each
-    dependency line names ONLY that dependency's declared tag, and that tag
-    meets this ticket's floor. RED today: the comment blocks still say
-    `(v0.1.2)` / `(v0.3.22)`."""
-    declared = _declared_tag(name)
-    lines = _pyproject_text().splitlines()
-    dep_idx = next(i for i, line in enumerate(lines) if f"{name} @ git+" in line)
-    start = dep_idx
-    while start > 0 and lines[start - 1].strip().startswith("#"):
-        start -= 1
-    comment_block = " ".join(lines[start:dep_idx])
-    found = _TAG_RE.findall(comment_block)
-    assert found, f"comment above {name} names no vX.Y.Z tag"
-    assert set(found) == {declared}, (
-        f"comment above {name} mentions tags {found!r}, declared pin is {declared!r}"
-    )
-    floor = _CONFIG_FLOOR if name == "lib-python-config" else _PROJECTS_FLOOR
-    assert Version(declared.lstrip("v")) >= floor, (
-        f"comment above {name} names {declared!r}, which is below this "
-        f"ticket's {floor} floor"
-    )
-    # Test-critic round-4 F2: also assert the INSTALLED environment's
-    # actual version meets the same floor -- the comment can name the right
-    # tag while the environment was never re-synced.
-    assert _installed_version(name) >= floor, (
-        f"installed {name} is below this ticket's {floor} floor even though "
-        f"the comment above it names {declared!r} -- run "
-        f"`pwsh scripts/test.ps1` to re-sync the installed environment"
-    )
+# Test-critic round-5 F1 (critical, resolved by deletion): a
+# `test_pin_comment_names_366_floor_tag` used to live here, asserting (a)
+# the comment block above each dependency names only its own declared tag
+# and meets this ticket's floor, and (b) the installed version meets the
+# same floor. Comment text has zero runtime effect, so (a) is inherently a
+# check of literal text in a config file -- and it duplicates coverage that
+# already exists: `tests/test_319_lib_pins.py::
+# test_pin_comment_names_only_its_own_declared_tag` already asserts,
+# generically (not tied to any one ticket's floor), that the comment block
+# above each dependency names ONLY that dependency's currently-declared
+# tag -- it reads `_declared_tag(name)` dynamically off `pyproject.toml`,
+# so once this ticket's pins are bumped, that existing test only passes if
+# the comments are updated to say `(v0.1.3)` / `(v0.3.23)` too. That is
+# exactly the "comment update" acceptance criterion from the plan's
+# Approach (#356/#374), and the plan itself already names test_319 as its
+# existing-suite coverage for it. Part (b), the installed-version floor
+# check, was a verbatim repeat of `test_config_pin_meets_366_floor` /
+# `test_projects_pin_meets_366_floor` below. With both halves already
+# covered elsewhere, nothing here was left that wasn't either tautological
+# (comment text) or duplicate (installed-version floor) -- so the test is
+# deleted rather than further heuristic-patched. See R4's docstring note
+# above and the plan's Mechanism-balance section, which already flags
+# test_319 as the existing-suite owner of the comment-tag invariant.
 
 
 # ---------- Additional edge-case coverage -------------------------------------

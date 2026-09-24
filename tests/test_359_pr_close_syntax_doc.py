@@ -113,23 +113,21 @@ def _close_syntax_block(description: str, tool_name: str) -> str:
 
 
 _BULLET_MARKERS = ("- GitHub:", "- GitLab:", "- Azure DevOps:")
+# Ticket #359 test-critic round 1 (tautology::F1): the Azure bullet has no
+# following bullet marker, so without this boundary its slice would run to
+# the end of the block and sweep in the closing fallback sentence ("If a
+# ticket must be closed ... rewrites these keywords in `body`."), which also
+# mentions `update_ticket` — letting a surviving implementation satisfy the
+# Azure bullet's `update_ticket` requirement via the fallback sentence
+# instead of the bullet's own text. Bounding the slice here means every
+# required phrase is checked against the Azure bullet itself.
+_BULLET_TRAILING_MARKER = "If a ticket must be closed"
 
 
 def _bullet(block: str, marker: str) -> str:
-    """Return one provider's bullet from the close-syntax block.
-
-    GitHub's and GitLab's bullets are bounded by the next bullet marker.
-    Azure DevOps's bullet has no following bullet marker, so it runs to
-    the end of the block — which also sweeps in the block's closing
-    fallback sentence ("If a ticket must be closed ... rewrites these
-    keywords in `body`."). That's intentional, not a parsing gap: per
-    the plan's own draft text, that trailing sentence never contains the
-    literal `Closes #<n>` substring, so including it does not corrupt
-    the "closes" negation check below — it only widens the region the
-    `#<n>` / `update_ticket` / `list_ticket_statuses` substring checks
-    scan, which is harmless since those phrases legitimately belong to
-    the Azure bullet itself.
-    """
+    """Return one provider's bullet from the close-syntax block, bounded
+    by the next bullet marker or (for the last bullet) the block's
+    trailing fallback sentence — never sweeping either in."""
     idx = block.find(marker)
     if idx == -1:
         raise AssertionError(f"no {marker!r} bullet found in close-syntax block:\n{block}")
@@ -141,6 +139,9 @@ def _bullet(block: str, marker: str) -> str:
         other_idx = rest.find(other, len(marker))
         if other_idx != -1 and other_idx < end:
             end = other_idx
+    trailing_idx = rest.find(_BULLET_TRAILING_MARKER, len(marker))
+    if trailing_idx != -1 and trailing_idx < end:
+        end = trailing_idx
     return rest[:end]
 
 

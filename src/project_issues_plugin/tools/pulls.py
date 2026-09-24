@@ -449,6 +449,24 @@ def register(mcp: FastMCP) -> None:
         `#ai-generated\\n\\n` — do not prepend it yourself. The server
         deduplicates the marker if you accidentally include it.
 
+        Linking / closing a ticket on merge differs per provider:
+          - GitHub: a line `Closes #<n>` (or `Fixes` / `Resolves`) in
+            `body` closes issue `<n>` when the PR is merged into the
+            repository's default branch; merging into any other base
+            leaves it open.
+          - GitLab: same keyword, `Closes #<n>`; the issue closes when
+            the MR is merged into the default branch (if the project's
+            auto-close setting is on).
+          - Azure DevOps: `#<n>` in `body` only links work item `<n>`.
+            This plugin's `merge_pr` does not complete linked work items,
+            so no keyword (neither `Closes #<n>` nor any other) closes
+            one. After `merge_pr` succeeds, close it explicitly with
+            `update_ticket(status=...)`, using the done/closed value from
+            `list_ticket_statuses`.
+        If a ticket must be closed and the merge did not close it
+        (non-default base, auto-close disabled), use `update_ticket`.
+        The server never adds or rewrites these keywords in `body`.
+
         `requested_reviewers` is a list of usernames to request a review
         from. Distinct from `assignees`: reviewers carry per-user review
         state (approved / changes-requested / commented); assignees
@@ -586,6 +604,24 @@ def register(mcp: FastMCP) -> None:
         state — `#ai-generated` for AI-authored PRs, `#ai-modified` for
         the first AI touch of a human-authored PR. Callers should NOT
         prepend the marker themselves.
+
+        Linking / closing a ticket on merge differs per provider:
+          - GitHub: a line `Closes #<n>` (or `Fixes` / `Resolves`) in
+            `body` closes issue `<n>` when the PR is merged into the
+            repository's default branch; merging into any other base
+            leaves it open.
+          - GitLab: same keyword, `Closes #<n>`; the issue closes when
+            the MR is merged into the default branch (if the project's
+            auto-close setting is on).
+          - Azure DevOps: `#<n>` in `body` only links work item `<n>`.
+            This plugin's `merge_pr` does not complete linked work items,
+            so no keyword (neither `Closes #<n>` nor any other) closes
+            one. After `merge_pr` succeeds, close it explicitly with
+            `update_ticket(status=...)`, using the done/closed value from
+            `list_ticket_statuses`.
+        If a ticket must be closed and the merge did not close it
+        (non-default base, auto-close disabled), use `update_ticket`.
+        The server never adds or rewrites these keywords in `body`.
 
         Requires the project's `pulls.modify` permission.
         """

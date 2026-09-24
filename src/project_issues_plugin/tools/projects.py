@@ -546,6 +546,13 @@ def register(mcp: FastMCP) -> None:
             pagination. Use `search_projects` only when you actually want
             ranking or a bounded `limit`.
           - `fields="full"` (default): full behaviour as described above.
+
+        `project_id` is case-sensitive on every tool that takes it —
+        always pass it verbatim, exactly as declared (`fields="light"`
+        above drops `path`, so it cannot itself confirm an id's exact
+        casing). To resolve a single project by repo path, use the
+        `search_projects` recipe described in its own docstring rather
+        than duplicating it here.
         """
         result = load_projects(
             config_filename="projects.yml",
@@ -635,6 +642,12 @@ def register(mcp: FastMCP) -> None:
         **case-sensitive**. Always pass the `id` value from a
         `search_projects` match on to other tools verbatim, exactly as
         reported — do not re-case it.
+
+        Resolving one project by repo path: there is no single-project lookup tool;
+        call `search_projects(query="<owner/repo>", limit=5)` with
+        `fields="full"` (the `light` shape has no `path`), then
+        confirm the match's `path` equals the repo path exactly
+        before passing that match's `id` on verbatim.
 
         *Footnote — raw `score` thresholds (superseded by
         `match_confidence` above, kept for reference):* higher is more

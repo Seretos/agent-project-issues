@@ -409,6 +409,16 @@ def register(mcp: FastMCP) -> None:
           - `labels`: only tickets carrying ALL of these labels.
           - `not_labels`: exclude tickets carrying ANY of these labels
             (e.g. `["test"]` filters out test issues).
+
+            Unknown labels: no provider validates label names against
+            a live catalog, so check spelling first with
+            `list_labels(project_id)`. `not_labels=[<unknown>]`
+            excludes nothing (the list stays unfiltered) — verified
+            live on GitHub; GitLab and Azure DevOps are inferred to
+            behave the same from the query the lib builds, but that
+            is not verified live there. `labels=[<unknown>]` matches
+            no ticket (an empty result) — inferred, not verified
+            live, on GitHub, GitLab, and Azure DevOps alike.
           - `assignee`: only tickets assigned to this user.
           - `author`: only tickets opened by this user.
           - `search`: free-text query (substring + GitHub search syntax).
@@ -521,12 +531,12 @@ def register(mcp: FastMCP) -> None:
         (GitHub + Azure DevOps), plus `relates_to` (GitLab + Azure
         DevOps) — see `relations` below for the full shape.
 
-        The `ticket` object always carries `acceptance_criteria` (`str`,
-        `""` when the provider has none — Azure DevOps'
-        `Microsoft.VSTS.Common.AcceptanceCriteria`; always empty on
-        GitHub/GitLab, which have no such field) alongside `body`, so
-        agents implementing against a work item's requirements see the
-        acceptance criteria without a separate call.
+        The `ticket` object always carries `acceptance_criteria` (`str`).
+        Azure DevOps is the only provider that populates it, from
+        `Microsoft.VSTS.Common.AcceptanceCriteria`; it is structurally
+        empty on GitHub/GitLab, which have no such field — read
+        acceptance criteria from `body` there instead (conventionally an
+        `Acceptance` section), no separate call needed.
 
         Set `include_custom_fields=True` to also populate
         `ticket.custom_fields` (`dict | None`, omitted as `None` when

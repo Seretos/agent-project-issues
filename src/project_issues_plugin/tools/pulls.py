@@ -195,12 +195,44 @@ def register(mcp: FastMCP) -> None:
         or error value.
 
         `detailed_merge_status` is GitLab-only — GitHub and Azure DevOps
-        always return `null` for it. GitLab's enum (may not be
-        exhaustive): `unchecked`, `checking`, `mergeable`,
-        `not_mergeable`, `discussions_not_resolved`, `ci_must_pass`,
-        `ci_still_running`, `not_open`, `broken_status`,
-        `blocked_status`, `commits_status`, `preparing`, `draft_status`,
+        always return `null` for it. GitLab's enum (may not be exhaustive):
+        `unchecked`, `checking`, `mergeable`, `not_mergeable`,
+        `discussions_not_resolved`, `not_approved`, `ci_must_pass`,
+        `ci_still_running`, `not_open`, `broken_status`, `blocked_status`,
+        `commits_status`, `preparing`, `draft_status`,
         `jira_association_missing`, `need_rebase`, `conflict`.
+
+        Merge-state table: provider-neutral meaning of `mergeable_state`
+        (GitHub) / `detailed_merge_status` (GitLab) / `merge_pr` error
+        text (Azure DevOps) — classify a merge failure from this table
+        instead of keeping a private one:
+
+        | Meaning | GitHub `mergeable_state` | GitLab `detailed_merge_status` | Azure DevOps `merge_pr` error text |
+        | --- | --- | --- | --- |
+        | `mergeable` | `clean` | `mergeable` | (merge succeeds) |
+        | `not computed yet` | `unknown` | `unchecked` `checking` `preparing` | `merge in progress` |
+        | `conflict` | `dirty` | `conflict` | `merge has conflicts` |
+        | `behind` | `behind` | `need_rebase` | — |
+        | `gate open: CI running/failing` | `blocked` `unstable` | `ci_must_pass` `ci_still_running` | `merge rejected by branch policy` |
+        | `gate open: review missing` | `blocked` | `not_approved` `discussions_not_resolved` | `merge rejected by branch policy` |
+        | `gate open: draft` | `draft` | `draft_status` | not verified |
+        | `gate open: other` | `has_hooks` | `blocked_status` `broken_status` `commits_status` `jira_association_missing` `not_mergeable` | `merge failed` |
+        | `not open` | — | `not_open` | already merged |
+
+        Notes:
+          - (a) GitHub `blocked` alone does not say whether CI or review
+            is blocking — check `list_pipeline_runs` and the review data
+            to tell them apart. GitHub may still accept a merge while
+            `unstable` or `has_hooks`; if the merge itself fails,
+            classify the failure using the listed gate row.
+          - (b) GitLab `mergeable` is `null` for every
+            `detailed_merge_status` value except `mergeable` itself —
+            classify from `detailed_merge_status`, not from `mergeable`.
+          - (c) Azure DevOps has no `mergeable_state` field at all;
+            `mergeable` is only ever `true` / `false` / `null`. The
+            `merge_pr` error text is the only classifier, and it cannot
+            distinguish a CI gate from a review gate — both surface as
+            `merge rejected by branch policy`.
 
         GitLab note: `approvals_required` and `approvals_received` are
         populated here (`0` when none are required or received),
@@ -886,6 +918,12 @@ def register(mcp: FastMCP) -> None:
         effect could not be reproduced. Merging mutates only PR-state
         fields such as `merged`, `status`, and `merge_commit_sha`;
         reviewer/assignee collections are left untouched by the merge.
+
+        On a failed merge, classify the `error` text with `get_pr`'s merge-state table.
+        On Azure DevOps that text is the only signal (no `mergeable_state`
+        field exists there) — look for the fragments `merge has conflicts`,
+        `merge rejected by branch policy`, `merge failed`, or
+        `merge in progress` (not yet settled; retry `get_pr` to confirm).
         """
         if merge_method not in ("merge", "squash", "rebase"):
             return {

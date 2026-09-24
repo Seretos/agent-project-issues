@@ -224,6 +224,7 @@ def _template_summary(template) -> dict[str, Any]:
 
 def _refusal_hint(
     tool_name: str, *, project_id: str, ticket_id: str | None, template_name: str | None,
+    rejected_template: str | None = None,
 ) -> str:
     """Build an actual, executable re-call for a refusal payload's `hint` —
     never just a mention of the tool's name.
@@ -231,7 +232,9 @@ def _refusal_hint(
     When no template was resolved (`template_required`/`template_unknown`),
     a template name is never fabricated — the call carries a `<name>`
     placeholder and the message points the caller at the `templates` list
-    instead.
+    instead. `rejected_template` (only ever set on `template_unknown`) names
+    the caller's rejected `template=` value in the hint text, so this refusal
+    no longer reads byte-identical to `template_required`'s (#384).
     """
     call_parts = [f'project_id="{project_id}"']
     if ticket_id is not None:
@@ -245,6 +248,12 @@ def _refusal_hint(
             "fix the sections named under violations (skeleton is a ready-to-fill "
             f"starting point), then retry: {call}"
         )
+    if rejected_template is not None:
+        return (
+            f'template "{rejected_template}" is not one of this project\'s templates; '
+            "pick one from the templates list below (or call list_ticket_templates), "
+            f"then retry: {call}"
+        )
     return (
         "no template was resolved; pick one from the templates list below "
         f"(or call list_ticket_templates), then retry: {call}"
@@ -254,6 +263,7 @@ def _refusal_hint(
 def _refusal_payload(
     *, tool_name: str, project_id: str, ticket_id: str | None, state: str,
     body: str, all_templates: list, template=None, violations=None,
+    rejected_template: str | None = None,
 ) -> dict[str, Any]:
     """Build the fixed refusal contract: `state`/`hint`/`templates`/
     `template`/`violations`/`skeleton`/`received_sections`/`written`. No
@@ -273,6 +283,7 @@ def _refusal_payload(
         "hint": _refusal_hint(
             tool_name, project_id=project_id, ticket_id=ticket_id,
             template_name=template.name if template is not None else None,
+            rejected_template=rejected_template,
         ),
     }
 
@@ -322,6 +333,7 @@ def _template_gate(
             return None, None, _refusal_payload(
                 tool_name=tool_name, project_id=project.id, ticket_id=ticket_id,
                 state="template_unknown", body=body, all_templates=all_templates,
+                rejected_template=template,
             )
     else:
         chosen = infer(all_templates) if infer is not None else None

@@ -463,6 +463,33 @@ def test_update_pr_body_none_with_title_change_never_refused(monkeypatch):
     assert provider.update_calls == [None]
 
 
+@pytest.mark.parametrize("provider_name", ["gitlab", "azuredevops"])
+def test_update_pr_unverified_provider_limit_is_a_no_op(monkeypatch, provider_name):
+    """Additional coverage, mirroring R1's
+    `test_create_pr_unverified_provider_limit_is_a_no_op` but through
+    `update_pr`: GitLab / Azure DevOps have no verified limit in the
+    table, so even a very long body is forwarded, unrefused. This is the
+    behavioural counterpart the test-critic flagged as missing — R3's
+    docstring assertions alone only check *prose*, and would pass even if
+    a future implementation mistakenly enforced the github limit against
+    gitlab/azuredevops on this call path. This test proves the no-op
+    behaviourally for `update_pr` specifically, not just for `create_pr`.
+
+    The unverified-provider branch is a no-op at the table-lookup stage,
+    before any flavour selection, so it never needs to read the PR's
+    labels either — `get_pr_calls` stays at 0."""
+    project = _project(provider_name)
+    provider = _RecordingProvider(labels=["ai-generated"])
+    tools = _make_tools(monkeypatch, project, provider)
+
+    body = "x" * 200_000
+    out = tools["update_pr"](project_id="acme", pr_id="7", body=body)
+
+    assert "error" not in out, out
+    assert provider.get_pr_calls == 0
+    assert provider.update_calls == [body]
+
+
 # ---------- R3: docstrings state the limits -------------------------------------
 
 

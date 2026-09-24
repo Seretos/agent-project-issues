@@ -123,6 +123,34 @@ def _paragraphs(doc: str) -> list[str]:
     return re.split(r"\n\s*\n", doc)
 
 
+# Test-critic round-4 F1: shared negation guard. The round-2/3 checkers below
+# tie a claim word ("only", "exact", "case-sensitive", "empty", ...) to the
+# OTHER half of a claim (e.g. "only" close to "Azure DevOps") but never check
+# that the claim word ITSELF isn't negated -- so a paraphrase that negates a
+# DIFFERENT part of the same claim (e.g. "not only populated on Azure
+# DevOps", "do not compare path exactly", "case-sensitive only on
+# search_projects", "does not return an empty result") still satisfied every
+# existing assertion. `_assert_not_negated` centralises the fix: it is used
+# right before/around each claim-bearing word to reject a preceding negation
+# word wrapping that SPECIFIC word, not just the phrase near it.
+_NEGATION_RE = re.compile(
+    r"\b(?:never|not|no|isn't|doesn't|do not|don't)\b", re.IGNORECASE,
+)
+
+
+def _assert_not_negated(text: str, claim_idx: int, *, window: int = 30, what: str = "") -> None:
+    """Assert the text immediately before `claim_idx` (within `window`
+    chars) contains no negation word -- guards the claim-bearing word/phrase
+    starting at `claim_idx` against being wrapped by a negation that leaves
+    every other proximity/order check satisfied."""
+    prefix = text[max(0, claim_idx - window): claim_idx]
+    assert not _NEGATION_RE.search(prefix), (
+        f"{what or text[claim_idx: claim_idx + 20]!r} must not itself be "
+        f"negated by a preceding negation word (never/not/no/isn't/"
+        f"doesn't/do not/don't):\n{text[max(0, claim_idx - window): claim_idx + 40]}"
+    )
+
+
 # ===========================================================================
 # R1 (#361) -- get_ticket's acceptance_criteria paragraph names Azure DevOps
 # as the only populating provider and points to `body` on GitHub/GitLab
@@ -172,6 +200,13 @@ def _check_ac_paragraph_documents_body_fallback(paragraph: str) -> None:
         f"naming it the sole populating provider, not just mentioned in "
         f"passing:\n{azure_window}"
     )
+    # Test-critic round-4 F1: "only" itself must not be negated (e.g. "not
+    # only populated on Azure DevOps") -- the round-2 proximity check above
+    # only confirmed "only" sits near "Azure DevOps", not that it actually
+    # names Azure DevOps as the SOLE provider.
+    _assert_not_negated(
+        azure_window, azure_window.index("only"), what="'only' (Azure DevOps sole-provider claim)",
+    )
 
     # GitHub/GitLab must be described as structurally empty, tied to the
     # GitHub/GitLab mention itself.
@@ -181,6 +216,11 @@ def _check_ac_paragraph_documents_body_fallback(paragraph: str) -> None:
         f"'GitHub/GitLab' must be tied to 'empty' language describing the "
         f"structurally-empty field, not just mentioned in passing:"
         f"\n{ghgl_window}"
+    )
+    # Test-critic round-4 F1: "empty" itself must not be negated (e.g. "it
+    # is never empty on GitHub/GitLab").
+    _assert_not_negated(
+        ghgl_window, ghgl_window.index("empty"), what="'empty' (GitHub/GitLab structurally-empty claim)",
     )
 
     # The 'from `body`' hint must be an affirmative instruction (not negated
@@ -262,6 +302,27 @@ def test_ac_paragraph_check_rejects_separate_from_body_phrasing() -> None:
     plausible_wrong = (
         "populated only on Azure DevOps ..., kept separate from `body`; "
         "structurally empty on GitHub/GitLab"
+    )
+    with pytest.raises(AssertionError):
+        _check_ac_paragraph_documents_body_fallback(plausible_wrong)
+
+
+def test_ac_paragraph_check_rejects_negated_only_and_empty() -> None:
+    """Negative case for test-critic round-4 F1: proves
+    `_check_ac_paragraph_documents_body_fallback` rejects a paraphrase that
+    negates the "only"/"empty" claim words THEMSELVES, using exactly the
+    plausible-wrong example quoted in the round-4 critique JSON
+    (tautology::F1's `surviving_implementation` field): "not only populated
+    on Azure DevOps" (negating "only") and "never empty on GitHub/GitLab"
+    (negating "empty") both sit within the round-2/3 proximity windows the
+    pre-round-4 checker already guarded, so without a negation guard tied to
+    the claim word itself this would have passed. This test validates the
+    checker's discrimination, not the requirement directly -- the checker
+    still needs the real docstring's GREEN run to ground the requirement."""
+    plausible_wrong = (
+        "acceptance_criteria is not only populated on Azure DevOps "
+        "(Microsoft.VSTS.Common.AcceptanceCriteria); it is never empty on "
+        "GitHub/GitLab, so read it from `body` there."
     )
     with pytest.raises(AssertionError):
         _check_ac_paragraph_documents_body_fallback(plausible_wrong)
@@ -423,13 +484,22 @@ def _check_recipe_paragraph(paragraph: str) -> None:
     assert exact_matches, (
         f"recipe paragraph must describe an EXACT path comparison:\n{paragraph}"
     )
-    closest_gap = min(
-        abs(em.start() - pm.start()) for em in exact_matches for pm in path_matches
+    closest_em, closest_pm = min(
+        ((em, pm) for em in exact_matches for pm in path_matches),
+        key=lambda pair: abs(pair[0].start() - pair[1].start()),
     )
+    closest_gap = abs(closest_em.start() - closest_pm.start())
     assert closest_gap <= 40, (
         f"'exact' must sit close to the `path` comparison it qualifies "
         f"(within ~40 chars), not float free in the recipe paragraph:"
         f"\n{paragraph}"
+    )
+    # Test-critic round-4 F1: "exact" itself must not be negated (e.g. "but
+    # do not compare path exactly") -- the proximity check above only
+    # confirmed "exact" sits near "path", not that it actually claims an
+    # exact comparison.
+    _assert_not_negated(
+        tail, closest_em.start(), what="'exact' (path comparison claim)",
     )
 
 
@@ -461,6 +531,26 @@ def test_recipe_paragraph_check_rejects_untied_exact() -> None:
         "you sent -- the fuzzy matcher can otherwise return more than one "
         "candidate. the returned path field is only shown for display "
         "purposes, not for comparison; pass that match's id verbatim."
+    )
+    with pytest.raises(AssertionError):
+        _check_recipe_paragraph(plausible_wrong)
+
+
+def test_recipe_paragraph_check_rejects_negated_exact() -> None:
+    """Negative case for test-critic round-4 F1: proves `_check_recipe_
+    paragraph` rejects a paraphrase that negates "exact" itself, using
+    exactly the plausible-wrong example quoted in the round-4 critique JSON
+    (tautology::F1's `surviving_implementation` field): "but do not compare
+    path exactly" still puts "exact" within ~40 chars of "path" (the round-2
+    proximity window), so without a negation guard tied to "exact" itself
+    this would have passed. This test validates the checker's
+    discrimination, not the requirement directly -- the checker still needs
+    the real docstring's GREEN run to ground the requirement."""
+    plausible_wrong = (
+        "there is no single-project lookup tool; call "
+        'search_projects(query="<owner/repo>", limit=5) with fields="full", '
+        "but do not compare path exactly -- just pick the first match "
+        "returned; pass that match's id verbatim."
     )
     with pytest.raises(AssertionError):
         _check_recipe_paragraph(plausible_wrong)
@@ -502,17 +592,33 @@ def _check_case_rule_and_cross_reference(doc: str) -> None:
     idx = doc.index("case-sensitive")
     # Guard against a negated claim ("... is NOT case-sensitive ...")
     # satisfying the substring check (test-critic F2): the words
-    # immediately before "case-sensitive" must not negate it.
-    prefix = doc[max(0, idx - 15): idx].lower()
-    assert "not " not in prefix, (
-        f"'case-sensitive' must not be negated by a preceding 'not' right "
-        f"before the case-sensitivity rule:\n{doc[max(0, idx - 60): idx + 60]}"
+    # immediately before "case-sensitive" must not negate it. Test-critic
+    # round-4 F1: widened from a literal "not " check to the full negation
+    # word set (never/not/no/isn't/doesn't/do not/don't).
+    _assert_not_negated(doc, idx, what="'case-sensitive'")
+
+    # Test-critic round-4 F1: the rule must apply universally, not be
+    # restricted to a single OTHER tool (e.g. "case-sensitive only on
+    # search_projects" reverses which tool the rule applies to while still
+    # containing every previously-checked token/position).
+    scope_window = doc[max(0, idx - 40): idx + 100]
+    assert "every tool" in scope_window, (
+        f"the case-sensitivity rule must state it applies on EVERY tool "
+        f"taking `project_id`, not restrict itself to a single other named "
+        f"tool (e.g. 'case-sensitive only on search_projects' reverses "
+        f"which tool the rule applies to):\n{scope_window}"
     )
+
     window = doc[max(0, idx - 200): idx + 200]
     assert "verbatim" in window, (
         f"expected 'pass it verbatim' near the case-sensitivity rule "
         f"(not the unrelated 'sourced from config verbatim' sentence "
         f"about board.manage elsewhere in the docstring):\n{window}"
+    )
+    # Test-critic round-4 F1: "verbatim" itself must not be negated (e.g.
+    # "no need to pass it verbatim").
+    _assert_not_negated(
+        window, window.index("verbatim"), what="'verbatim' (pass-it-verbatim instruction)",
     )
 
     assert "resolve a single" in doc, (
@@ -554,6 +660,28 @@ def test_case_rule_check_rejects_recipe_pointing_elsewhere() -> None:
         "`project_id` is case-sensitive on every tool that takes it; pass "
         "it verbatim. To resolve a single project by repo path, open the "
         "project's configuration file directly and read its `path` field."
+    )
+    with pytest.raises(AssertionError):
+        _check_case_rule_and_cross_reference(plausible_wrong)
+
+
+def test_case_rule_check_rejects_scope_reversed_to_other_tool() -> None:
+    """Negative case for test-critic round-4 F1: proves
+    `_check_case_rule_and_cross_reference` rejects a paraphrase that
+    reverses WHICH TOOL the case-sensitivity rule applies to, using exactly
+    the plausible-wrong example quoted in the round-4 critique JSON
+    (tautology::F1's `surviving_implementation` field): "case-sensitive
+    only on search_projects" restricts the rule to a different tool instead
+    of stating it applies on every tool, and "no need to pass it verbatim"
+    negates the verbatim instruction -- both still satisfy every
+    pre-round-4 assertion (the literal tokens are present, unnegated by a
+    literal 'not ' immediately before "case-sensitive"). This test
+    validates the checker's discrimination, not the requirement directly --
+    the checker still needs the real docstring's GREEN run to ground the
+    requirement."""
+    plausible_wrong = (
+        "`id` is case-sensitive only on search_projects; other tools "
+        "accept any case, no need to pass it verbatim."
     )
     with pytest.raises(AssertionError):
         _check_case_rule_and_cross_reference(plausible_wrong)
@@ -777,10 +905,21 @@ def _check_unknown_labels_section(section: str) -> None:
         f"behaviour was never verified live even on GitHub, per the plan's "
         f"#363 Approach):\n{labels_clause}"
     )
-    assert "matches no ticket" in labels_clause or "empty" in labels_clause, (
+    claim_token = next(
+        (t for t in ("matches no ticket", "empty") if t in labels_clause), None,
+    )
+    assert claim_token is not None, (
         f"labels clause must state the actual behavioural claim -- an "
         f"unknown label matches no ticket / returns an empty result -- not "
         f"just the inferred/not-verified marker on its own:\n{labels_clause}"
+    )
+    # Test-critic round-4 F1: the claim word/phrase itself must not be
+    # negated (e.g. "does not return an empty result") -- the presence
+    # check above only confirmed the token appears somewhere in the clause.
+    _assert_not_negated(
+        labels_clause,
+        labels_clause.index(claim_token),
+        what=f"{claim_token!r} (labels empty-result claim)",
     )
 
     # Behavioural grounding for test-critic round-3 F3: everything above is
@@ -831,6 +970,30 @@ def test_unknown_labels_check_rejects_swapped_verification_marking() -> None:
         "and Azure DevOps this is verified live. labels=[<unknown>] "
         "matches no ticket -> empty result on all three, inferred, not "
         "verified live. Check spelling with list_labels(project_id)."
+    )
+    with pytest.raises(AssertionError):
+        _check_unknown_labels_section(plausible_wrong)
+
+
+def test_unknown_labels_check_rejects_negated_empty_claim() -> None:
+    """Negative case for test-critic round-4 F1: proves
+    `_check_unknown_labels_section` rejects a paraphrase that negates the
+    labels=[<unknown>] empty-result claim itself, using exactly the
+    plausible-wrong example quoted in the round-4 critique JSON
+    (tautology::F1's `surviving_implementation` field): "labels=[<unknown>]
+    does not return an empty result (inferred)" still contains the literal
+    substring "empty" the pre-round-4 check looked for anywhere in the
+    labels clause, so without a negation guard tied to "empty" itself this
+    would have passed. This test validates the checker's discrimination,
+    not the requirement directly -- the checker still needs the real
+    docstring's GREEN run to ground the requirement."""
+    plausible_wrong = (
+        "Unknown labels: not_labels=[<unknown>] excludes nothing (the list "
+        "stays unfiltered) on GitHub, verified live there; on GitLab and "
+        "Azure DevOps this is not verified live, inferred from the query "
+        "the lib builds. labels=[<unknown>] does not return an empty "
+        "result, inferred, not verified live. Check spelling with "
+        "list_labels(project_id)."
     )
     with pytest.raises(AssertionError):
         _check_unknown_labels_section(plausible_wrong)

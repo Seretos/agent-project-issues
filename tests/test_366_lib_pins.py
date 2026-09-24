@@ -93,6 +93,26 @@ def _exact_version(name: str) -> Version:
     return Version(tag.lstrip("v"))
 
 
+def _installed_version(name: str) -> Version:
+    """Test-critic round-4 F2: the floor tests below only parsed the
+    DECLARED tag out of pyproject.toml -- a text-only pin edit with no
+    re-sync of the installed libs passed all three, and was only caught by
+    the separately-existing `test_installed_libs_match_declared_pins` /
+    `test_installed_projects_requires_pinned_config_tag` further down in
+    this file, a different test that could be skipped, deleted, or fail to
+    run without the floor tests themselves noticing. This helper wires the
+    floor tests directly to the installed environment's actual version via
+    `importlib.metadata.version`, so a declared-but-not-installed bump is
+    caught by the floor test itself."""
+    try:
+        return Version(importlib.metadata.version(name))
+    except importlib.metadata.PackageNotFoundError:
+        raise AssertionError(
+            f"{name} is not installed; run `pwsh scripts/test.ps1` "
+            f"(or scripts/sync-libs.ps1) to install the pinned tag"
+        )
+
+
 # ===========================================================================
 # R4 -- both pins bumped together to meet the #366 floors
 # ===========================================================================
@@ -104,24 +124,28 @@ def test_config_pin_meets_366_floor() -> None:
 
     Behavioural grounding for test-critic round-3 F4: this test (and
     `test_projects_pin_meets_366_floor` / `test_pin_comment_names_366_
-    floor_tag` below) only parses the DECLARED tag/comment strings out of
-    `pyproject.toml` -- a `pyproject.toml` edited to the right tags but never
-    reinstalled would still pass all three. The installed-environment
-    reality those three leave uncovered is exercised by
-    `test_installed_libs_match_declared_pins` (checks `importlib.metadata.
-    version()` for both libs equals the declared pin) and
-    `test_installed_projects_requires_pinned_config_tag` (checks the
-    INSTALLED lib-python-projects' own `Requires-Dist` on lib-python-config
-    names the same tag pyproject.toml declares) further down in this file --
-    together, the four tests close the gap between "the file says the right
-    thing" and "the environment actually is the right thing"."""
+    floor_tag` below) used to only parse the DECLARED tag/comment strings
+    out of `pyproject.toml` -- a `pyproject.toml` edited to the right tags
+    but never reinstalled would still pass all three, leaving the
+    installed-environment reality to be caught only by the separately-
+    existing `test_installed_libs_match_declared_pins` /
+    `test_installed_projects_requires_pinned_config_tag` further down in
+    this file. Test-critic round-4 F2: this floor test now also asserts the
+    INSTALLED version directly (`_installed_version`), so a declared-but-
+    not-installed bump is caught by the floor test itself, not only by a
+    separate test that happens to exist alongside it."""
     assert _exact_version("lib-python-config") >= _CONFIG_FLOOR
+    assert _installed_version("lib-python-config") >= _CONFIG_FLOOR
 
 
 def test_projects_pin_meets_366_floor() -> None:
     """Driving test. RED today: pyproject.toml declares lib-python-projects
-    @v0.3.22, which is below this ticket's v0.3.23 floor."""
+    @v0.3.22, which is below this ticket's v0.3.23 floor.
+
+    Test-critic round-4 F2: also asserts the INSTALLED version directly
+    (see `test_config_pin_meets_366_floor`'s docstring for why)."""
     assert _exact_version("lib-python-projects") >= _PROJECTS_FLOOR
+    assert _installed_version("lib-python-projects") >= _PROJECTS_FLOOR
 
 
 @pytest.mark.parametrize("name", ["lib-python-config", "lib-python-projects"])
@@ -146,6 +170,14 @@ def test_pin_comment_names_366_floor_tag(name: str) -> None:
     assert Version(declared.lstrip("v")) >= floor, (
         f"comment above {name} names {declared!r}, which is below this "
         f"ticket's {floor} floor"
+    )
+    # Test-critic round-4 F2: also assert the INSTALLED environment's
+    # actual version meets the same floor -- the comment can name the right
+    # tag while the environment was never re-synced.
+    assert _installed_version(name) >= floor, (
+        f"installed {name} is below this ticket's {floor} floor even though "
+        f"the comment above it names {declared!r} -- run "
+        f"`pwsh scripts/test.ps1` to re-sync the installed environment"
     )
 
 

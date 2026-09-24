@@ -259,10 +259,7 @@ def test_partial_normalization_claim_holds() -> None:
         }
     )
     assert gitlab_failed.status == "completed"
-    # GitLab's raw spelling ("failed") stays distinct from GitHub's
-    # ("failure") — the "partial" normalization does not paper over this.
     assert gitlab_failed.conclusion == "failed"
-    assert gitlab_failed.conclusion != "failure"
 
     project = _azure_project()
     azure_succeeded = _map_build_run(
@@ -291,7 +288,11 @@ def test_partial_normalization_claim_holds() -> None:
         project,
     )
     assert azure_failed.conclusion == "failure"
-    assert azure_failed.conclusion != "failed"
+    # "failure" (GitHub/Azure DevOps spelling) and "failed" (GitLab
+    # spelling) both represent a failed run but stay distinct raw
+    # strings across providers — the actual claim from the plan, not a
+    # tautology about a single value never equaling a different literal.
+    assert gitlab_failed.conclusion != azure_failed.conclusion
 
     # The text half of the claim — this is the part expected RED today.
     #
@@ -301,8 +302,12 @@ def test_partial_normalization_claim_holds() -> None:
     # complete, nothing stays provider-native") contains both tokens and
     # would still pass. Instead require each concrete guarantee to be
     # stated as an affirmative "always" claim tied to its literal terminal
-    # value, and require the denial phrasing to be absent.
+    # value, require the plan's own literal word "partial" to appear, and
+    # require no negation word sitting immediately before "partial" itself
+    # (not just before 3 hardcoded full denial phrases) or the other
+    # denial phrasing to be absent.
     descriptions = _served_descriptions()
+    negation_words = ("not", "isn't", "n't", "never", "false")
     for tool_name in TOOL_NAMES:
         text = descriptions[tool_name]
         lower = text.lower()
@@ -329,6 +334,27 @@ def test_partial_normalization_claim_holds() -> None:
             f"{tool_name}: served description does not say the other "
             "spellings stay provider-native"
         )
+
+        # Positive requirement: the plan's own word "partial" must
+        # actually appear (Approach (b) and R2 both name it literally).
+        partial_match = re.search(r"partial", lower)
+        assert partial_match, (
+            f"{tool_name}: served description never uses the word "
+            '"partial" at all — normalization must be described as '
+            "partial in those literal terms"
+        )
+
+        # No negation word immediately before the word "partial" itself —
+        # catches "not partial" / "isn't partial" / "never partial" next
+        # to that specific word, not just 3 hardcoded full phrases.
+        before_partial = lower[max(0, partial_match.start() - 30) : partial_match.start()]
+        for negation in negation_words:
+            assert negation not in before_partial, (
+                f"{tool_name}: served description has the negation word "
+                f"{negation!r} within 30 characters before the word "
+                '"partial", which would negate the partial-normalization '
+                "claim"
+            )
 
         for denial in ("not partial", "fully normalized", "fully unified"):
             assert denial not in lower, (
@@ -367,6 +393,35 @@ def test_green_condition_served(tool_name: str) -> None:
         'condition as a single conjunctive statement joining '
         'status == "completed" AND conclusion == "success" — finding '
         "both predicates loose elsewhere in the text does not count"
+    )
+
+    # A conjunctive span survives even if it is embedded in a sentence
+    # that NEGATES the green condition as a whole (e.g. "CI is NOT green
+    # merely because status == \"completed\" and conclusion ==
+    # \"success\"") or that drops the "every run for the commit"
+    # quantifier the plan's own R3 requires. Reject a negation word
+    # sitting just before the conjunctive span, and require the "every
+    # run" quantifier to appear in the same paragraph as the span.
+    span_start = conjunction_span.start()
+    before_span = lower[max(0, span_start - 40) : span_start]
+    for negation in ("not", "isn't", "doesn't", "never", "false"):
+        assert negation not in before_span, (
+            f"{tool_name}: served description has the negation word "
+            f"{negation!r} within 40 characters before the conjunctive "
+            'green-condition span, which would negate rather than assert '
+            "the green condition"
+        )
+
+    paragraphs = re.split(r"\n\s*\n", text)
+    span_paragraph = next(
+        (p for p in paragraphs if conjunction_span.group(0) in p), text
+    )
+    assert "every run" in span_paragraph.lower(), (
+        f"{tool_name}: served description states the conjunctive "
+        'predicates but drops the "every run" quantifier (the plan\'s '
+        'own green condition is "every run for the commit has '
+        'status == \\"completed\\" AND conclusion == \\"success\\"") in '
+        "the same paragraph as the conjunctive span"
     )
 
     wait_pipeline_context = re.search(

@@ -1,22 +1,36 @@
-"""Driving tests for ticket #357: document the `status`/`conclusion`
-vocabulary on `list_pipeline_runs` / `get_pipeline_run`.
+"""Driving tests for ticket #357 (generation 2 replan): document the
+`status`/`conclusion` vocabulary on `list_pipeline_runs` / `get_pipeline_run`.
 
 An agent that sees only the served tool descriptions must be able to
 answer, in one step and without source access:
-  - R1 (Q1): which `status`/`conclusion` values each provider returns.
-  - R2 (Q2): whether they are normalized (partially).
+  - R1 (Q1): which `status`/`conclusion` values each provider returns,
+    and which conclusion values count as green / red / no-verdict /
+    pending — i.e. which `project-issues wait-pipeline` exit code
+    (`cli._classify`) each one produces. `driving-test` evidence; the
+    tests below are it.
+  - R2 (Q2): whether the values are normalized (partially). Evidence
+    kind `none` per the plan (documentation-completeness, reviewer
+    judged) — no test here.
   - R3 (Q3): what "CI is green" means, plus the `wait-pipeline` CLI
-    pointer.
+    pointer. Evidence kind `none` per the plan — no test here; this
+    module docstring's three-question framing is itself the artifact
+    R3 asks to hold in one block.
 
 Every test reads the text FastMCP actually serves — `FastMCP("t")` +
 `pipelines.register(mcp)` + `asyncio.run(mcp.list_tools())` +
 `.description` — the same path `server.py` uses in production (no
 wrapper, no `description=` override).
 
-R1 additionally drives the pinned lib's real per-provider mappers
-(`github._map_run`, `gitlab._map_pipeline_run`,
-`azuredevops._map_build_run`) so the documented table cannot drift
-from the actual mapping behaviour.
+R1 drives the pinned lib's real per-provider mappers (`github._map_run`,
+`gitlab._map_pipeline_run`, `azuredevops._map_build_run`) AND the real
+`cli._classify` (the `wait-pipeline` exit-code classifier) so the
+documented table cannot drift from either: the table's `status` column
+must equal the mapper's status output, and the table's four verdict
+columns (`green (exit 0)` / `red (exit 1)` / `no verdict (exit 5)` /
+`pending (exit 2)`) must equal the exact partition `cli._classify`
+assigns to the mapper's conclusion output — derived from the real
+function, never hand-transcribed, so a lib bump or a `_classify` change
+fails this test naming the drifted value and column.
 
 Limitation (per plan): every pass-through branch below checks only the
 raw values this file declares, not a live provider API call. That
@@ -28,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,56 +52,10 @@ from lib_python_projects.providers.github import _map_run
 from lib_python_projects.providers.gitlab import _map_pipeline_run
 from mcp.server.fastmcp import FastMCP
 
+from project_issues_plugin import cli
 from project_issues_plugin.tools import pipelines as pipeline_tools
 
 TOOL_NAMES = ("list_pipeline_runs", "get_pipeline_run")
-
-# ---------- golden-string requirements (R2, R3) -------------------------------
-#
-# Rounds 1-3 tried regex/proximity/negation-window heuristics to pin down R2
-# and R3 without pinning exact wording; each round's checks were beaten by a
-# more elaborate adversarial docstring that still passed while denying or
-# omitting the claim. Strategy for round 4: require one complete, literal
-# sentence per requirement, chosen so the sentence's mere presence
-# structurally entails the claim — no adversarial docstring can contain this
-# exact sentence while meaning the opposite. `pipelines.py`'s
-# `_RUN_VOCABULARY_DOC` constant (written in the implement phase) must
-# contain each sentence verbatim.
-
-R2_GOLDEN_SENTENCE = (
-    'Normalization is partial: terminal status is always "completed" and '
-    'green conclusion is always "success", but other conclusion spellings '
-    "stay provider-native and are not unified across providers."
-)
-
-R3_GOLDEN_SENTENCE = (
-    'Every run for the commit must have status == "completed" and '
-    'conclusion == "success" to count as CI green for that commit; use the '
-    "bundled project-issues wait-pipeline CLI as the ready-made verdict "
-    "instead of hand-rolled polling or comparison."
-)
-
-# Round 5 (test-critic finding): the golden-sentence checks above only prove
-# the required sentence is PRESENT somewhere in the served description; they
-# say nothing about a separate, contradicting sentence placed elsewhere in
-# the same text (e.g. a stray claim that normalization is actually complete,
-# or that the two green-condition predicates aren't really sufficient). These
-# phrase lists close that loophole with a whole-text (not proximity-windowed)
-# absence check: none of them may appear ANYWHERE in the served description.
-
-R2_CONTRADICTION_PHRASES = (
-    "fully normalized",
-    "fully unified",
-    "normalization is complete",
-    "not partial",
-)
-
-R3_CONTRADICTION_PHRASES = (
-    "not green",
-    "isn't green",
-    "doesn't mean green",
-    "is not sufficient",
-)
 
 
 # ---------- served-description helpers ---------------------------------------
@@ -100,6 +69,24 @@ def _served_descriptions() -> dict[str, str]:
 
 
 _BACKTICK_RE = re.compile(r"`([^`]*)`")
+_EXIT_CODE_RE = re.compile(r"exit\s+(\d+)")
+
+
+def _header_row(description: str) -> str:
+    """Return the `| Provider | status | ... |` header row text.
+
+    Raises with the expected RED reason ("table header missing") when
+    the run-vocabulary table is absent from the served description —
+    which is the case today, before `_RUN_VOCABULARY_DOC` exists.
+    """
+    for line in description.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("| Provider |"):
+            return stripped
+    raise AssertionError(
+        "table header missing: no '| Provider |' row found in the served "
+        f"description:\n{description}"
+    )
 
 
 def _provider_row(description: str, provider_label: str) -> str:
@@ -118,12 +105,59 @@ def _provider_row(description: str, provider_label: str) -> str:
     )
 
 
+def _row_cells(row: str) -> list[str]:
+    return [c.strip() for c in row.strip().strip("|").split("|")]
+
+
 def _cell_tokens(row: str, column_index: int) -> set[str | None]:
-    """column_index: 0 = provider, 1 = status, 2 = conclusion."""
-    cells = [c.strip() for c in row.strip().strip("|").split("|")]
-    cell = cells[column_index]
+    """column_index: 0 = provider, others depend on the table shape."""
+    cell = _row_cells(row)[column_index]
     tokens = _BACKTICK_RE.findall(cell)
     return {None if t == "null" else t for t in tokens}
+
+
+def _column_index(header_row: str, label: str) -> int:
+    """Locate a column by its header label (case-insensitive prefix match,
+    so `"green"` matches the header cell `"green (exit 0)"`).
+
+    Raises with a RED reason naming the missing column/label when the
+    table doesn't declare it.
+    """
+    cells = [c.lower() for c in _row_cells(header_row)]
+    for idx, cell in enumerate(cells):
+        if cell.startswith(label.lower()):
+            return idx
+    raise AssertionError(
+        f"no {label!r} column found in header row: {header_row!r}"
+    )
+
+
+def _exit_code_for_column(header_row: str, column_index: int) -> int:
+    """Read the `exit N` annotation the header itself declares for a
+    verdict column, e.g. `"green (exit 0)"` -> 0. This ties the test to
+    whatever exit code the docstring CLAIMS for that column, rather than
+    a value hard-coded in this test file — so a mismatch between the
+    claimed exit code and `cli._classify`'s real one is exactly what
+    `test_table_matches_mappers_and_verdict` below is checking for.
+    """
+    cell = _row_cells(header_row)[column_index]
+    match = _EXIT_CODE_RE.search(cell)
+    if not match:
+        raise AssertionError(
+            f"header column {column_index} ({cell!r}) does not declare "
+            "an 'exit N' code"
+        )
+    return int(match.group(1))
+
+
+def _classify_one(conclusion: str | None) -> int:
+    """Exit code `cli._classify` (the `wait-pipeline` verdict function)
+    assigns to a single run carrying this conclusion. `_classify` only
+    reads `run.conclusion` (see `cli.py` around lines 88-112) — no other
+    attribute is required on the run stand-in.
+    """
+    code, _state = cli._classify([SimpleNamespace(conclusion=conclusion)])
+    return code
 
 
 # ---------- GitHub mapper inputs ----------------------------------------------
@@ -163,6 +197,31 @@ def _github_mapped_sets() -> tuple[set[str], set[str | None]]:
     return statuses, conclusions
 
 
+def _github_terminal_runs() -> list:
+    """Every run at GitHub's terminal raw status (`"completed"`), across
+    every conclusion GitHub can report at that status (excludes `None`,
+    which GitHub only reports for a run that has NOT finished)."""
+    return [
+        _map_run(
+            {
+                "id": i,
+                "name": "CI",
+                "head_branch": "main",
+                "head_sha": "deadbeef",
+                "event": "push",
+                "status": "completed",
+                "conclusion": conclusion,
+                "html_url": "https://github.com/acme/backend/actions/runs/1",
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T01:00:00Z",
+                "run_attempt": 1,
+            }
+        )
+        for i, conclusion in enumerate(GITHUB_CONCLUSIONS)
+        if conclusion is not None
+    ]
+
+
 # ---------- GitLab mapper inputs ----------------------------------------------
 
 GITLAB_STATUSES = [
@@ -170,6 +229,7 @@ GITLAB_STATUSES = [
     "created", "waiting_for_resource", "preparing", "pending", "running",
     "manual", "scheduled", "",
 ]
+GITLAB_TERMINAL_STATUSES = ["success", "failed", "canceled", "skipped"]
 
 
 def _gitlab_mapped_sets() -> tuple[set[str], set[str | None]]:
@@ -193,6 +253,27 @@ def _gitlab_mapped_sets() -> tuple[set[str], set[str | None]]:
     return statuses, conclusions
 
 
+def _gitlab_terminal_runs() -> list:
+    """Every run at one of GitLab's terminal raw statuses — the ones the
+    lib folds into `status="completed"` (see `_TERMINAL_PIPELINE_STATUSES`
+    in `lib_python_projects.providers.gitlab`)."""
+    return [
+        _map_pipeline_run(
+            {
+                "id": i,
+                "ref": "main",
+                "sha": "deadbeef",
+                "source": "push",
+                "status": status,
+                "web_url": "https://gitlab.com/acme/backend/-/pipelines/1",
+                "created_at": "2024-01-01T00:00:00Z",
+                "finished_at": "2024-01-01T01:00:00Z",
+            }
+        )
+        for i, status in enumerate(GITLAB_TERMINAL_STATUSES)
+    ]
+
+
 # ---------- Azure DevOps mapper inputs -----------------------------------------
 
 AZURE_STATUSES = [
@@ -200,6 +281,9 @@ AZURE_STATUSES = [
 ]
 AZURE_RESULTS: list[str | None] = [
     "succeeded", "failed", "partiallySucceeded", "canceled", "none", None,
+]
+AZURE_TERMINAL_RESULTS: list[str] = [
+    "succeeded", "failed", "partiallySucceeded", "canceled", "none",
 ]
 
 
@@ -233,234 +317,182 @@ def _azure_mapped_sets() -> tuple[set[str], set[str | None]]:
     return statuses, conclusions
 
 
+def _azure_terminal_runs() -> list:
+    """Every run at Azure DevOps's terminal raw status (`"completed"`),
+    across every `result` value the lib recognises (a `result` of
+    `None`, i.e. the key absent, is deliberately excluded: that raw shape
+    means "completed but no result yet", not a finished/graded run)."""
+    project = _azure_project()
+    return [
+        _map_build_run(
+            {
+                "id": i,
+                "definition": {"name": "CI"},
+                "sourceBranch": "refs/heads/main",
+                "sourceVersion": "deadbeef",
+                "reason": "individualCI",
+                "status": "completed",
+                "result": result,
+                "queueTime": "2024-01-01T00:00:00Z",
+                "finishTime": "2024-01-01T01:00:00Z",
+            },
+            project,
+        )
+        for i, result in enumerate(AZURE_TERMINAL_RESULTS)
+    ]
+
+
 PROVIDER_CASES = {
     "github": ("GitHub", _github_mapped_sets),
     "gitlab": ("GitLab", _gitlab_mapped_sets),
     "azure": ("Azure DevOps", _azure_mapped_sets),
 }
 
+TERMINAL_RUN_CASES = {
+    "github": ("GitHub", _github_terminal_runs),
+    "gitlab": ("GitLab", _gitlab_terminal_runs),
+    "azure": ("Azure DevOps", _azure_terminal_runs),
+}
 
-# ---------- R1 (Q1): table matches mapper output, per column, per tool -------
+VERDICT_LABELS = ("green", "red", "no verdict", "pending")
+
+
+# ---------- R1 (Q1): table matches mapper output + cli._classify partition ---
 
 
 @pytest.mark.parametrize("provider_key", ["github", "gitlab", "azure"])
-def test_table_matches_mapper_output(provider_key: str) -> None:
+def test_table_matches_mappers_and_verdict(provider_key: str) -> None:
+    """The driving test for R1: the served table's `status` column must
+    equal the mapper's real status output, and its four verdict columns
+    (green/red/no-verdict/pending) must equal the exact partition
+    `cli._classify` assigns to the mapper's real conclusion output —
+    computed from `cli._classify` itself, never hand-transcribed here.
+    """
     provider_label, mapped_sets_fn = PROVIDER_CASES[provider_key]
     expected_statuses, expected_conclusions = mapped_sets_fn()
-    descriptions = _served_descriptions()
 
+    expected_by_exit: dict[int, set[str | None]] = {}
+    for conclusion in expected_conclusions:
+        code = _classify_one(conclusion)
+        expected_by_exit.setdefault(code, set()).add(conclusion)
+
+    descriptions = _served_descriptions()
     for tool_name in TOOL_NAMES:
-        row = _provider_row(descriptions[tool_name], provider_label)
-        documented_statuses = _cell_tokens(row, 1)
-        documented_conclusions = _cell_tokens(row, 2)
+        description = descriptions[tool_name]
+        header = _header_row(description)
+        row = _provider_row(description, provider_label)
+
+        status_idx = _column_index(header, "status")
+        documented_statuses = _cell_tokens(row, status_idx)
         assert documented_statuses == expected_statuses, (
             f"{tool_name}: documented status column for {provider_label} "
             f"{documented_statuses} does not match mapper output "
             f"{expected_statuses}"
         )
-        assert documented_conclusions == expected_conclusions, (
-            f"{tool_name}: documented conclusion column for {provider_label} "
-            f"{documented_conclusions} does not match mapper output "
-            f"{expected_conclusions}"
+
+        documented_by_exit: dict[int, set[str | None]] = {}
+        for label in VERDICT_LABELS:
+            col_idx = _column_index(header, label)
+            exit_code = _exit_code_for_column(header, col_idx)
+            tokens = _cell_tokens(row, col_idx)
+            if tokens:
+                documented_by_exit.setdefault(exit_code, set()).update(tokens)
+
+        assert documented_by_exit == expected_by_exit, (
+            f"{tool_name}: documented verdict-column partition for "
+            f"{provider_label} {documented_by_exit} does not match the "
+            f"partition cli._classify actually assigns to the mapped "
+            f"conclusions {expected_by_exit}"
         )
 
 
-# ---------- R2 (Q2): partial-normalization claim ------------------------------
+# ---------- R1 additional coverage: terminal/green raw states ----------------
 
 
-def test_partial_normalization_claim_holds() -> None:
-    # Mapper-level facts the partial-normalization claim rests on — these
-    # already hold today against the pinned lib, independent of the new
-    # docstring text.
-    github_run = _map_run(
-        {
-            "id": 1, "status": "completed", "conclusion": "success",
-            "head_branch": "main", "head_sha": "deadbeef", "event": "push",
-            "html_url": "https://github.com/acme/backend/actions/runs/1",
-            "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T01:00:00Z", "run_attempt": 1,
-        }
-    )
-    assert github_run.status == "completed"
-    assert github_run.conclusion == "success"
+@pytest.mark.parametrize("provider_key", ["github", "gitlab", "azure"])
+def test_terminal_state_and_green_conclusion_map_to_completed_status(
+    provider_key: str,
+) -> None:
+    """Every finished (terminal) raw state, across all three providers,
+    maps to `status == "completed"` — and since a green run (conclusion
+    `"success"`) only ever occurs at a terminal raw state, this also
+    covers "every green-conclusion run maps to status=='completed'".
+    This grounds the two-conjunct green condition R3's docstring text
+    states (status AND conclusion) against real mapper behaviour.
 
-    gitlab_success = _map_pipeline_run(
-        {
-            "id": 2, "ref": "main", "sha": "deadbeef", "source": "push",
-            "status": "success",
-            "web_url": "https://gitlab.com/acme/backend/-/pipelines/2",
-            "created_at": "2024-01-01T00:00:00Z",
-            "finished_at": "2024-01-01T01:00:00Z",
-        }
-    )
-    assert gitlab_success.status == "completed"
-    assert gitlab_success.conclusion == "success"
-
-    gitlab_failed = _map_pipeline_run(
-        {
-            "id": 3, "ref": "main", "sha": "deadbeef", "source": "push",
-            "status": "failed",
-            "web_url": "https://gitlab.com/acme/backend/-/pipelines/3",
-            "created_at": "2024-01-01T00:00:00Z",
-            "finished_at": "2024-01-01T01:00:00Z",
-        }
-    )
-    assert gitlab_failed.status == "completed"
-    assert gitlab_failed.conclusion == "failed"
-
-    project = _azure_project()
-    azure_succeeded = _map_build_run(
-        {
-            "id": 4, "definition": {"name": "CI"},
-            "sourceBranch": "refs/heads/main", "sourceVersion": "deadbeef",
-            "reason": "individualCI", "status": "completed",
-            "result": "succeeded",
-            "queueTime": "2024-01-01T00:00:00Z",
-            "finishTime": "2024-01-01T01:00:00Z",
-        },
-        project,
-    )
-    assert azure_succeeded.status == "completed"
-    assert azure_succeeded.conclusion == "success"
-
-    azure_failed = _map_build_run(
-        {
-            "id": 5, "definition": {"name": "CI"},
-            "sourceBranch": "refs/heads/main", "sourceVersion": "deadbeef",
-            "reason": "individualCI", "status": "completed",
-            "result": "failed",
-            "queueTime": "2024-01-01T00:00:00Z",
-            "finishTime": "2024-01-01T01:00:00Z",
-        },
-        project,
-    )
-    assert azure_failed.conclusion == "failure"
-    # "failure" (GitHub/Azure DevOps spelling) and "failed" (GitLab
-    # spelling) both represent a failed run but stay distinct raw
-    # strings across providers — already fully established by the two
-    # equality assertions above (gitlab_failed.conclusion == "failed",
-    # azure_failed.conclusion == "failure"); a trailing != assertion here
-    # would add nothing beyond those two literal pins.
-
-    # The text half of the claim — this is the part expected RED today.
-    #
-    # Rounds 1-3's regex/proximity/negation-window heuristics were each
-    # beaten by a more elaborate adversarial docstring that passed the
-    # checks while still denying or omitting the claim. Round 4 requires
-    # the served description to contain the golden sentence verbatim: the
-    # sentence's own content IS the claim (it names both concrete
-    # guarantees, the word "partial", and "provider-native" in one
-    # unambiguous statement), so no adversarial rewording can satisfy an
-    # exact-substring check while saying the opposite.
-    descriptions = _served_descriptions()
-    for tool_name in TOOL_NAMES:
-        text = descriptions[tool_name]
-        assert R2_GOLDEN_SENTENCE in text, (
-            f"{tool_name}: served description does not contain the "
-            f"required partial-normalization sentence verbatim:\n"
-            f"{R2_GOLDEN_SENTENCE!r}"
-        )
-        # Whole-text scan (round 5): the golden sentence's presence alone
-        # does not rule out a separate, contradicting sentence placed
-        # elsewhere in the same served description (e.g. a stray claim
-        # that normalization is actually complete). Scan the ENTIRE text,
-        # not a window around the golden sentence, for phrases that would
-        # contradict "partial" / "not unified across providers".
-        lowered = text.lower()
-        for phrase in R2_CONTRADICTION_PHRASES:
-            assert phrase not in lowered, (
-                f"{tool_name}: served description contains contradicting "
-                f"phrase {phrase!r} elsewhere in the text, undermining the "
-                f"partial-normalization claim:\n{text}"
-            )
-
-
-# ---------- R3 (Q3): green condition + wait-pipeline pointer ------------------
-
-
-def _assert_green_run_grounding() -> None:
-    """Mapper-grounded facts the R3 green-condition claim rests on (round 6
-    test-critic finding): unlike R2's `test_partial_normalization_claim_holds`,
-    this test previously checked only the served docstring text and never
-    confirmed against the real pinned-lib mappers that a genuinely green run
-    of EACH provider actually maps to `status == "completed"` and
-    `conclusion == "success"`. These assertions close that gap and are
-    expected to PASS today (they test real mapper behaviour, independent of
-    the new docstring); only the served-text assertions below them are
-    expected RED.
+    This test is independent of the served docstring/table and already
+    passes today against the pinned lib — it is additional coverage for
+    R1, not the driving test (see `test_table_matches_mappers_and_verdict`
+    for the part that is expected RED before `pipelines.py` is changed).
     """
-    github_run = _map_run(
-        {
-            "id": 100, "status": "completed", "conclusion": "success",
-            "head_branch": "main", "head_sha": "deadbeef", "event": "push",
-            "html_url": "https://github.com/acme/backend/actions/runs/100",
-            "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-01T01:00:00Z", "run_attempt": 1,
-        }
-    )
-    assert github_run.status == "completed"
-    assert github_run.conclusion == "success"
+    provider_label, terminal_runs_fn = TERMINAL_RUN_CASES[provider_key]
+    runs = terminal_runs_fn()
+    assert runs, f"{provider_label}: no terminal raw states constructed"
 
-    gitlab_run = _map_pipeline_run(
-        {
-            "id": 101, "ref": "main", "sha": "deadbeef", "source": "push",
-            "status": "success",
-            "web_url": "https://gitlab.com/acme/backend/-/pipelines/101",
-            "created_at": "2024-01-01T00:00:00Z",
-            "finished_at": "2024-01-01T01:00:00Z",
-        }
-    )
-    assert gitlab_run.status == "completed"
-    assert gitlab_run.conclusion == "success"
-
-    azure_run = _map_build_run(
-        {
-            "id": 102, "definition": {"name": "CI"},
-            "sourceBranch": "refs/heads/main", "sourceVersion": "deadbeef",
-            "reason": "individualCI", "status": "completed",
-            "result": "succeeded",
-            "queueTime": "2024-01-01T00:00:00Z",
-            "finishTime": "2024-01-01T01:00:00Z",
-        },
-        _azure_project(),
-    )
-    assert azure_run.status == "completed"
-    assert azure_run.conclusion == "success"
-
-
-@pytest.mark.parametrize("tool_name", TOOL_NAMES)
-def test_green_condition_served(tool_name: str) -> None:
-    # Round 6 (test-critic finding): ground the claim against the real
-    # per-provider mappers BEFORE checking the served text, the same way R2
-    # is already grounded. A wrong `wait-pipeline` predicate paired with a
-    # plausible-sounding sentence can no longer coincidentally pass this
-    # test, since these mapper assertions independently need to hold too.
-    _assert_green_run_grounding()
-
-    # Rounds 1-3's regex/proximity/negation-window heuristics were each
-    # beaten by a more elaborate adversarial docstring that passed the
-    # checks while still denying the green condition or dropping the
-    # quantifier. Round 4 requires the served description to contain the
-    # golden sentence verbatim: the sentence's own content IS the claim (it
-    # joins both predicates with "and", carries the "every run for the
-    # commit" quantifier, and names "project-issues wait-pipeline" as the
-    # ready-made verdict in one unambiguous statement), so no adversarial
-    # rewording can satisfy an exact-substring check while saying the
-    # opposite.
-    text = _served_descriptions()[tool_name]
-    assert R3_GOLDEN_SENTENCE in text, (
-        f"{tool_name}: served description does not contain the required "
-        f"green-condition sentence verbatim:\n{R3_GOLDEN_SENTENCE!r}"
-    )
-    # Whole-text scan (round 5): the golden sentence's presence alone does
-    # not rule out a separate, contradicting statement placed elsewhere in
-    # the same served description (e.g. "CI is NOT green just because
-    # those two conditions hold" tucked into an unrelated paragraph). Scan
-    # the ENTIRE text, not a window around the golden sentence.
-    lowered = text.lower()
-    for phrase in R3_CONTRADICTION_PHRASES:
-        assert phrase not in lowered, (
-            f"{tool_name}: served description contains contradicting "
-            f"phrase {phrase!r} elsewhere in the text, undermining the "
-            f"green-condition claim:\n{text}"
+    for run in runs:
+        assert run.status == "completed", (
+            f"{provider_label}: terminal raw state (conclusion "
+            f"{run.conclusion!r}) produced status {run.status!r}, "
+            "expected 'completed'"
         )
+
+    green_runs = [r for r in runs if r.conclusion == "success"]
+    assert green_runs, (
+        f"{provider_label}: no green (conclusion=='success') run found "
+        "among the terminal-state runs"
+    )
+    for run in green_runs:
+        assert run.status == "completed"
+
+
+# ---------- R1 additional coverage: cli._classify aggregate + unknown --------
+
+
+def test_classify_commit_aggregate_requires_every_run_green() -> None:
+    """`cli._classify([green, x])` returns exit 0 (success) if and only
+    if `x` is also green — a commit is CI-green only when EVERY run for
+    it is green. Also covers the zero-run edge case explicitly per the
+    plan-critic note: `_classify([])` does NOT return the plan's guessed
+    no-verdict/exit-5 — reading `cli.py` shows a dedicated `EXIT_NO_RUNS`
+    (3) branch for an empty run list (state `"no_runs"`), checked here
+    against the real function rather than assumed.
+    """
+    green = SimpleNamespace(conclusion="success")
+    red = SimpleNamespace(conclusion="failure")
+    pending = SimpleNamespace(conclusion=None)
+    unknown = SimpleNamespace(conclusion="totally_unrecognised_value")
+
+    code, state = cli._classify([green, green])
+    assert (code, state) == (cli.EXIT_SUCCESS, "success"), (
+        f"_classify([green, green]) returned ({code}, {state!r}), "
+        "expected (EXIT_SUCCESS, 'success')"
+    )
+
+    for other in (red, pending, unknown):
+        code, state = cli._classify([green, other])
+        assert code != cli.EXIT_SUCCESS, (
+            f"_classify([green, {other.conclusion!r}]) returned exit "
+            f"{code} ({state!r}) — a non-green run must not let the "
+            "commit read as green"
+        )
+
+    # Zero-run edge case (plan-critic finding): verified against the real
+    # function, not assumed. It is EXIT_NO_RUNS (3), "no_runs" — NOT
+    # EXIT_NO_VERDICT (5) as the plan's paraphrase speculated.
+    code, state = cli._classify([])
+    assert (code, state) == (cli.EXIT_NO_RUNS, "no_runs"), (
+        f"_classify([]) returned ({code}, {state!r}), expected "
+        "(EXIT_NO_RUNS, 'no_runs') for the zero-run case"
+    )
+
+
+def test_classify_unknown_conclusion_is_no_verdict() -> None:
+    """An unrecognised/unknown conclusion value maps to "no verdict"
+    (exit 5) via `cli._classify` — never silently treated as green or
+    red."""
+    unknown = SimpleNamespace(conclusion="totally_unrecognised_value")
+    code, state = cli._classify([unknown])
+    assert (code, state) == (cli.EXIT_NO_VERDICT, "no_verdict"), (
+        f"_classify([unrecognised]) returned ({code}, {state!r}), "
+        "expected (EXIT_NO_VERDICT, 'no_verdict')"
+    )

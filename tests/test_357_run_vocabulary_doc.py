@@ -66,6 +66,28 @@ R3_GOLDEN_SENTENCE = (
     "instead of hand-rolled polling or comparison."
 )
 
+# Round 5 (test-critic finding): the golden-sentence checks above only prove
+# the required sentence is PRESENT somewhere in the served description; they
+# say nothing about a separate, contradicting sentence placed elsewhere in
+# the same text (e.g. a stray claim that normalization is actually complete,
+# or that the two green-condition predicates aren't really sufficient). These
+# phrase lists close that loophole with a whole-text (not proximity-windowed)
+# absence check: none of them may appear ANYWHERE in the served description.
+
+R2_CONTRADICTION_PHRASES = (
+    "fully normalized",
+    "fully unified",
+    "normalization is complete",
+    "not partial",
+)
+
+R3_CONTRADICTION_PHRASES = (
+    "not green",
+    "isn't green",
+    "doesn't mean green",
+    "is not sufficient",
+)
+
 
 # ---------- served-description helpers ---------------------------------------
 
@@ -315,9 +337,10 @@ def test_partial_normalization_claim_holds() -> None:
     assert azure_failed.conclusion == "failure"
     # "failure" (GitHub/Azure DevOps spelling) and "failed" (GitLab
     # spelling) both represent a failed run but stay distinct raw
-    # strings across providers — the actual claim from the plan, not a
-    # tautology about a single value never equaling a different literal.
-    assert gitlab_failed.conclusion != azure_failed.conclusion
+    # strings across providers — already fully established by the two
+    # equality assertions above (gitlab_failed.conclusion == "failed",
+    # azure_failed.conclusion == "failure"); a trailing != assertion here
+    # would add nothing beyond those two literal pins.
 
     # The text half of the claim — this is the part expected RED today.
     #
@@ -337,6 +360,19 @@ def test_partial_normalization_claim_holds() -> None:
             f"required partial-normalization sentence verbatim:\n"
             f"{R2_GOLDEN_SENTENCE!r}"
         )
+        # Whole-text scan (round 5): the golden sentence's presence alone
+        # does not rule out a separate, contradicting sentence placed
+        # elsewhere in the same served description (e.g. a stray claim
+        # that normalization is actually complete). Scan the ENTIRE text,
+        # not a window around the golden sentence, for phrases that would
+        # contradict "partial" / "not unified across providers".
+        lowered = text.lower()
+        for phrase in R2_CONTRADICTION_PHRASES:
+            assert phrase not in lowered, (
+                f"{tool_name}: served description contains contradicting "
+                f"phrase {phrase!r} elsewhere in the text, undermining the "
+                f"partial-normalization claim:\n{text}"
+            )
 
 
 # ---------- R3 (Q3): green condition + wait-pipeline pointer ------------------
@@ -359,3 +395,15 @@ def test_green_condition_served(tool_name: str) -> None:
         f"{tool_name}: served description does not contain the required "
         f"green-condition sentence verbatim:\n{R3_GOLDEN_SENTENCE!r}"
     )
+    # Whole-text scan (round 5): the golden sentence's presence alone does
+    # not rule out a separate, contradicting statement placed elsewhere in
+    # the same served description (e.g. "CI is NOT green just because
+    # those two conditions hold" tucked into an unrelated paragraph). Scan
+    # the ENTIRE text, not a window around the golden sentence.
+    lowered = text.lower()
+    for phrase in R3_CONTRADICTION_PHRASES:
+        assert phrase not in lowered, (
+            f"{tool_name}: served description contains contradicting "
+            f"phrase {phrase!r} elsewhere in the text, undermining the "
+            f"green-condition claim:\n{text}"
+        )

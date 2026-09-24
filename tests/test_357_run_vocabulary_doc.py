@@ -294,17 +294,49 @@ def test_partial_normalization_claim_holds() -> None:
     assert azure_failed.conclusion != "failed"
 
     # The text half of the claim — this is the part expected RED today.
+    #
+    # Bare substring checks on "partial" / "provider-native" are a
+    # tautology: a description that explicitly DENIES partial
+    # normalization (e.g. "this is NOT partial, normalization is fully
+    # complete, nothing stays provider-native") contains both tokens and
+    # would still pass. Instead require each concrete guarantee to be
+    # stated as an affirmative "always" claim tied to its literal terminal
+    # value, and require the denial phrasing to be absent.
     descriptions = _served_descriptions()
     for tool_name in TOOL_NAMES:
         text = descriptions[tool_name]
-        assert "partial" in text.lower(), (
-            f"{tool_name}: served description has no partial-normalization "
-            "statement"
+        lower = text.lower()
+
+        status_guarantee = re.search(
+            r"always[^.]{0,120}completed|completed[^.]{0,120}always", lower
         )
+        assert status_guarantee, (
+            f"{tool_name}: served description does not state, as an "
+            'affirmative "always" guarantee, that terminal status is '
+            'always "completed"'
+        )
+
+        conclusion_guarantee = re.search(
+            r"always[^.]{0,120}success|success[^.]{0,120}always", lower
+        )
+        assert conclusion_guarantee, (
+            f"{tool_name}: served description does not state, as an "
+            'affirmative "always" guarantee, that green conclusion is '
+            'always "success"'
+        )
+
         assert "provider-native" in text, (
             f"{tool_name}: served description does not say the other "
             "spellings stay provider-native"
         )
+
+        for denial in ("not partial", "fully normalized", "fully unified"):
+            assert denial not in lower, (
+                f"{tool_name}: served description contains the denial "
+                f"phrase {denial!r}, which would contradict the "
+                "partial-normalization claim even though 'partial' and "
+                "'provider-native' both appear in the text"
+            )
 
 
 # ---------- R3 (Q3): green condition + wait-pipeline pointer ------------------
@@ -312,15 +344,41 @@ def test_partial_normalization_claim_holds() -> None:
 
 @pytest.mark.parametrize("tool_name", TOOL_NAMES)
 def test_green_condition_served(tool_name: str) -> None:
+    # Bare substring checks on the two predicates and the wait-pipeline
+    # name are a tautology: they'd pass even if the predicates were stated
+    # in unrelated sentences (not as one conjunctive green condition) or if
+    # "wait-pipeline" appeared incidentally with no tie to being the
+    # ready-made verdict. Require the predicates to co-occur, joined by a
+    # conjunction, within one contiguous span; require the wait-pipeline
+    # mention to sit next to language that frames it as the check to run.
     text = _served_descriptions()[tool_name]
-    assert 'status == "completed"' in text, (
-        f"{tool_name}: served description lacks the status=='completed' "
-        "green predicate"
+    lower = text.lower()
+
+    conjunction_span = re.search(
+        r'status == "completed"[^.\n]{0,80}\band\b[^.\n]{0,80}'
+        r'conclusion == "success"'
+        r'|conclusion == "success"[^.\n]{0,80}\band\b[^.\n]{0,80}'
+        r'status == "completed"',
+        text,
+        re.IGNORECASE,
     )
-    assert 'conclusion == "success"' in text, (
-        f"{tool_name}: served description lacks the conclusion=='success' "
-        "green predicate"
+    assert conjunction_span, (
+        f"{tool_name}: served description does not state the green "
+        'condition as a single conjunctive statement joining '
+        'status == "completed" AND conclusion == "success" — finding '
+        "both predicates loose elsewhere in the text does not count"
     )
-    assert "project-issues wait-pipeline" in text, (
-        f"{tool_name}: served description lacks the wait-pipeline pointer"
+
+    wait_pipeline_context = re.search(
+        r"(instead of|ready-made|use|run)[^.\n]{0,60}"
+        r"project-issues wait-pipeline"
+        r"|project-issues wait-pipeline[^.\n]{0,60}"
+        r"(instead of|ready-made|use|run)",
+        lower,
+    )
+    assert wait_pipeline_context, (
+        f"{tool_name}: served description mentions 'project-issues "
+        "wait-pipeline' but not textually tied to being the ready-made "
+        "check/verdict for the green condition — a bare incidental "
+        "mention elsewhere does not count"
     )

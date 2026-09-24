@@ -21,7 +21,9 @@ No production code (`tools/tickets.py`, `tools/_providers.py`,
 """
 from __future__ import annotations
 
+import inspect
 import re
+from typing import Callable
 
 import httpx
 import pytest
@@ -157,7 +159,15 @@ _5XX_PROVIDER_ERRORS = [
 def test_safe_5xx_appends_retry_hint(error_cls, status: int) -> None:
     """Driving test for R2 (`_safe`, single-project choke point). RED
     today: `_with_auth_hint` only special-cases `status == 401`, so a 5xx
-    returns `str(exc)` unchanged from `_safe` — 'retry' never appears."""
+    returns `str(exc)` unchanged from `_safe` — none of this hint's text
+    appears.
+
+    Pins the plan's actual `_TRANSIENT_5XX_HINT` wording ('often
+    transient' and the duplicate-create warning 'already created'), not
+    just the bare word 'retry' — test-critic round 3, tautology::F2: a
+    hint reading e.g. ' — do not retry' would satisfy a 'retry'-only
+    check while telling the agent the opposite of what the plan
+    specifies."""
     from project_issues_plugin.tools._providers import _safe
 
     exc = error_cls(status, "boom")
@@ -176,6 +186,13 @@ def test_safe_5xx_appends_retry_hint(error_cls, status: int) -> None:
         f"expected the word 'retry' to appear exactly once; got: {message!r}"
     )
     assert " — " in message
+    assert "transient" in message, (
+        f"expected the plan's 'often transient' wording; got: {message!r}"
+    )
+    assert "already created" in message, (
+        "expected the plan's duplicate-create warning ('first check the "
+        f"item was not already created'); got: {message!r}"
+    )
 
 
 def test_update_comment_5xx_carries_retry_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,7 +201,10 @@ def test_update_comment_5xx_carries_retry_hint(monkeypatch: pytest.MonkeyPatch) 
     `GitHubError(500, "Internal Server Error")`, which reaches `_safe`
     through `_rewrap_404` (a no-op pass-through for non-404 statuses).
     RED today: the tool-level error is the bare 'GitHub 500: Internal
-    Server Error' with no retry text."""
+    Server Error' with no retry text.
+
+    Also pins the plan's specific hint wording ('transient', 'already
+    created'), not just 'retry' — test-critic round 3, tautology::F2."""
     from lib_python_projects import ProjectConfig, ProjectsLoadResult
     from project_issues_plugin.tools import comments as comment_tools
 
@@ -225,19 +245,36 @@ def test_update_comment_5xx_carries_retry_hint(monkeypatch: pytest.MonkeyPatch) 
     message = out["error"]
     assert message.startswith("GitHub 500: Internal Server Error")
     assert "retry" in message, f"expected a retry hint; got: {message!r}"
+    assert "transient" in message, (
+        f"expected the plan's 'often transient' wording; got: {message!r}"
+    )
+    assert "already created" in message, (
+        "expected the plan's duplicate-create warning ('first check the "
+        f"item was not already created'); got: {message!r}"
+    )
 
 
 def test_bulk_error_message_5xx_appends_retry_hint() -> None:
     """Driving test for R2 (`bulk._error_message`, the bulk choke point).
     RED today: `_error_message` only special-cases 401 via
     `_PROVIDER_AUTH_HINTS`/`_with_auth_hint`, so a 5xx falls through to
-    `str(exc)` with no retry text."""
+    `str(exc)` with no retry text.
+
+    Also pins the plan's specific hint wording ('transient', 'already
+    created'), not just 'retry' — test-critic round 3, tautology::F2."""
     exc = AzureDevOpsError(503, "Service Unavailable")
 
     message = bulk_tools._error_message(exc)
 
     assert message.startswith(str(exc))
     assert "retry" in message, f"expected a retry hint; got: {message!r}"
+    assert "transient" in message, (
+        f"expected the plan's 'often transient' wording; got: {message!r}"
+    )
+    assert "already created" in message, (
+        "expected the plan's duplicate-create warning ('first check the "
+        f"item was not already created'); got: {message!r}"
+    )
 
 
 def test_401_still_gets_only_the_auth_hint_no_retry_text() -> None:
@@ -310,10 +347,14 @@ class _StubMCP:
         return decorator
 
 
-def _search_projects_doc() -> str:
+def _search_projects_tool() -> Callable:
     stub = _StubMCP()
     project_tools.register(stub)
-    return stub.tools["search_projects"].__doc__ or ""
+    return stub.tools["search_projects"]
+
+
+def _search_projects_doc() -> str:
+    return _search_projects_tool().__doc__ or ""
 
 
 def _empty_query_bullet(doc: str) -> str:
@@ -335,16 +376,24 @@ def test_search_projects_doc_empty_query_mentions_limit() -> None:
     (test-critic round 1, tautology::F1) — and '10'/'truncated' could
     equally be satisfied by an unrelated or even contradictory sentence
     (e.g. 'results are never truncated'). So this asserts the specific
-    combination the plan requires instead: the cap explicitly tied to a
-    default of 10 ('capped by `limit` ... default 10'), plus the
-    `truncated: true` result marker documented for the over-limit case —
-    neither of which appears anywhere in the bullet today."""
-    doc = _search_projects_doc()
-    bullet = _empty_query_bullet(doc)
+    combination the plan requires instead: the cap explicitly tied to the
+    REAL default (introspected from `search_projects`'s own signature,
+    never hardcoded — test-critic round 3, tautology::F1: a hardcoded
+    '10' would keep passing or start failing for the wrong reason if the
+    signature's default ever changed), plus the `truncated: true` result
+    marker documented for the over-limit case — neither of which appears
+    anywhere in the bullet today."""
+    tool = _search_projects_tool()
+    bullet = _empty_query_bullet(tool.__doc__ or "")
+    default_limit = inspect.signature(tool).parameters["limit"].default
 
-    assert re.search(r"capped by `?limit`?[^.]*default\s*(?:of\s*)?10", bullet, re.IGNORECASE), (
+    assert re.search(
+        rf"capped by `?limit`?[^.]*default\s*(?:of\s*)?{default_limit}\b",
+        bullet, re.IGNORECASE,
+    ), (
         "expected the empty-query enumeration's cap explicitly tied to "
-        f"`limit` with a default of 10; got bullet: {bullet!r}"
+        f"`limit` with the real default ({default_limit}) read from the "
+        f"tool's own signature; got bullet: {bullet!r}"
     )
     assert "truncated: true" in bullet, (
         "expected the `truncated: true` result marker documented for an "

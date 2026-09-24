@@ -263,6 +263,9 @@ _NON_TOOL_WHITELIST = {
     "body", "received_sections", "skeleton", "state", "template",
     "template_required", "template_unknown", "template_violation",
     "template_warning", "templates", "violations",
+    # Added by ticket #365 (label-mode board-state fallback — `board`
+    # config fields, none of which are tool names themselves):
+    "binding", "closed_column", "label_map",
 }
 
 

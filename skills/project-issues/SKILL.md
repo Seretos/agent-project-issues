@@ -38,8 +38,9 @@ about access before making the call.
 
 Every registered tool, grouped by module — a discovery index. The sections
 below go deep only on pipelines, labels, relations/hierarchy, closing a
-ticket when its PR merges, and custom fields/boards, since those are
-otherwise the easiest capabilities to miss or get wrong.
+ticket when its PR merges, why a PR merge is blocked, and custom
+fields/boards, since those are otherwise the easiest capabilities to
+miss or get wrong.
 
 - **projects** — `list_projects` list all configured projects;
   `search_projects` fuzzy-match a project by name.
@@ -90,8 +91,8 @@ otherwise the easiest capabilities to miss or get wrong.
   ask the user for information the schema marks optional. This skill instead
   carries the non-obvious operational facts and cross-tool sequencing schemas
   alone don't convey: the pipeline drill-down chain, label rename semantics,
-  relation direction, how each provider closes a ticket on PR merge, and
-  board write keys.
+  relation direction, how each provider closes a ticket on PR merge, how
+  to classify why a PR merge is blocked, and board write keys.
 - **Write ops return a light response by default.** `create_ticket`,
   `update_ticket`, `add_comment`, `update_comment`, `create_pr`, `update_pr`,
   `merge_pr`, `add_relation`, `add_pr_comment`, `add_pr_review_comment` and
@@ -300,6 +301,62 @@ The `create_pr` / `update_pr` tool descriptions state the same rules; if
 they ever differ from this section, the tool descriptions are
 authoritative.
 
+## Pull requests: why a merge is blocked
+
+When `merge_pr` fails or a PR is not mergeable, classify the cause
+before you act. Waiting helps only while a value is not computed yet or
+CI is still running; every other cause needs someone to change the PR,
+its branch, its reviews or its pipeline.
+
+Where the signal is, per provider:
+
+- **GitHub** — `mergeable_state`, from `get_pr` or from `merge_pr`'s
+  light response.
+- **GitLab** — `detailed_merge_status`. Do not branch on `mergeable`:
+  it is `null` for every value except `mergeable`.
+- **Azure DevOps** — only `merge_pr`'s `error` text. `mergeable_state`
+  is permanently `null` on Azure DevOps; re-fetching with `get_pr` never
+  fills it, so do not wait or poll for it.
+
+| cause | GitHub `mergeable_state` | GitLab `detailed_merge_status` | Azure DevOps `merge_pr` error text |
+|---|---|---|---|
+| conflict | `dirty` | `conflict` | `merge has conflicts` |
+| behind the base branch | `behind` | `need_rebase` | — |
+| gate open: CI running or failing | `blocked`, `unstable` | `ci_must_pass`, `ci_still_running` | `merge rejected by branch policy` |
+| gate open: review missing | `blocked` | `not_approved`, `discussions_not_resolved` | `merge rejected by branch policy` |
+| gate open: draft | `draft` | `draft_status` | not verified |
+| not computed yet | `unknown` | `unchecked`, `checking`, `preparing` | `merge in progress` |
+
+GitHub `unstable` and `has_hooks` are open gates, not a mergeable
+state. GitHub may still accept the merge; if the merge fails, classify
+it by the gate row. Other gates (GitHub `has_hooks`, the remaining
+GitLab values, Azure DevOps `merge failed`) and a PR that is no longer
+open are listed only in `get_pr`'s merge-state table.
+
+Resolve the values that do not name one cause:
+
+- **GitHub `blocked`** means CI or review is blocking; the value alone
+  does not say which, and both can be. Check `list_pipeline_runs` for
+  the PR's head commit and `get_pr`'s review data before you decide.
+- **Azure DevOps `merge rejected by branch policy`** means a CI policy
+  or a review policy is failing. This plugin gives no finer signal;
+  report it as a CI-or-review policy block, not as one of the two.
+- **Not computed yet** (`unknown`; GitLab `unchecked`, `checking`,
+  `preparing`; Azure DevOps `merge in progress`) means the provider has
+  not settled. Re-fetch with `get_pr` a moment later instead of acting
+  on it.
+- **Draft** does not settle by waiting: the PR must be marked ready for
+  review before it can merge.
+
+`rejectedByPolicy`, which `submit_pr_review`'s description mentions, is
+Azure DevOps' raw `mergeStatus` value, a different field from
+`merge_pr`'s `error` text. Classify the `error` text fragments above;
+never match on `rejectedByPolicy`.
+
+`get_pr`'s merge-state table is the complete mapping of every value on
+every provider, and this section only summarises it; if the two ever
+differ, `get_pr`'s merge-state table is authoritative.
+
 ## Pipelines: drill down, don't guess
 
 CI/pipeline triage is a three-tool chain, each step narrowing scope:
@@ -472,6 +529,9 @@ will resolve itself.
   item on merge — `#<n>` only links there; call `update_ticket` after
   `merge_pr`. Likewise, assuming any provider closes the ticket when the
   PR merged into a base other than the default branch.
+- Polling `get_pr` for an Azure DevOps `mergeable_state`, or reading
+  GitHub `blocked` as a single cause — see "Pull requests: why a merge
+  is blocked".
 - Treating a write error as evidence of a race with another concurrent
   call instead of reading what the provider actually said.
 - Constructing or guessing a `job_id` instead of reading it from a

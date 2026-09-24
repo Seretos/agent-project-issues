@@ -38,6 +38,55 @@ from project_issues_plugin.tools._providers import (
 )
 
 
+# Ticket #357: the served descriptions of `list_pipeline_runs` /
+# `get_pipeline_run` are the only surface an agent sees before it has to
+# guess which `status`/`conclusion` values mean "CI is green for this
+# commit", which values exist per provider, and whether they are
+# normalized. This table is checked against the pinned lib's real
+# mappers and against `cli._classify` (the `wait-pipeline` exit-code
+# classifier) by tests/test_357_run_vocabulary_doc.py, so it cannot
+# silently drift from either.
+_RUN_VOCABULARY_DOC = """
+
+Run vocabulary (`status`/`conclusion`), by provider — verified against
+the pinned lib's mappers and `project-issues wait-pipeline`'s exit-code
+classifier (`cli._classify`):
+
+(1) A run is green iff `status == "completed"` AND `conclusion` is in
+    the green column below; a commit is CI-green iff EVERY run for
+    that commit is green — exactly the condition `project-issues
+    wait-pipeline` checks, whose exit 0 is the green column's exit
+    code.
+(2) Normalization is partial: a finished run's `status` is always
+    `"completed"` on all three providers, and a green `conclusion` is
+    always `"success"`; every other conclusion spelling below is
+    provider-native.
+(3) Conclusions listed are those of the tested raw states; any value
+    not listed here counts as no verdict (exit 5).
+
+| Provider | status | green (exit 0) | red (exit 1) | no verdict (exit 5) | pending (exit 2) |
+| --- | --- | --- | --- | --- | --- |
+| GitHub | `requested` `queued` `pending` `waiting` `in_progress` `completed` | `success` | `failure` `startup_failure` `action_required` `stale` | `cancelled` `timed_out` `skipped` `neutral` | `null` |
+| GitLab | `completed` `created` `waiting_for_resource` `preparing` `pending` `running` `manual` `scheduled` `unknown` | `success` | `failed` | `canceled` `skipped` | `null` |
+| Azure DevOps | `notStarted` `inProgress` `cancelling` `postponed` `none` `completed` | `success` | `failure` | `cancelled` `none` | `null` |
+"""
+
+
+def _with_run_vocabulary(func):
+    """Append `_RUN_VOCABULARY_DOC` to `func.__doc__`.
+
+    Must be the decorator closest to the `def` (i.e. applied BEFORE
+    `@mcp.tool()`, which reads `__doc__` at registration time to build
+    the served description) — a plain docstring literal can't
+    interpolate another string, and `@mcp.tool(description=...)` would
+    *replace* the hand-written description rather than append to it.
+    Mutates and returns the same function object (no wrapper), so
+    `mcp.tool()`'s signature introspection is unaffected.
+    """
+    func.__doc__ = (func.__doc__ or "") + _RUN_VOCABULARY_DOC
+    return func
+
+
 def _serialize_annotation(annotation) -> dict:
     """Map a single `FailureAnnotation` (ticket #152/#200) into the wire
     shape: `step`, `message`, `file`, `line`, `severity`, `title`."""
@@ -110,6 +159,7 @@ def _serialize_failure(failure, *, include_annotations: bool) -> dict:
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
+    @_with_run_vocabulary
     def list_pipeline_runs(
         project_id: str,
         branch: Annotated[str | None, Field(description="One-of addressing argument. Exactly one of branch/tag/commit_sha/ticket_id/recent must be set. Filter runs by branch name (e.g. 'main').")] = None,
@@ -183,8 +233,9 @@ def register(mcp: FastMCP) -> None:
 
         Run details (`name`, `branch`, `head_sha`, `event`, `status`,
         `conclusion`, `url`, `created_at`, `updated_at`, `run_attempt`)
-        match the GitHub Actions `workflow_run` shape. `conclusion` is
-        `None` for runs still in progress.
+        are listed per run below; `conclusion` is `None` for runs
+        still in progress. See the per-provider `status`/`conclusion`
+        vocabulary table appended to this description.
 
         For a single run's full detail — notably the `run.failure` block
         (failing jobs, annotations, log excerpt) that only
@@ -334,6 +385,7 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
+    @_with_run_vocabulary
     def get_pipeline_run(
         project_id: str,
         run_id: Annotated[str, Field(description="Numeric string identifying the pipeline run. GitHub: Actions workflow_run id (e.g. '9876543210'); GitLab: pipeline id (e.g. '12345'); Azure DevOps: build id (e.g. '678'). Obtain from list_pipeline_runs. The value is numeric but the type is string — always pass it quoted (\"9876543210\"), never as a bare integer.")],

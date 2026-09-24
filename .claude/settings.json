@@ -3,7 +3,8 @@
     "agent-project-issues@agent-marketplace": true,
     "agent-worktree@agent-marketplace": true,
     "agent-autonomous-developer@agent-marketplace": true,
-    "agent-ticket-orchestrator@agent-marketplace": true
+    "agent-ticket-orchestrator@agent-marketplace": true,
+    "agent-autonomous-prompt-engineer@agent-marketplace": true
   },
   "extraKnownMarketplaces": {
     "agent-marketplace": {

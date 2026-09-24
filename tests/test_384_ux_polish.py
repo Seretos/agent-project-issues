@@ -54,20 +54,25 @@ def _template_handler(req: httpx.Request) -> httpx.Response:
 
 
 @pytest.mark.parametrize("tool_name", ["create_ticket", "update_ticket"])
+@pytest.mark.parametrize("rejected_template", ["nope", "also-not-a-template"])
 def test_template_unknown_hint_names_rejected_template(
-    monkeypatch: pytest.MonkeyPatch, tool_name: str,
+    monkeypatch: pytest.MonkeyPatch, tool_name: str, rejected_template: str,
 ) -> None:
     """Driving test for R1. RED today: the `template_unknown` hint is the
     generic 'no template was resolved; pick one from the templates list
     below (or call list_ticket_templates), then retry: ...' text, which
-    does not contain 'nope' anywhere."""
+    does not contain the rejected template string anywhere.
+
+    Parametrized over two different rejected values (not just 'nope') so a
+    hint hard-coded to `template "nope" ...` instead of actually echoing
+    the caller's argument cannot pass (test-critic round 1, tautology::F2)."""
     tools = _register_tools_with(monkeypatch, _project())
     _install_mock(monkeypatch, _template_handler)
 
     if tool_name == "create_ticket":
         result = tools["create_ticket"](
             project_id="acme", title="Bug", body="### Description\nx\n",
-            template="nope",
+            template=rejected_template,
         )
     else:
         # update_ticket resolves the ticket only when it needs to infer
@@ -76,11 +81,11 @@ def test_template_unknown_hint_names_rejected_template(
         # the template-listing routes.
         result = tools["update_ticket"](
             project_id="acme", ticket_id="42", body="### Description\nx\n",
-            template="nope",
+            template=rejected_template,
         )
 
     assert result["state"] == "template_unknown"
-    assert 'template "nope"' in result["hint"], (
+    assert f'template "{rejected_template}"' in result["hint"], (
         f"expected the rejected template name quoted in the hint; got: {result['hint']!r}"
     )
     assert "list_ticket_templates" in result["hint"]
@@ -320,14 +325,29 @@ def _empty_query_bullet(doc: str) -> str:
 def test_search_projects_doc_empty_query_mentions_limit() -> None:
     """Driving test for R3. RED today: the empty-query bullet mentions
     `limit` only as a reason to prefer `search_projects` over
-    `list_projects`, never as a cap on the empty-query enumeration
-    itself, and contains neither '10' nor 'truncated'."""
+    `list_projects` ('a bounded `limit` over a large set', 'no `limit`') —
+    never as a cap tied to the empty-query enumeration itself.
+
+    A bare substring check for 'limit'/'10'/'truncated' would already pass
+    today, since 'limit' is already present for an unrelated reason
+    (test-critic round 1, tautology::F1) — and '10'/'truncated' could
+    equally be satisfied by an unrelated or even contradictory sentence
+    (e.g. 'results are never truncated'). So this asserts the specific
+    combination the plan requires instead: the cap explicitly tied to a
+    default of 10 ('capped by `limit` ... default 10'), plus the
+    `truncated: true` result marker documented for the over-limit case —
+    neither of which appears anywhere in the bullet today."""
     doc = _search_projects_doc()
     bullet = _empty_query_bullet(doc)
 
-    assert "limit" in bullet
-    assert "10" in bullet
-    assert "truncated" in bullet
+    assert re.search(r"capped by `?limit`?[^.]*default\s*(?:of\s*)?10", bullet, re.IGNORECASE), (
+        "expected the empty-query enumeration's cap explicitly tied to "
+        f"`limit` with a default of 10; got bullet: {bullet!r}"
+    )
+    assert "truncated: true" in bullet, (
+        "expected the `truncated: true` result marker documented for an "
+        f"over-limit empty query; got bullet: {bullet!r}"
+    )
 
 
 def test_search_projects_doc_no_longer_claims_returns_all_projects() -> None:

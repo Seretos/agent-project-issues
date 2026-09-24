@@ -228,16 +228,35 @@ descriptive error instead of silently returning empty — fix
 tickets; kind values are parent, child, blocks, blocked_by, duplicate_of,
 relates_to. `ticket_id` is always the "from" end of the relation, and
 `target` is always the "to" end — kind="parent" means `ticket_id` is the
-parent of `target`, not the other way around. Call `list_relation_kinds`
-to check which kinds a given provider actually supports before relying on
-one; an unsupported kind surfaces as an error, not a silent no-op.
+parent of `target`, not the other way around. Not every provider supports
+every kind — check the matrix below before choosing one; an unsupported
+kind surfaces as an error, not a silent no-op.
+
+| kind | GitHub | GitLab | Azure DevOps |
+|---|---|---|---|
+| parent | yes | yes | yes |
+| child | yes | yes | yes |
+| duplicate_of | yes | yes | yes |
+| blocks | yes | no | yes |
+| blocked_by | yes | no | yes |
+| relates_to | no | yes | yes |
+
+GitLab has no blocks and no blocked_by. GitHub has no relates_to.
+Azure DevOps supports all six kinds.
+
+Only parent, child and duplicate_of work on all three providers. No
+dependency kind — blocks, blocked_by or relates_to — is supported by all
+three. A caller that must record "X waits for Y" the same way on every
+provider cannot do it with a relation kind alone; it needs its own
+fallback convention for the providers that lack the kind. This skill
+does not define one.
 
 `list_relation_kinds`' response also carries `read_only_kinds` — relation
 kinds that appear in `get_ticket`'s output (for example `mentions` and
 `closed_by`) but are derived automatically; never pass one of these to
-`add_relation` or `remove_relation`. It also carries a `provider_support`
-matrix — check that matrix instead of learning provider gaps from failed
-calls.
+`add_relation` or `remove_relation`. The same matrix as the table above
+comes back live as `provider_support`; if the two ever differ (for
+example after a library upgrade), `provider_support` is authoritative.
 
 `list_hierarchy` is a one-call projection of a ticket's parent/child
 (epic) structure: it makes exactly the same single
@@ -413,6 +432,9 @@ will resolve itself.
   check before relying on it to create a column.
 - Getting relation direction backwards — `ticket_id` is the source, not
   the target.
+- Assuming blocks or blocked_by exist on GitLab, or relates_to on
+  GitHub — they do not; see the matrix under "Relations: direction
+  matters".
 - Treating a write error as evidence of a race with another concurrent
   call instead of reading what the provider actually said.
 - Constructing or guessing a `job_id` instead of reading it from a

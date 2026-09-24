@@ -22,3 +22,4 @@ dist/
 .process-ticket-result.json
 .claude-session/
 .adev/
+.ape/

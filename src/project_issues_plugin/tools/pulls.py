@@ -29,6 +29,8 @@ from lib_python_projects.providers.gitlab import GitLabError
 from project_issues_plugin.tools._providers import (
     _normalize_id,
     _provider_for,
+    _render_pr_body_limit_doc,
+    _require_pr_body_within_limit,
     _require_pulls_create,
     _require_pulls_merge,
     _require_pulls_modify,
@@ -53,6 +55,31 @@ from project_issues_plugin.tools._slicing import (
     apply_order,
     pick_light,
 )
+
+
+def _with_pr_body_limit_doc(func):
+    """Append the "Body size limit" paragraph to `func.__doc__`, rendered
+    live from `_render_pr_body_limit_doc()` (ticket #364).
+
+    Mirrors `pipelines.py`'s `_with_run_vocabulary`: must be the
+    decorator closest to the `def` (applied BEFORE `@mcp.tool()`, which
+    reads `__doc__` at registration time to build the served
+    description) — a docstring literal can't interpolate another
+    string, and `@mcp.tool(description=...)` would *replace* the
+    hand-written description rather than append to it. Mutates and
+    returns the same function object (no wrapper), so `mcp.tool()`'s
+    signature introspection is unaffected.
+
+    Applied at `register()` time — since `create_pr`/`update_pr` are
+    defined (and this decorator runs) each time `register()` executes,
+    re-registering on a fresh `FastMCP`/stub re-renders the paragraph
+    against whatever `_PR_BODY_MAX_CHARS` / `_PROVIDERS` currently hold,
+    including a monkeypatched table in a test.
+    """
+    func.__doc__ = (
+        (func.__doc__ or "") + "\n\nBody size limit:\n" + _render_pr_body_limit_doc()
+    )
+    return func
 
 
 def register(mcp: FastMCP) -> None:
@@ -418,6 +445,7 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
+    @_with_pr_body_limit_doc
     def create_pr(
         project_id: str,
         title: str,
@@ -502,6 +530,7 @@ def register(mcp: FastMCP) -> None:
             project = _resolve(project_id)
             _require_pulls_create(project)
             token = _require_token(project)
+            _require_pr_body_within_limit(project, body, True)
             provider = _provider_for(project)
             try:
                 pr = provider.create_pr(
@@ -524,6 +553,7 @@ def register(mcp: FastMCP) -> None:
         return _safe(go)
 
     @mcp.tool()
+    @_with_pr_body_limit_doc
     def update_pr(
         project_id: str,
         pr_id: str,
@@ -645,6 +675,15 @@ def register(mcp: FastMCP) -> None:
             token = _require_token(project)
             provider = _provider_for(project)
             normalized_pr = _normalize_id(project, pr_id)
+
+            def _will_be_ai_generated() -> bool:
+                # A read, never a write — only called when the two marker
+                # flavours straddle the length limit (see
+                # `_require_pr_body_within_limit`'s docstring).
+                current_pr, _ = provider.get_pr(project, token, normalized_pr)
+                return project.auto_labels.ai_generated in current_pr.labels
+
+            _require_pr_body_within_limit(project, body, _will_be_ai_generated)
             pr = provider.update_pr(
                 project, token, normalized_pr,
                 title=title, body=body, status=status, base=base,

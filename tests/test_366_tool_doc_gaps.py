@@ -283,6 +283,77 @@ def test_get_ticket_ac_paragraph_stays_within_284_length_cap() -> None:
     )
 
 
+def test_acceptance_criteria_is_empty_on_github_and_gitlab_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behavioural grounding for R1 (test-critic round-3 F1). Every other
+    test in this R1 block checks literal DOCSTRING TEXT; none of them prove
+    the underlying claim -- that `acceptance_criteria` really is "" on
+    GitHub/GitLab -- is actually true at runtime. This test closes that gap
+    by exercising the REAL `GitHubProvider.get_ticket` / `GitLabProvider.
+    get_ticket` (not a hand-rolled fake provider) against a minimal mocked
+    HTTP transport (same `httpx.MockTransport` pattern as the R3 not_labels
+    tests further down) and asserting the returned `Ticket.
+    acceptance_criteria` is "" for both -- grounded in the pinned lib's own
+    code: `base.py`'s `Ticket.acceptance_criteria` field defaults to "", and
+    neither `github.py`'s nor `gitlab.py`'s `_map_issue` ever sets it (only
+    `azuredevops.py`'s `get_ticket` does, from
+    `Microsoft.VSTS.Common.AcceptanceCriteria`).
+
+    Related existing coverage: `tests/test_ticket_fields_167_168.py::
+    test_get_ticket_response_acceptance_criteria_defaults_empty` already
+    pins the GitHub-empty-default behaviour, but through the MCP tool layer
+    with a hand-rolled `_MockGetTicketProvider` stand-in (not the real
+    `GitHubProvider`), and it does not cover GitLab at all -- so on its own
+    it does not ground the "GitHub/GitLab" half of the docstring's claim in
+    the real provider code. This test does that directly, for both
+    providers."""
+
+    def _github_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/comments"):
+            return httpx.Response(200, json=[])
+        if "/issues/" in request.url.path:
+            return httpx.Response(
+                200, json={"number": 42, "title": "t", "state": "open"},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    def _fake_github_client(token: str | None) -> httpx.Client:
+        return httpx.Client(
+            base_url=github_provider.API_BASE,
+            transport=httpx.MockTransport(_github_handler),
+        )
+
+    monkeypatch.setattr(github_provider, "_client", _fake_github_client)
+    gh_project = ProjectConfig(id="acme", provider="github", path="acme/backend")
+    gh_ticket, _gh_comments, _gh_rel, _gh_trunc = GitHubProvider().get_ticket(
+        gh_project, "tok", "42", include_relations=False,
+    )
+    assert gh_ticket.acceptance_criteria == "", gh_ticket
+
+    def _gitlab_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/notes"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/issues/42"):
+            return httpx.Response(
+                200, json={"iid": 42, "title": "t", "state": "opened"},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    def _fake_gitlab_client(project: ProjectConfig, token: str | None) -> httpx.Client:
+        return httpx.Client(
+            base_url="https://gitlab.example.com/api/v4",
+            transport=httpx.MockTransport(_gitlab_handler),
+        )
+
+    monkeypatch.setattr(gitlab_provider, "_client", _fake_gitlab_client)
+    gl_project = ProjectConfig(id="acme", provider="gitlab", path="group/proj")
+    gl_ticket, _gl_comments, _gl_rel, _gl_trunc = GitLabProvider().get_ticket(
+        gl_project, "tok", "42", include_relations=False,
+    )
+    assert gl_ticket.acceptance_criteria == "", gl_ticket
+
+
 # ===========================================================================
 # R2 (#362) -- search_projects carries the full single-project-resolution
 # recipe; list_projects carries the case rule + a cross-reference to it
@@ -410,7 +481,20 @@ def _check_case_rule_and_cross_reference(doc: str) -> None:
     "no single-project lookup tool") here -- per the plan's Approach,
     `list_projects` only cross-references `search_projects`'s recipe rather
     than duplicating it (misread::F3 / untestable::F1 from the round-1 plan
-    critique)."""
+    critique).
+
+    Behavioural grounding for test-critic round-3 F2: this checker (like
+    the rest of R2) only inspects docstring TEXT -- it does not itself prove
+    that `project_id` really is case-sensitive on tools other than
+    `search_projects`. That is already proven behaviourally by
+    `tests/test_272_search_projects_limit_and_docstring.py::
+    test_resolve_remains_case_sensitive`, which calls the real `_resolve`
+    helper (used by every `project_id`-taking write/read tool via
+    `tools/_providers.py`) directly: `_resolve("acme")` raises `LookupError`
+    while `_resolve("Acme")` succeeds against a project declared as
+    `id="Acme"` -- i.e. the wrong-case id is rejected and the correct-case
+    id is accepted, which is exactly the claim this docstring text makes.
+    Not duplicated here to avoid re-testing the same lib behaviour twice."""
     assert "case-sensitive" in doc, (
         f"list_projects docstring must state that `project_id` is "
         f"case-sensitive on every tool taking it:\n{doc}"
@@ -502,6 +586,15 @@ _PREFIX_COLLIDING_PROJECTS = [
     # because the fixture id happened to already be lowercase.
     _project(id_="Acme-App", path="acme/app"),
     _project(id_="acme-app-legacy", path="acme/app-legacy"),
+    # Test-critic round-3 F6: a third project whose path shares nothing
+    # with the "acme/app" query. With only the two acme/app* projects above
+    # and limit=5, a search_projects that ignored the query entirely and
+    # returned every configured project would still satisfy every assertion
+    # below (both acme/app* paths would be "in paths" and the exact-match
+    # count would still be 1). This project's presence in `result["matches"]`
+    # would prove exactly that failure mode, so its absence is asserted
+    # below.
+    _project(id_="unrelated-widget", path="widgets/gizmo"),
 ]
 
 
@@ -516,10 +609,20 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
     not new production code.
 
     Test-critic round-2 F3: the exact match's id ("Acme-App") is
-    mixed-case, and the assertions below pin it down exactly -- an
+    mixed-case, and the assertion below pins it down exactly -- an
     implementation that lowercases or uppercases ids would now fail
     here, whereas the original all-lowercase fixture id could not tell the
-    difference."""
+    difference. (Test-critic round-3 F5: dropped the two `!=` assertions
+    that used to follow the `== "Acme-App"` check -- once a string is
+    asserted equal to "Acme-App", asserting it `!= "acme-app"` / `!=
+    "ACME-APP"` can never come out false, so they were redundant with the
+    equality check, not independent coverage.)
+
+    Test-critic round-3 F6: `unrelated-widget` (path `widgets/gizmo`) is
+    asserted absent from the result, closing the gap where a
+    search_projects that ignored the query and limit and just returned
+    every configured project would otherwise satisfy every other
+    assertion here."""
     tools = _register_projects(monkeypatch, _PREFIX_COLLIDING_PROJECTS)
 
     result = tools["search_projects"](query="acme/app", limit=5, fields="full")
@@ -527,6 +630,10 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
     paths = [m["path"] for m in result["matches"]]
     assert "acme/app" in paths, paths
     assert "acme/app-legacy" in paths, paths
+    assert "widgets/gizmo" not in paths, (
+        f"search_projects must not return a project unrelated to the "
+        f"query 'acme/app': {result['matches']}"
+    )
     exact_matches = [m for m in result["matches"] if m["path"] == "acme/app"]
     assert len(exact_matches) == 1, (
         f"expected exactly one exact path match for 'acme/app': {result['matches']}"
@@ -534,12 +641,6 @@ def test_recipe_disambiguates_prefix_paths(monkeypatch: pytest.MonkeyPatch) -> N
     assert exact_matches[0]["id"] == "Acme-App", (
         f"expected the exact match's id to preserve its declared mixed-case "
         f"casing verbatim: {exact_matches[0]}"
-    )
-    assert exact_matches[0]["id"] != "acme-app", (
-        f"the recipe must not lowercase the match's id: {exact_matches[0]}"
-    )
-    assert exact_matches[0]["id"] != "ACME-APP", (
-        f"the recipe must not uppercase the match's id: {exact_matches[0]}"
     )
 
     result_diff_case = tools["search_projects"](
@@ -681,6 +782,22 @@ def _check_unknown_labels_section(section: str) -> None:
         f"unknown label matches no ticket / returns an empty result -- not "
         f"just the inferred/not-verified marker on its own:\n{labels_clause}"
     )
+
+    # Behavioural grounding for test-critic round-3 F3: everything above is
+    # still a check of DOCSTRING TEXT -- it does not itself prove the
+    # "verified live" GitHub claim is true. That runtime-truth backing is
+    # `test_github_not_labels_sends_dash_label_qualifier` below in this same
+    # file: it drives the pinned lib's real `GitHubProvider.list_tickets`
+    # with `not_labels=["no-such-label"]` against a mocked GitHub Search API
+    # transport and asserts the outgoing request actually carries
+    # `-label:no-such-label` in `q=` -- i.e. the client-side request shape
+    # the "excludes nothing / unfiltered" claim rests on is real, not just
+    # documented. (`test_gitlab_not_labels_sends_not_labels_param` /
+    # `test_azure_not_labels_sends_not_contains_wiql_clause` are the same
+    # kind of grounding for the GitLab/Azure DevOps halves, which the
+    # docstring marks "not verified live" -- those two tests prove the
+    # lib's *query construction*, not live server semantics, matching that
+    # weaker marking.)
 
 
 def test_list_tickets_documents_unknown_labels() -> None:

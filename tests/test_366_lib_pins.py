@@ -100,7 +100,21 @@ def _exact_version(name: str) -> Version:
 
 def test_config_pin_meets_366_floor() -> None:
     """Driving test. RED today: pyproject.toml declares lib-python-config
-    @v0.1.2, which is below this ticket's v0.1.3 floor."""
+    @v0.1.2, which is below this ticket's v0.1.3 floor.
+
+    Behavioural grounding for test-critic round-3 F4: this test (and
+    `test_projects_pin_meets_366_floor` / `test_pin_comment_names_366_
+    floor_tag` below) only parses the DECLARED tag/comment strings out of
+    `pyproject.toml` -- a `pyproject.toml` edited to the right tags but never
+    reinstalled would still pass all three. The installed-environment
+    reality those three leave uncovered is exercised by
+    `test_installed_libs_match_declared_pins` (checks `importlib.metadata.
+    version()` for both libs equals the declared pin) and
+    `test_installed_projects_requires_pinned_config_tag` (checks the
+    INSTALLED lib-python-projects' own `Requires-Dist` on lib-python-config
+    names the same tag pyproject.toml declares) further down in this file --
+    together, the four tests close the gap between "the file says the right
+    thing" and "the environment actually is the right thing"."""
     assert _exact_version("lib-python-config") >= _CONFIG_FLOOR
 
 

@@ -12,7 +12,7 @@ from project_issues_plugin.refs import (
 )
 
 
-def _github_project(path: str = "Seretos/agent-project-issues") -> ProjectConfig:
+def _github_project(path: str = "seretos-agents/agent-project-issues") -> ProjectConfig:
     return ProjectConfig(id="github-tests", provider="github", path=path)
 
 
@@ -95,31 +95,31 @@ def test_normalize_id_rejects_non_numeric_composite():
 
 def test_normalize_id_github_issue_url():
     project = _github_project()
-    url = "https://github.com/Seretos/agent-project-issues/issues/46"
+    url = "https://github.com/seretos-agents/agent-project-issues/issues/46"
     assert normalize_id(url, project) == "46"
 
 
 def test_normalize_id_github_pull_url():
     project = _github_project()
-    url = "https://github.com/Seretos/agent-project-issues/pull/9"
+    url = "https://github.com/seretos-agents/agent-project-issues/pull/9"
     assert normalize_id(url, project) == "9"
 
 
 def test_normalize_id_github_url_case_insensitive_owner_repo():
     project = _github_project()
-    url = "https://github.com/SERETOS/Agent-Project-Issues/issues/46"
+    url = "https://github.com/SERETOS-AGENTS/Agent-Project-Issues/issues/46"
     assert normalize_id(url, project) == "46"
 
 
 def test_normalize_id_github_url_with_anchor_and_query_strips_path_only():
     """Anchors / query strings shouldn't break parsing (urlsplit handles them)."""
     project = _github_project()
-    url = "https://github.com/Seretos/agent-project-issues/issues/46#issuecomment-9999"
+    url = "https://github.com/seretos-agents/agent-project-issues/issues/46#issuecomment-9999"
     assert normalize_id(url, project) == "46"
 
 
 def test_normalize_id_github_url_rejects_mismatched_repo():
-    project = _github_project(path="Seretos/agent-project-issues")
+    project = _github_project(path="seretos-agents/agent-project-issues")
     url = "https://github.com/other-owner/other-repo/issues/46"
     with pytest.raises(ValueError, match="URL points to 'other-owner/other-repo'"):
         normalize_id(url, project)
@@ -128,7 +128,7 @@ def test_normalize_id_github_url_rejects_mismatched_repo():
 def test_normalize_id_github_url_unknown_path_segment_returns_none_then_errors():
     """A github URL that isn't an issue/pull URL is treated as unparseable."""
     project = _github_project()
-    url = "https://github.com/Seretos/agent-project-issues/settings/secrets"
+    url = "https://github.com/seretos-agents/agent-project-issues/settings/secrets"
     with pytest.raises(ValueError, match="does not look like"):
         normalize_id(url, project)
 
@@ -186,7 +186,7 @@ def test_normalize_target_hash_prefix():
 
 def test_normalize_target_url():
     project = _github_project()
-    url = "https://github.com/Seretos/agent-project-issues/issues/46"
+    url = "https://github.com/seretos-agents/agent-project-issues/issues/46"
     assert normalize_target(url, project) == "46"
 
 

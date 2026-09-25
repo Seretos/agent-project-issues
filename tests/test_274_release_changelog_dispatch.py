@@ -1,6 +1,6 @@
 """Tests for ticket #274: carry the *published* GitHub Release body as a new
 `changelog` field in the `repository_dispatch` payload sent to
-`Seretos/agent-marketplace`, from both `.github/workflows/release.yml` and
+`seretos-agents/modular-software-factory`, from both `.github/workflows/release.yml` and
 `.github/workflows/dispatch.yml`, and move payload construction off the
 unquoted `<<EOF` heredoc onto `jq -n --arg` (closing the JSON-injection bug
 class that already bit the `tags` field, `agent-marketplace@89aa850`).
@@ -493,7 +493,7 @@ def test_extracted_jq_filter_truncates_correctly_when_executed() -> None:
     itself distinguish a correct truncation filter from an incorrect one;
     the assertion tying `reembed`'s parsed value back to `out` is what ties
     the round-trip to this filter's actual output."""
-    url = "https://github.com/Seretos/agent-project-issues/releases/tag/v1.2.3"
+    url = "https://github.com/seretos-agents/agent-project-issues/releases/tag/v1.2.3"
 
     try:
         filter_text = _extract_truncation_filter(_script_text("marketplace-payload.sh"))

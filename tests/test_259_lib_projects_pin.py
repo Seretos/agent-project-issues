@@ -82,7 +82,7 @@ def test_pin_url_shape_is_sync_libs_parseable() -> None:
 
     entry = projects_matches[0]
     assert entry.startswith(
-        "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@"
+        "lib-python-projects @ git+https://github.com/seretos-agents/lib-python-projects@"
     )
 
 

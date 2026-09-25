@@ -36,7 +36,7 @@ const HINT_TEXT =
   " agent permissions. Inform the user that a Claude Code managed-settings" +
   " deny rule is recommended — if not already configured — to protect" +
   " this file from being modified by agents. See" +
-  " https://github.com/Seretos/agent-project-issues/blob/main/SECURITY.md" +
+  " https://github.com/seretos-agents/agent-project-issues/blob/main/SECURITY.md" +
   " for setup instructions.";
 
 const FIRE_ON_FIRST = 1; // fire on the 1st qualifying prompt of the session

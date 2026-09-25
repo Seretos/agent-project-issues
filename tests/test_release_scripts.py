@@ -310,7 +310,7 @@ OPTIONAL_ENV_KEYS = ("CHANGELOG_RAW", "RELEASE_URL")
 BASE_ENV = {
     "NAME": "agent-project-issues",
     "DESC": "MCP server for issue tracking",
-    "REPO": "Seretos/agent-project-issues",
+    "REPO": "seretos-agents/agent-project-issues",
     "VERSION": "1.2.3",
     "TAG": "agent-project-issues--v1.2.3",
 }
@@ -446,7 +446,7 @@ def test_marketplace_payload_includes_changelog_when_present() -> None:
     """Driving test (R2). A non-empty CHANGELOG_RAW under the truncation
     threshold survives unchanged as `client_payload.changelog`."""
     env = dict(BASE_ENV, CHANGELOG_RAW="- did a thing\n- did another")
-    env["RELEASE_URL"] = "https://github.com/Seretos/agent-project-issues/releases/tag/v1.2.3"
+    env["RELEASE_URL"] = "https://github.com/seretos-agents/agent-project-issues/releases/tag/v1.2.3"
     result = _run_marketplace_payload(env)
     assert result.returncode == 0, result.stderr
 
@@ -491,7 +491,7 @@ def test_marketplace_payload_truncates_long_changelog_body() -> None:
     the literal truncation marker text itself appears in the output -- a
     filter that truncated and appended the bare URL with no marker text
     would otherwise pass the length/suffix checks alone."""
-    url = "https://github.com/Seretos/agent-project-issues/releases/tag/v1.2.3"
+    url = "https://github.com/seretos-agents/agent-project-issues/releases/tag/v1.2.3"
     env = dict(BASE_ENV, CHANGELOG_RAW="x" * 20000, RELEASE_URL=url)
     result = _run_marketplace_payload(env)
     assert result.returncode == 0, result.stderr

@@ -9,8 +9,8 @@ Ships with a bundled `project-issues` skill covering label-catalog, board-column
 ## Quick install
 
 ```
-/plugin marketplace add Seretos/agent-marketplace
-/plugin install agent-project-issues@agent-marketplace
+/plugin marketplace add seretos-agents/modular-software-factory
+/plugin install agent-project-issues@modular-software-factory
 ```
 
 Self-contained `.exe` — no Python, no `pip install`.
@@ -295,18 +295,18 @@ Strict — unknown top-level / project / permissions keys are rejected with a cl
 ## Alternative installs
 
 ### From GitHub Releases
-Download `project-issues-plugin-<version>.zip` from [Releases](https://github.com/Seretos/agent-project-issues/releases), unpack, then `/plugin install <path>`.
+Download `project-issues-plugin-<version>.zip` from [Releases](https://github.com/seretos-agents/agent-project-issues/releases), unpack, then `/plugin install <path>`.
 
 ### From the release branch
 ```
-git clone --branch release --depth 1 https://github.com/Seretos/agent-project-issues.git
+git clone --branch release --depth 1 https://github.com/seretos-agents/agent-project-issues.git
 ```
 
 ### Build from source
 Requires Python 3.11+.
 
 ```powershell
-git clone https://github.com/Seretos/agent-project-issues.git
+git clone https://github.com/seretos-agents/agent-project-issues.git
 cd agent-project-issues
 py -3 -m pip install -e ".[build]"
 .\scripts\build.ps1 -Clean -Package

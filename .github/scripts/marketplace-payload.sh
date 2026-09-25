@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the `repository_dispatch` JSON payload sent to
-# Seretos/agent-marketplace. Extracted (ticket #298) from the inline `jq -n`
+# seretos-agents/modular-software-factory. Extracted (ticket #298) from the inline `jq -n`
 # block that used to live in both release.yml's and dispatch.yml's
 # "Dispatch to agent-marketplace" step, so the logic is unit-testable and
 # byte-identical between the two callers.

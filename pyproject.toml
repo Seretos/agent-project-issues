@@ -18,12 +18,12 @@ dependencies = [
   # explicit chore ticket that updates this pin -- not silently through a
   # moving branch. See scripts/sync-libs.ps1 which force-reinstalls this ref
   # to prevent a local editable-install from shadowing the pinned release.
-  "lib-python-config @ git+https://github.com/Seretos/lib-python-config@v0.1.3",
+  "lib-python-config @ git+https://github.com/seretos-agents/lib-python-config@v0.1.3",
   # Pinned to an exact immutable tag (v0.3.25). New lib versions arrive via an
   # explicit chore ticket that updates this pin -- not silently through a moving
   # branch. See scripts/sync-libs.ps1 which force-reinstalls this ref to
   # prevent a local editable-install from shadowing the pinned release.
-  "lib-python-projects @ git+https://github.com/Seretos/lib-python-projects@v0.3.25",
+  "lib-python-projects @ git+https://github.com/seretos-agents/lib-python-projects@v0.3.25",
   # pydantic / ruamel.yaml / httpx come transitively via lib-python-projects;
   # they are kept out of this list intentionally so the plugin can only
   # talk to providers through the lib's BaseProvider surface.

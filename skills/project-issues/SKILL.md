@@ -320,12 +320,17 @@ and what differs per provider.
    is at the end of "Pipelines: drill down, don't guess"). An error on
    head means the branch is not pushed or is misspelled; fix that before
    creating anything. If head and base resolve to the same "sha", head
-   has nothing ahead of base: GitHub rejects `create_pr` with a 422,
-   while GitLab creates the merge request anyway and it cannot be merged
-   (its "detailed_merge_status" is "commits_status") until head carries
-   real commits ahead of base. Two different shas only prove the
-   branches are not identical, not that head is ahead: head may be
-   behind base.
+   has nothing ahead of base; do not call `create_pr` until head carries
+   real commits ahead of base. What each provider does if you call it
+   anyway:
+   - GitLab — creates the merge request. Its "detailed_merge_status" is
+     "commits_status", and it stays unmergeable until head has commits
+     ahead of base. A successful `create_pr` on GitLab therefore does not
+     show that the branches were right.
+   - GitHub — refuses the call with a 422 and creates nothing.
+
+   Two different shas only prove the branches are not identical, not
+   that head is ahead: head may be behind base.
 2. **Create.** Pass `create_pr(..., draft=True)` to open the PR as a
    draft. To get someone's approval, request that person as a reviewer:
    "requested_reviewers" on `create_pr`, "reviewers_add" on `update_pr`.

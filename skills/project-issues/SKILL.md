@@ -330,8 +330,9 @@ wait for the PR's CI. What `get_ref` resolves and in which order is in
 existing PR, call `update_pr(reviewers_add=[...])`; at creation, pass
 `create_pr(requested_reviewers=[...])`. Reviewers carry per-user review
 state (approved / changes-requested / commented). Assignees carry none,
-so `assignees_add` never records or tracks a verdict. On Azure DevOps,
-read a recorded vote from `reviewers`, not `requested_reviewers`.
+so `update_pr(assignees_add=[...])` never records or tracks a verdict.
+On Azure DevOps, read a recorded vote from the `"reviewers"` field, not
+`"requested_reviewers"`.
 GitHub rejects approving or requesting changes on your own PR with 422;
 GitLab and Azure DevOps accept it.
 
@@ -353,26 +354,27 @@ for review). The mechanism differs per provider:
 - **GitHub** — GraphQL mutations.
 - **Azure DevOps** — set in the same PATCH as title/body.
 - **GitLab** — the server adds or removes a `Draft: ` title prefix on
-  GitLab's side, but the returned `title` has the prefix stripped. Read
-  draft state from the `draft` field, never from `title`, and never add
-  or remove the prefix in `title` yourself.
+  GitLab's side, but the returned `"title"` has the prefix stripped. Read
+  draft state from the `"draft"` field, never from `"title"`, and never
+  add or remove the prefix in `update_pr(title=...)` yourself.
 
 A draft does not settle by waiting; it must be marked ready before it
 can merge (see the draft row in "Pull requests: why a merge is
 blocked").
 
-**Merging.** `merge_pr`'s `merge_method` is `merge` (default), `squash`
-or `rebase`; any other value returns `{"error": ...}` before any HTTP
-call.
+**Merging.** `merge_pr(merge_method=...)` takes `"merge"` (default),
+`"squash"` or `"rebase"`; any other value returns `{"error": ...}`
+before any HTTP call.
 
-| provider | `merge` | `squash` | `rebase` |
+| provider | `"merge"` | `"squash"` | `"rebase"` |
 |---|---|---|---|
 | GitHub | merges | merges | merges (each subject to the methods the repository allows) |
 | GitLab | merges | merges | raises; does not merge |
 | Azure DevOps | merges | merges | merges, but a branch policy can override the strategy |
 
 On GitLab, rebase is a separate endpoint that does not merge, and this
-plugin exposes no rebase tool; merge with `merge` or `squash` instead.
+plugin exposes no rebase tool; merge with `"merge"` or `"squash"`
+instead.
 On Azure DevOps, a branch policy on the target can replace the strategy
 you passed without any error, and the tool response does not flag it —
 if the strategy matters, check the resulting commit history instead of
@@ -666,13 +668,13 @@ will resolve itself.
 - Assuming blocks or blocked_by exist on GitLab, or relates_to on
   GitHub — they do not; see the matrix under "Relations: direction
   matters".
-- Assigning someone (`assignees_add`) when their review verdict should
-  be tracked — request the review with `reviewers_add`; see "Pull
-  requests: lifecycle".
-- Reading GitLab draft state from `title` — the `Draft: ` prefix is
-  stripped there; read the `draft` field.
+- Assigning someone (`update_pr(assignees_add=[...])`) when their review
+  verdict should be tracked — request the review with
+  `update_pr(reviewers_add=[...])`; see "Pull requests: lifecycle".
+- Reading GitLab draft state from `"title"` — the `Draft: ` prefix is
+  stripped there; read the `"draft"` field.
 - Expecting `merge_method="rebase"` to merge on GitLab — it raises; use
-  `merge` or `squash`.
+  `"merge"` or `"squash"`.
 - Assuming a `Closes #<n>` or `AB#<n>` line closes an Azure DevOps work
   item on merge — `#<n>` only links there; call `update_ticket` after
   `merge_pr`. Likewise, assuming any provider closes the ticket when the

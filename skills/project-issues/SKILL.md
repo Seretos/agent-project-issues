@@ -336,8 +336,9 @@ and what differs per provider.
    "requested_reviewers" on `create_pr`, "reviewers_add" on `update_pr`.
    Only reviewers carry per-user review state (approved /
    changes-requested / commented), and that state is what the "review
-   missing" merge gate counts. Adding the person to "assignees" does not
-   request a review. To close a ticket when the PR merges, write the
+   missing" merge gate counts. The request itself does not satisfy the
+   gate: the PR stays blocked until the reviewer submits an approval
+   (step 4). Adding the person to "assignees" does not request a review. To close a ticket when the PR merges, write the
    closing line into `body`; which line works on which provider is in
    "Pull requests: closing the ticket on merge".
 3. **Set or clear draft.** `update_pr(draft=True)` turns a ready PR into

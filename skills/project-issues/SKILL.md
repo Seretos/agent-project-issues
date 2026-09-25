@@ -38,9 +38,9 @@ about access before making the call.
 
 Every registered tool, grouped by module — a discovery index. The sections
 below go deep only on pipelines, labels, relations/hierarchy, the PR
-lifecycle (create -> draft -> review -> merge -> close, including why a
-merge is blocked), and custom fields/boards, since those are otherwise
-the easiest capabilities to miss or get wrong.
+lifecycle (reviews, drafts, merge methods), closing a ticket when its PR
+merges, why a PR merge is blocked, and custom fields/boards, since those
+are otherwise the easiest capabilities to miss or get wrong.
 
 - **projects** — `list_projects` list all configured projects;
   `search_projects` fuzzy-match a project by name.
@@ -92,9 +92,9 @@ the easiest capabilities to miss or get wrong.
   carries the non-obvious operational facts and cross-tool sequencing schemas
   alone don't convey: the pipeline drill-down chain, what green means for
   a commit, label rename semantics,
-  relation direction, the PR lifecycle (create -> draft -> review ->
-  merge -> close, including why a merge is blocked), and board write
-  keys.
+  relation direction, the PR lifecycle's permission gates, draft state
+  and merge methods, how each provider closes a ticket on PR merge, how
+  to classify why a PR merge is blocked, and board write keys.
 - **Write ops return a light response by default.** `create_ticket`,
   `update_ticket`, `add_comment`, `update_comment`, `create_pr`, `update_pr`,
   `merge_pr`, `add_relation`, `add_pr_comment`, `add_pr_review_comment` and
@@ -311,79 +311,79 @@ were fetched.
 
 ## Pull requests: lifecycle
 
-A PR goes through six steps: check the branches, create, set or clear
-draft, review, merge, close the ticket. Each step names the tool to call
-and what differs per provider.
+**Before `create_pr`, check both branches with `get_ref`.** Call
+`get_ref(project_id, <head>)` and `get_ref(project_id, <base>)`. It is
+read-only (token only, no permission flag). An unknown ref returns
+`{"error": ...}`; a head whose `ref.kind` is not `branch` is not a
+branch you can open a PR from. Compare the two `ref.sha` values. Equal
+shas mean there is nothing to merge: GitHub rejects that `create_pr`
+with 422 `No commits between <base> and <head>`, and GitLab creates the
+MR anyway with an empty diff that cannot merge
+(`detailed_merge_status: "commits_status"`). Do not call `create_pr`
+then. Different shas do not prove the head is ahead of the base — it
+may be behind. Keep the head's `ref.sha`: it is the commit to pass to
+`list_pipeline_runs(commit_sha=...)` or `wait-pipeline --sha` when you
+wait for the PR's CI. What `get_ref` resolves and in which order is in
+"Pipelines: drill down, don't guess".
 
-1. **Before `create_pr`: check both branches with `get_ref`.** Call
-   `get_ref` on the head branch and on the base branch (what it returns
-   is at the end of "Pipelines: drill down, don't guess"). An error on
-   head means the branch is not pushed or is misspelled; fix that before
-   creating anything. If head and base resolve to the same "sha", head
-   has nothing ahead of base; do not call `create_pr` until head carries
-   real commits ahead of base. What each provider does if you call it
-   anyway:
-   - GitLab — creates the merge request. Its "detailed_merge_status" is
-     "commits_status", and it stays unmergeable until head has commits
-     ahead of base. A successful `create_pr` on GitLab therefore does not
-     show that the branches were right.
-   - GitHub — refuses the call with a 422 and creates nothing.
+**Request a review; do not assign one.** To ask someone to review an
+existing PR, call `update_pr(reviewers_add=[...])`; at creation, pass
+`create_pr(requested_reviewers=[...])`. Reviewers carry per-user review
+state (approved / changes-requested / commented). Assignees carry none,
+so `assignees_add` never records or tracks a verdict. On Azure DevOps,
+read a recorded vote from `reviewers`, not `requested_reviewers`.
+GitHub rejects approving or requesting changes on your own PR with 422;
+GitLab and Azure DevOps accept it.
 
-   Two different shas only prove the branches are not identical, not
-   that head is ahead: head may be behind base.
-2. **Create.** Pass `create_pr(..., draft=True)` to open the PR as a
-   draft. To get someone's approval, request that person as a reviewer:
-   "requested_reviewers" on `create_pr`, "reviewers_add" on `update_pr`.
-   Only reviewers carry per-user review state (approved /
-   changes-requested / commented), and that state is what the "review
-   missing" merge gate counts. The request itself does not satisfy the
-   gate: the PR stays blocked until the reviewer submits an approval
-   (step 4). Adding the person to "assignees" does not request a review. To close a ticket when the PR merges, write the
-   closing line into `body`; which line works on which provider is in
-   "Pull requests: closing the ticket on merge".
-3. **Set or clear draft.** `update_pr(draft=True)` turns a ready PR into
-   a draft; `update_pr(draft=False)` marks a draft ready for review.
-   Read the state back from the returned "draft" field on every
-   provider, never from "title". How each provider applies it:
-   - GitHub — its own GraphQL mutation, separate from the call that sets
-     title and body. Either can land or fail without the other, and
-     nothing is rolled back.
-   - GitLab — a "Draft: " prefix on the MR title. The returned "title"
-     never shows that prefix, even while the MR is a draft. Never add or
-     remove the prefix by editing the title; pass "draft" instead.
-   - Azure DevOps — the same PATCH that sets title and body.
-4. **Review.** `submit_pr_review` takes `state` "approve",
-   "request_changes" or "comment". A review counts once it appears in
-   the PR's "reviewers"; on Azure DevOps "comment" casts no vote and does
-   not count. Per-provider details (self-approval, Azure votes) are in
-   `submit_pr_review`'s description.
-5. **Merge.** Pick "merge_method" for `merge_pr` from this table:
+Each PR step has its own permission gate in `projects.yml`:
 
-   | "merge_method" | GitHub | GitLab | Azure DevOps |
-   |---|---|---|---|
-   | "merge" (default) | merge commit | merge commit | merge commit, no fast-forward |
-   | "squash" | accepted | accepted | accepted |
-   | "rebase" | accepted | rejected with an error, nothing merged | accepted |
+| call | permission | notes |
+|---|---|---|
+| `create_pr` | `pulls.create` | |
+| `update_pr`, `add_pr_comment`, `add_pr_review_comment`, `submit_pr_review` | `pulls.modify` | no separate review flag: reviewing is modifying the PR |
+| `merge_pr` | `pulls.merge` | defaults to `false`, no flat-form equivalent; the user must opt in explicitly |
 
-   On GitLab the choice is "merge" or "squash". No tool in this plugin
-   rebases a merge request; if the branch must be rebased, rebase it in
-   GitLab itself (or push a rebased branch), then merge with "merge".
-   On Azure DevOps a branch policy can replace the requested strategy on
-   the server: the merge succeeds with the policy's strategy, and
-   neither an error nor any field in the response says so. Do not report
-   the requested strategy as the one Azure DevOps used. If the merge
-   fails or the PR is not mergeable, classify the cause with "Pull
-   requests: why a merge is blocked".
-6. **After the merge.** Whether the ticket closed depends on the
-   provider and the base branch; on Azure DevOps you always close it
-   yourself with `update_ticket`. The steps are in "Pull requests:
-   closing the ticket on merge".
+Requesting a review, or receiving an approval, never merges anything;
+only `merge_pr` merges, and only with `pulls.merge` enabled.
 
-The pulls tool descriptions are authoritative wherever they state a
-fact this section repeats. The Azure DevOps column of the merge table
-is the exception: `merge_pr`'s description says nothing about Azure
-DevOps, so that column comes from the provider library this plugin
-pins.
+**Drafts.** Open a draft with `create_pr(draft=True)`; flip it with
+`update_pr(draft=True)` (to draft) or `update_pr(draft=False)` (ready
+for review). The mechanism differs per provider:
+
+- **GitHub** — GraphQL mutations.
+- **Azure DevOps** — set in the same PATCH as title/body.
+- **GitLab** — the server adds or removes a `Draft: ` title prefix on
+  GitLab's side, but the returned `title` has the prefix stripped. Read
+  draft state from the `draft` field, never from `title`, and never add
+  or remove the prefix in `title` yourself.
+
+A draft does not settle by waiting; it must be marked ready before it
+can merge (see the draft row in "Pull requests: why a merge is
+blocked").
+
+**Merging.** `merge_pr`'s `merge_method` is `merge` (default), `squash`
+or `rebase`; any other value returns `{"error": ...}` before any HTTP
+call.
+
+| provider | `merge` | `squash` | `rebase` |
+|---|---|---|---|
+| GitHub | merges | merges | merges (each subject to the methods the repository allows) |
+| GitLab | merges | merges | raises; does not merge |
+| Azure DevOps | merges | merges | merges, but a branch policy can override the strategy |
+
+On GitLab, rebase is a separate endpoint that does not merge, and this
+plugin exposes no rebase tool; merge with `merge` or `squash` instead.
+On Azure DevOps, a branch policy on the target can replace the strategy
+you passed without any error, and the tool response does not flag it —
+if the strategy matters, check the resulting commit history instead of
+trusting the argument.
+
+**Closing the ticket.** Which keyword to put in the PR body, and what to
+do after the merge, is in "Pull requests: closing the ticket on merge".
+
+The `create_pr` / `update_pr` / `submit_pr_review` / `merge_pr` tool
+descriptions state the same rules; if they ever differ from this
+section, the tool descriptions are authoritative.
 
 ## Pull requests: closing the ticket on merge
 
@@ -460,9 +460,8 @@ Resolve the values that do not name one cause:
   "preparing"; Azure DevOps `merge in progress`) means the provider has
   not settled. Re-fetch with `get_pr` a moment later instead of acting
   on it.
-- **Draft** does not settle by waiting: call `update_pr(draft=False)` to
-  mark the PR ready for review, then merge (see "Pull requests:
-  lifecycle").
+- **Draft** does not settle by waiting: the PR must be marked ready for
+  review before it can merge.
 
 `rejectedByPolicy`, which `submit_pr_review`'s description mentions, is
 Azure DevOps' raw `mergeStatus` value, a different field from
@@ -667,6 +666,13 @@ will resolve itself.
 - Assuming blocks or blocked_by exist on GitLab, or relates_to on
   GitHub — they do not; see the matrix under "Relations: direction
   matters".
+- Assigning someone (`assignees_add`) when their review verdict should
+  be tracked — request the review with `reviewers_add`; see "Pull
+  requests: lifecycle".
+- Reading GitLab draft state from `title` — the `Draft: ` prefix is
+  stripped there; read the `draft` field.
+- Expecting `merge_method="rebase"` to merge on GitLab — it raises; use
+  `merge` or `squash`.
 - Assuming a `Closes #<n>` or `AB#<n>` line closes an Azure DevOps work
   item on merge — `#<n>` only links there; call `update_ticket` after
   `merge_pr`. Likewise, assuming any provider closes the ticket when the
@@ -674,10 +680,6 @@ will resolve itself.
 - Polling `get_pr` for an Azure DevOps "mergeable_state", or reading
   GitHub "blocked" as a single cause — see "Pull requests: why a merge
   is blocked".
-- Assigning someone when you need their approval (request them as a
-  reviewer), reading a GitLab MR's draft state from its title (the
-  returned title never shows "Draft: "; read "draft"), or passing
-  "rebase" as "merge_method" on GitLab — see "Pull requests: lifecycle".
 - Treating a write error as evidence of a race with another concurrent
   call instead of reading what the provider actually said.
 - Constructing or guessing a `job_id` instead of reading it from a

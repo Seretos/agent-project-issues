@@ -1,4 +1,5 @@
 {
+  "disabledMcpjsonServers": ["project-issues"],
   "enabledPlugins": {
     "agent-project-issues@modular-software-factory": true,
     "agent-worktree@modular-software-factory": true,
